@@ -200,6 +200,14 @@ class QdrantPassageStore:
         }
 
     @_domain_errors
+    def count_passages(self) -> int:
+        if self._active_collection() is None:
+            return 0
+        return self._client.count(
+            _ALIAS, count_filter=_PASSAGE_FILTER, exact=True
+        ).count
+
+    @_domain_errors
     def retrieve(
         self,
         dense_vector: Sequence[float],

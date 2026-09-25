@@ -52,6 +52,12 @@ class ConfigDrift(DocgrepError):
     category = "config_drift"
 
 
+class IndexIncomplete(DocgrepError):
+    """The passage index has no valid completion marker."""
+
+    category = "index_incomplete"
+
+
 class IndexLockHeld(DocgrepError):
     """Another index operation owns the exclusive write lock."""
 

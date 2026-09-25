@@ -60,6 +60,7 @@ def test_payload_and_completion_round_trip(tmp_path: Path) -> None:
         "embedding_model": "fake",
         "embedding_dimension": 2,
     }
+    assert store.count_passages() == 1
     assert store.retrieve((1.0, 0.0), {7: 1.0}, 10)[0].passage == passage
     assert store.retrieve((1.0, 0.0), {7: 1.0}, 10)[0].source == source
 
@@ -110,6 +111,7 @@ def test_empty_completed_collection_is_distinct_from_missing_marker(
     store.recreate_collection(2)
     store.write_completion_metadata({"embedding_model": "fake"})
     assert store.read_completion_metadata() == {"embedding_model": "fake"}
+    assert store.count_passages() == 0
     assert store.retrieve((1.0, 0.0), {1: 1.0}, 10) == ()
 
 
