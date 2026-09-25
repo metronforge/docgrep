@@ -1,0 +1,14 @@
+# Private specifications: separate private repository
+specs/
+
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+data/
