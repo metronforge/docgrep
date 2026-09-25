@@ -7,7 +7,9 @@ name = "docgrep"
 version = "0.1.0"
 description = "Local document corpus search service"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "pydantic-settings>=2,<3",
+]
 
 [dependency-groups]
 dev = [
@@ -35,3 +37,7 @@ mypy_path = "src"
 testpaths = ["tests"]
 pythonpath = ["tests"]
 markers = ["gpu: requires real models or GPU hardware"]
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+version_variables = ["src/docgrep/__init__.py:__version__"]
