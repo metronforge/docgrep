@@ -175,6 +175,7 @@ class ManifestSourceRecord:
     source: Source
     status: str
     error: str | None = None
+    embedding_model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,3 +186,6 @@ class ManifestRunRecord:
     status: Literal["running", "completed", "aborted"]
     config: tuple[tuple[str, str | int | float], ...]
     totals: tuple[tuple[str, int], ...] = ()
+    kind: str = "build"
+    started_at: str | None = None
+    finished_at: str | None = None

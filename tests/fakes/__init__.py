@@ -96,9 +96,15 @@ class InMemoryManifest:
         return run_id
 
     def record_source(
-        self, source: Source, status: str, error: str | None = None
+        self,
+        source: Source,
+        status: str,
+        error: str | None = None,
+        embedding_model: str | None = None,
     ) -> None:
-        self._sources[source.path] = ManifestSourceRecord(source, status, error)
+        self._sources[source.path] = ManifestSourceRecord(
+            source, status, error, embedding_model
+        )
 
     def finish_run(
         self,
