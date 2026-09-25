@@ -56,3 +56,9 @@ class IndexLockHeld(DocgrepError):
     """Another index operation owns the exclusive write lock."""
 
     category = "index_lock_held"
+
+
+class BuildFailed(DocgrepError):
+    """An unexpected indexing failure aborted the current build."""
+
+    category = "build_failed"
