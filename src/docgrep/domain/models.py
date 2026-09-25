@@ -156,6 +156,7 @@ class ParsedDocument:
     source: Source
     sections: tuple[ParsedSection, ...]
     requires_ocr: bool = False
+    metadata: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

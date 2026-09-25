@@ -9,7 +9,10 @@ description = "Local document corpus search service"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "blake3>=1,<2",
+    "chardet>=5,<6",
+    "markdown-it-py>=3,<5",
     "pydantic-settings>=2,<3",
+    "pyyaml>=6,<7",
 ]
 
 [dependency-groups]
@@ -17,6 +20,7 @@ dev = [
     "mypy>=1.15,<2",
     "pytest>=8,<9",
     "ruff>=0.11,<1",
+    "types-pyyaml>=6,<7",
 ]
 
 [tool.hatch.build.targets.wheel]
