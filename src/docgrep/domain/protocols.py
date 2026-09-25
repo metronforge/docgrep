@@ -7,6 +7,7 @@ from docgrep.domain.models import (
     ManifestRunRecord,
     ManifestSourceRecord,
     ParsedDocument,
+    Passage,
     RankedPassage,
     RetrievalCandidate,
     Source,
@@ -17,6 +18,18 @@ class DocumentParser(Protocol):
     """Parse a source into verbatim, location-aware sections or raise an error."""
 
     def parse(self, source: Source) -> ParsedDocument: ...
+
+
+class TokenSpanTokenizer(Protocol):
+    """Return ordered character spans for countable tokens in exact input text."""
+
+    def token_spans(self, text: str) -> tuple[tuple[int, int], ...]: ...
+
+
+class Chunker(Protocol):
+    """Split parsed sections into deterministic, location-aware verbatim passages."""
+
+    def chunk(self, document: ParsedDocument) -> tuple[Passage, ...]: ...
 
 
 class EmbeddingProvider(Protocol):
