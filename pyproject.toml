@@ -33,4 +33,5 @@ mypy_path = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 markers = ["gpu: requires real models or GPU hardware"]

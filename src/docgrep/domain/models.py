@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
+from typing import Literal
 
 
 class FileType(StrEnum):
@@ -137,3 +138,49 @@ class SearchResult:
             raise ValueError("took_ms must be finite and non-negative")
         if self.rerank_skip_reason is not None and not self.rerank_skipped:
             raise ValueError("rerank_skip_reason requires rerank_skipped")
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSection:
+    """Verbatim text and location produced by a document parser."""
+
+    text: str
+    page_number: int | None = None
+    heading_path: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedDocument:
+    """Parser output before token-aware chunking."""
+
+    source: Source
+    sections: tuple[ParsedSection, ...]
+    requires_ocr: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalCandidate:
+    """An unnormalized first-stage hit with its dense similarity."""
+
+    passage: Passage
+    source: Source
+    dense_score: float
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestSourceRecord:
+    """A source and its most recent indexing outcome."""
+
+    source: Source
+    status: str
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestRunRecord:
+    """A single indexing run and its committed counters."""
+
+    run_id: str
+    status: Literal["running", "completed", "aborted"]
+    config: tuple[tuple[str, str | int | float], ...]
+    totals: tuple[tuple[str, int], ...] = ()
