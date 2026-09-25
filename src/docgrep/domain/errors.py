@@ -22,6 +22,12 @@ class ValidationError(DocgrepError):
     category = "validation_error"
 
 
+class ParseError(DocgrepError):
+    """A source cannot be decoded or parsed."""
+
+    category = "parse_error"
+
+
 class ModelUnavailable(DocgrepError):
     """An embedding or reranking model cannot run."""
 
