@@ -40,6 +40,12 @@ class StoreUnavailable(DocgrepError):
     category = "store_unavailable"
 
 
+class ManifestUnavailable(DocgrepError):
+    """The persistent indexing manifest cannot be used."""
+
+    category = "manifest_unavailable"
+
+
 class ConfigDrift(DocgrepError):
     """Runtime settings disagree with the indexed configuration."""
 

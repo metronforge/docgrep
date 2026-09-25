@@ -80,7 +80,11 @@ class ManifestWriter(Protocol):
     def start_run(self, config: Mapping[str, str | int | float]) -> str: ...
 
     def record_source(
-        self, source: Source, status: str, error: str | None = None
+        self,
+        source: Source,
+        status: str,
+        error: str | None = None,
+        embedding_model: str | None = None,
     ) -> None: ...
 
     def finish_run(
