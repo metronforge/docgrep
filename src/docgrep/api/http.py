@@ -20,8 +20,9 @@ from docgrep.domain.errors import (
     StoreUnavailable,
     ValidationError,
 )
-from docgrep.domain.models import FileType, RankedPassage
+from docgrep.domain.models import FileType, RankedPassage, SearchResult
 from docgrep.settings import Settings
+from docgrep.usecases.build_index import BuildSummary
 
 
 class SearchRequest(BaseModel):
@@ -94,6 +95,20 @@ class SearchResponse(BaseModel):
     rerank_skip_reason: str | None
     hint: str | None
 
+    @classmethod
+    def from_domain(cls, result: SearchResult) -> "SearchResponse":
+        return cls(
+            results=tuple(
+                RankedPassageResponse.from_domain(item) for item in result.results
+            ),
+            total_hits=result.total_hits,
+            took_ms=result.took_ms,
+            applied_config=dict(result.applied_config),
+            rerank_skipped=result.rerank_skipped,
+            rerank_skip_reason=result.rerank_skip_reason,
+            hint=result.hint,
+        )
+
 
 class BuildFailureResponse(BaseModel):
     """A source that failed during a completed build."""
@@ -114,6 +129,19 @@ class BuildResponse(BaseModel):
     failed: int
     elapsed_seconds: float
     failures: tuple[BuildFailureResponse, ...]
+
+    @classmethod
+    def from_domain(cls, summary: BuildSummary) -> "BuildResponse":
+        return cls(
+            run_id=summary.run_id,
+            indexed=summary.indexed,
+            skipped=summary.skipped,
+            failed=summary.failed,
+            elapsed_seconds=summary.elapsed_seconds,
+            failures=tuple(
+                BuildFailureResponse.model_validate(item) for item in summary.failures
+            ),
+        )
 
 
 def _error_status(error: DocgrepError) -> int:
@@ -180,31 +208,12 @@ def create_app(
     @app.post("/search", response_model=SearchResponse)
     def search(request: SearchRequest) -> SearchResponse:
         result = operations().search.run(request.query, top_n=request.top_n)
-        return SearchResponse(
-            results=tuple(
-                RankedPassageResponse.from_domain(item) for item in result.results
-            ),
-            total_hits=result.total_hits,
-            took_ms=result.took_ms,
-            applied_config=dict(result.applied_config),
-            rerank_skipped=result.rerank_skipped,
-            rerank_skip_reason=result.rerank_skip_reason,
-            hint=result.hint,
-        )
+        return SearchResponse.from_domain(result)
 
     @app.post("/index/build", response_model=BuildResponse)
     def build() -> BuildResponse:
         summary = operations().build.run()
-        return BuildResponse(
-            run_id=summary.run_id,
-            indexed=summary.indexed,
-            skipped=summary.skipped,
-            failed=summary.failed,
-            elapsed_seconds=summary.elapsed_seconds,
-            failures=tuple(
-                BuildFailureResponse.model_validate(item) for item in summary.failures
-            ),
-        )
+        return BuildResponse.from_domain(summary)
 
     return app
 
