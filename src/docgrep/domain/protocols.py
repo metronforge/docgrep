@@ -32,6 +32,12 @@ class Chunker(Protocol):
     def chunk(self, document: ParsedDocument) -> tuple[Passage, ...]: ...
 
 
+class CorpusEnumerator(Protocol):
+    """Return source records in deterministic order, including unsupported files."""
+
+    def enumerate(self) -> tuple[Source, ...]: ...
+
+
 class EmbeddingProvider(Protocol):
     """Embed a batch in input order with a fixed vector dimension."""
 
@@ -42,6 +48,32 @@ class EmbeddingProvider(Protocol):
     def dimension(self) -> int: ...
 
     def embed(self, texts: Sequence[str]) -> tuple[tuple[float, ...], ...]: ...
+
+
+class SparseEncoder(Protocol):
+    """Encode document or query text into stable sparse term weights."""
+
+    def encode(self, text: str) -> Mapping[int, float]: ...
+
+
+class PassageWriter(Protocol):
+    """Replace an index, persist passages, and mark a build complete last."""
+
+    def recreate_collection(self, dimension: int) -> None: ...
+
+    def upsert(
+        self,
+        passage: Passage,
+        source: Source,
+        dense_vector: Sequence[float],
+        sparse_vector: Mapping[int, float],
+    ) -> None: ...
+
+    def write_completion_metadata(
+        self, metadata: Mapping[str, str | int | float]
+    ) -> None: ...
+
+    def clear_completion_metadata(self) -> None: ...
 
 
 class Reranker(Protocol):

@@ -22,6 +22,12 @@ class InMemoryPassageStore:
         ] = {}
         self._completion: dict[str, str | int | float] | None = None
 
+    def recreate_collection(self, dimension: int) -> None:
+        if dimension <= 0:
+            raise ValueError("dimension must be positive")
+        self._items.clear()
+        self._completion = None
+
     def upsert(
         self,
         passage: Passage,
@@ -73,6 +79,9 @@ class InMemoryPassageStore:
         self, metadata: Mapping[str, str | int | float]
     ) -> None:
         self._completion = dict(metadata)
+
+    def clear_completion_metadata(self) -> None:
+        self._completion = None
 
 
 class InMemoryManifest:
