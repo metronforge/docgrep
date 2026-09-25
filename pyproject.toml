@@ -10,6 +10,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "blake3>=1,<2",
     "chardet>=5,<6",
+    "fastapi>=0.115,<1",
     "markdown-it-py>=3,<5",
     "pydantic-settings>=2,<3",
     "pymupdf>=1.24,<2",
@@ -20,6 +21,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "httpx>=0.27,<1",
     "mypy>=1.15,<2",
     "pytest>=8,<9",
     "ruff>=0.11,<1",
