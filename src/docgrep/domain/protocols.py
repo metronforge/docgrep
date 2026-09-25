@@ -97,6 +97,8 @@ class PassageRetriever(Protocol):
 
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None: ...
 
+    def count_passages(self) -> int: ...
+
 
 class ManifestReader(Protocol):
     """Read committed source outcomes and the most recent indexing run."""

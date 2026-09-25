@@ -75,6 +75,9 @@ class InMemoryPassageStore:
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None:
         return dict(self._completion) if self._completion is not None else None
 
+    def count_passages(self) -> int:
+        return len(self._items)
+
     def write_completion_metadata(
         self, metadata: Mapping[str, str | int | float]
     ) -> None:
