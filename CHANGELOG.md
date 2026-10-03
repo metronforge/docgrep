@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-10-03)
+
+### Documentation
+
+- Add ADR-0012 on durable run state
+  ([`2cfc2be`](https://github.com/metronforge/docgrep/commit/2cfc2bef9133491316aaffa89e0d21f1bd0cb6fd))
+
+### Features
+
+- **adapters**: Keep durable run state and clean up staging collections
+  ([`7e7649e`](https://github.com/metronforge/docgrep/commit/7e7649e7f343cfc97882cbe597529a56da2475e2))
+
+- **adapters**: Run the reranker in half precision on CUDA
+  ([`4c6d87d`](https://github.com/metronforge/docgrep/commit/4c6d87d158aceeccf0f02c34805171411cb4ef00))
+
+
 ## v1.2.0 (2026-10-03)
 
 ### Build System
