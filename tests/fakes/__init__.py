@@ -64,6 +64,13 @@ class InMemoryPassageStore:
             dict(sparse_vector),
         )
 
+    def upsert_batch(
+        self,
+        items: Sequence[tuple[Passage, Source, Sequence[float], Mapping[int, float]]],
+    ) -> None:
+        for passage, source, dense_vector, sparse_vector in items:
+            self.upsert(passage, source, dense_vector, sparse_vector)
+
     def retrieve(
         self,
         dense_vector: Sequence[float],

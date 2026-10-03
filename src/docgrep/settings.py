@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     chunk_size: int = Field(default=512, gt=0)
     chunk_overlap: int = Field(default=64, ge=0)
+    upsert_batch_size: int = Field(default=256, gt=0)
     top_k: int = Field(default=100, gt=0)
     top_n: int = Field(default=10, gt=0)
     top_n_max: int = Field(default=50, gt=0)

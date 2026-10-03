@@ -75,6 +75,13 @@ class PassageWriter(Protocol):
         sparse_vector: Mapping[int, float],
     ) -> None: ...
 
+    def upsert_batch(
+        self,
+        items: Sequence[tuple[Passage, Source, Sequence[float], Mapping[int, float]]],
+    ) -> None:
+        """Write several passages at once with the same result as one upsert each."""
+        ...
+
     def write_completion_metadata(
         self, metadata: Mapping[str, str | int | float]
     ) -> None: ...

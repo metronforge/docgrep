@@ -66,11 +66,14 @@ class BuildIndex:
         config: Mapping[str, str | int | float],
         docgrep_version: str,
         batch_size: int = 32,
+        upsert_batch_size: int = 256,
         sleep: Callable[[float], None] = time.sleep,
         log_context: Mapping[str, str | int | float] | None = None,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if upsert_batch_size <= 0:
+            raise ValueError("upsert_batch_size must be positive")
         self.lock = lock
         self.enumerator = enumerator
         self.parsers = parsers
@@ -82,6 +85,7 @@ class BuildIndex:
         self.config = dict(config)
         self.docgrep_version = docgrep_version
         self.batch_size = batch_size
+        self.upsert_batch_size = upsert_batch_size
         self.sleep = sleep
         self.log_context = dict(log_context or {})
 
@@ -144,14 +148,14 @@ class BuildIndex:
                     document.source, "embedding_error", error, run_id
                 )
             all_vectors.extend(vectors)
-        for passage, vector in zip(passages, all_vectors, strict=True):
-            sparse = self.sparse_encoder.encode(passage.text)
+        items = [
+            (passage, document.source, vector, self.sparse_encoder.encode(passage.text))
+            for passage, vector in zip(passages, all_vectors, strict=True)
+        ]
+        for start in range(0, len(items), self.upsert_batch_size):
+            group = items[start : start + self.upsert_batch_size]
             try:
-                self._retry(
-                    lambda: self.passage_writer.upsert(
-                        passage, document.source, vector, sparse
-                    )
-                )
+                self._retry(lambda: self.passage_writer.upsert_batch(group))
             except Exception as error:
                 raise StoreUnavailable(
                     "Passage upsert failed",
