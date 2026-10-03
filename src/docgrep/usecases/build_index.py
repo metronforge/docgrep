@@ -1,6 +1,7 @@
 """Build an index through domain ports while preserving per-source outcomes."""
 
 import logging
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -48,6 +49,11 @@ class BuildSummary:
     failed: int
     elapsed_seconds: float
     failures: tuple[BuildFailure, ...]
+    cancelled: bool = False
+
+
+class _Cancelled(Exception):
+    """Control flow: a cancel was requested and the current batch is done."""
 
 
 class _Progress:
@@ -164,6 +170,25 @@ class BuildIndex:
         self.progress_every_sources = progress_every_sources
         self.progress_every_seconds = progress_every_seconds
         self.log_context = dict(log_context or {})
+        self._cancel_event = threading.Event()
+        self._cancel_persisted = False
+
+    def request_cancel(self) -> None:
+        """Ask the running build to stop after its current batch.
+
+        Safe to call from a signal handler: it only sets a flag. The build
+        persists the request itself, so other processes see it too.
+        """
+        self._cancel_event.set()
+
+    def _check_cancel(self, run_id: str) -> None:
+        if self._cancel_event.is_set():
+            if not self._cancel_persisted:
+                self.manifest.request_cancel(run_id)
+                self._cancel_persisted = True
+            raise _Cancelled
+        if self.manifest.cancel_requested_at(run_id) is not None:
+            raise _Cancelled
 
     def _retry(self, operation: Callable[[], _T]) -> _T:
         for attempt in range(3):
@@ -235,6 +260,9 @@ class BuildIndex:
 
         all_vectors: list[tuple[float, ...]] = []
         for start in range(0, len(passages), self.batch_size):
+            if start:
+                # Between batches of one source; nothing of it is journaled yet.
+                self._check_cancel(run_id)
             batch = passages[start : start + self.batch_size]
             try:
                 vectors = self._retry(
@@ -285,6 +313,7 @@ class BuildIndex:
                 "index_build_started", extra={"run_id": run_id, **self.log_context}
             )
             swapped = False
+            cancelled = False
             try:
                 self._drop_orphaned_staging_collections()
                 sources = self.enumerator.enumerate()
@@ -302,12 +331,14 @@ class BuildIndex:
                     every_seconds=self.progress_every_seconds,
                 )
                 for source in sources:
+                    self._check_cancel(run_id)
                     outcome, failure, written = self._index_source(source, run_id)
                     totals[outcome] += 1
                     if failure is not None:
                         failures.append(failure)
                     progress.advance(written, totals["failed"])
                 progress.finish(totals["failed"])
+                self._check_cancel(run_id)
                 metadata = dict(self.config)
                 metadata.update(
                     embedding_model=self.embedder.model_name,
@@ -327,6 +358,9 @@ class BuildIndex:
                 swapped = True
                 self.manifest.commit_run(run_id)
                 self.manifest.finish_run(run_id, "completed", totals)
+            except _Cancelled:
+                self.manifest.finish_run(run_id, "cancelled", totals)
+                cancelled = True
             except Exception as error:
                 # Before the swap the staging collection and the journal stay,
                 # so the run can be resumed; the live index and the committed
@@ -339,9 +373,12 @@ class BuildIndex:
                 raise BuildFailed(
                     "Index build aborted", details={"reason": str(error)}
                 ) from error
+            finally:
+                self._cancel_event.clear()
+                self._cancel_persisted = False
         elapsed = self.clock() - started
         _LOG.info(
-            "index_build_finished",
+            "index_build_cancelled" if cancelled else "index_build_finished",
             extra={
                 "run_id": run_id,
                 "indexed": totals["indexed"],
@@ -357,4 +394,5 @@ class BuildIndex:
             totals["failed"],
             elapsed,
             tuple(failures),
+            cancelled=cancelled,
         )

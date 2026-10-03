@@ -210,6 +210,27 @@ class SQLiteManifest:
             if cursor.rowcount != 1:
                 raise ValueError("unknown run_id")
 
+    def request_cancel(self, run_id: str) -> str:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE runs SET cancel_requested_at=? "
+                "WHERE id=? AND cancel_requested_at IS NULL",
+                (_now(), run_id),
+            )
+            row = connection.execute(
+                "SELECT cancel_requested_at FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+        if row is None:
+            raise ValueError("unknown run_id")
+        return cast(str, row["cancel_requested_at"])
+
+    def cancel_requested_at(self, run_id: str) -> str | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT cancel_requested_at FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+        return None if row is None else cast(str | None, row["cancel_requested_at"])
+
     def mark_swapped(self, run_id: str) -> None:
         with self._connection() as connection:
             cursor = connection.execute(

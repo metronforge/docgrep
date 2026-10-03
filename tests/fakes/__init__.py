@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Literal
 
 from docgrep.domain.models import (
@@ -147,6 +148,15 @@ class InMemoryManifest:
 
     def latest_run(self) -> ManifestRunRecord | None:
         return self._runs[-1] if self._runs else None
+
+    def request_cancel(self, run_id: str) -> str:
+        run = self._find(run_id)
+        if run.cancel_requested_at is None:
+            self._update_run(run_id, cancel_requested_at=datetime.now(UTC).isoformat())
+        return self._find(run_id).cancel_requested_at or ""
+
+    def cancel_requested_at(self, run_id: str) -> str | None:
+        return self._find(run_id).cancel_requested_at
 
     def set_total_sources(self, run_id: str, total: int) -> None:
         self._update_run(run_id, total_sources=total)

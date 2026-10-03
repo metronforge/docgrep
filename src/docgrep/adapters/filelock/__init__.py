@@ -36,16 +36,31 @@ class FileIndexLock:
         return handle
 
     def is_held(self) -> bool:
-        """Try the lock without waiting and release it at once."""
+        """Try the lock without waiting and release it at once.
+
+        Creates nothing: a lock file that does not exist is not held.
+        """
         try:
-            handle = self._acquire()
-        except IndexLockHeld:
-            return True
+            handle = self.path.open("rb")
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise StoreUnavailable(
+                "Cannot access the index lock", details={"path": str(self.path)}
+            ) from error
         try:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            except OSError as error:
+                raise StoreUnavailable(
+                    "Cannot access the index lock", details={"path": str(self.path)}
+                ) from error
             fcntl.flock(handle, fcntl.LOCK_UN)
+            return False
         finally:
             handle.close()
-        return False
 
     @contextmanager
     def hold(self) -> Iterator[None]:

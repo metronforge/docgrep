@@ -180,6 +180,10 @@ class ManifestReader(Protocol):
         """The journal of one run: every source outcome it recorded, by path."""
         ...
 
+    def cancel_requested_at(self, run_id: str) -> str | None:
+        """When a cancel was requested for the run, or None."""
+        ...
+
 
 class ManifestWriter(Protocol):
     """Record an indexing run and per-source outcomes durably at each call."""
@@ -209,6 +213,13 @@ class ManifestWriter(Protocol):
 
     def set_total_sources(self, run_id: str, total: int) -> None:
         """Remember how many sources the run plans to cover."""
+        ...
+
+    def request_cancel(self, run_id: str) -> str:
+        """Persist a cancel request and return when it was made.
+
+        Idempotent: a second request returns the time of the first.
+        """
         ...
 
     def mark_swapped(self, run_id: str) -> None:
