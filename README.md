@@ -69,6 +69,8 @@ curl -X POST http://127.0.0.1:8000/search \
 
 `POST /index/build` triggers the same full rebuild as `docgrep index`. `GET /health` and `GET /info` provide basic service information.
 
+When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
+
 ## Tests
 
 ```sh
