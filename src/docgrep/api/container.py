@@ -50,7 +50,7 @@ class SearchOperation(Protocol):
 class BuildOperation(Protocol):
     """Run one full index build."""
 
-    def run(self, *, refuse_resumable: bool = False) -> BuildSummary: ...
+    def run(self, *, refuse_resumable: bool | None = None) -> BuildSummary: ...
 
     def resume(self, *, retry_failed: bool = True) -> BuildSummary: ...
 
@@ -214,8 +214,14 @@ def create_cancel(settings: Settings) -> CancelIndex:
     )
 
 
-def create_container(settings: Settings) -> Services:
-    """Wire selected models to local Qdrant, SQLite, parsers, and use cases."""
+def create_container(
+    settings: Settings, *, refuse_resumable_by_default: bool = False
+) -> Services:
+    """Wire selected models to local Qdrant, SQLite, parsers, and use cases.
+
+    With ``refuse_resumable_by_default`` a build that is not told otherwise
+    refuses to discard a resumable run.
+    """
     configure_logging(settings.log_level)
     embedder: EmbeddingProvider
     reranker: Reranker
@@ -270,6 +276,7 @@ def create_container(settings: Settings) -> Services:
             config=config,
             docgrep_version=__version__,
             upsert_batch_size=settings.upsert_batch_size,
+            refuse_resumable_by_default=refuse_resumable_by_default,
             log_context={
                 "corpus_root": settings.corpus_root.resolve().name,
                 "backend": settings.backend,

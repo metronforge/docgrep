@@ -51,9 +51,13 @@ def settings_for(
     )
 
 
-def new_services(settings: Settings) -> Services:
+def new_services(
+    settings: Settings, *, refuse_resumable_by_default: bool = False
+) -> Services:
     """A fresh container, as a new process would have; no sleeping on retries."""
-    services = create_container(settings)
+    services = create_container(
+        settings, refuse_resumable_by_default=refuse_resumable_by_default
+    )
     build: Any = services.build
     build.sleep = lambda seconds: None
     return services

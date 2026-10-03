@@ -191,6 +191,7 @@ class BuildIndex:
         upsert_batch_size: int = 256,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        refuse_resumable_by_default: bool = False,
         progress_every_sources: int = 25,
         progress_every_seconds: float = 60.0,
         log_context: Mapping[str, str | int | float] | None = None,
@@ -217,6 +218,7 @@ class BuildIndex:
         self.upsert_batch_size = upsert_batch_size
         self.sleep = sleep
         self.clock = clock
+        self.refuse_resumable_by_default = refuse_resumable_by_default
         self.progress_every_sources = progress_every_sources
         self.progress_every_seconds = progress_every_seconds
         self.log_context = dict(log_context or {})
@@ -409,12 +411,15 @@ class BuildIndex:
                 details={"run_id": latest.run_id, "state": state},
             )
 
-    def run(self, *, refuse_resumable: bool = False) -> BuildSummary:
+    def run(self, *, refuse_resumable: bool | None = None) -> BuildSummary:
         """Run a full rebuild, marking completion only after all sources finish.
 
         With ``refuse_resumable`` a latest run that could be resumed is not
-        discarded: the call raises ``ResumeAvailable`` instead.
+        discarded: the call raises ``ResumeAvailable`` instead. Left unset, the
+        instance default applies.
         """
+        if refuse_resumable is None:
+            refuse_resumable = self.refuse_resumable_by_default
         started = self.clock()
         with self.lock.hold():
             self._finish_swapped_run()
