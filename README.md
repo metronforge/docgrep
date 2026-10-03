@@ -25,6 +25,15 @@ uv run docgrep index
 
 Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOCGREP_CHUNK_SIZE` and `DOCGREP_CHUNK_OVERLAP`, use the same `DOCGREP_` prefix. Keep the data directory outside the corpus so index files are not enumerated as documents.
 
+## Include and exclude patterns
+
+`DOCGREP_INCLUDE_GLOBS` and `DOCGREP_EXCLUDE_GLOBS` take JSON arrays of patterns that are matched against paths relative to the corpus root, using `/` as the separator. An excluded path is never indexed, even if it is included.
+
+- `*`, `?` and `[...]` match within one path segment and never cross `/`.
+- `**` as a whole segment matches zero or more segments; as the last segment it matches everything beneath a directory.
+- A pattern without `/` (for example `*.tmp`) is compared with the file name at any depth.
+- A pattern containing `/` (for example `notes/private/**`) is anchored at the corpus root; use a leading `**/` to match at any depth.
+
 ## Search
 
 ```sh

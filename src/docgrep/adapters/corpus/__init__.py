@@ -2,7 +2,8 @@
 
 import os
 from collections.abc import Iterator, Sequence
-from pathlib import Path, PurePosixPath
+from fnmatch import fnmatchcase
+from pathlib import Path
 
 from blake3 import blake3
 
@@ -21,13 +22,39 @@ _FILE_TYPES = {
 }
 
 
+def _match_segments(pattern: Sequence[str], parts: Sequence[str]) -> bool:
+    if not pattern:
+        return not parts
+    head = pattern[0]
+    if head == "**":
+        rest = pattern[1:]
+        if not rest:
+            return len(parts) >= 1
+        return any(
+            _match_segments(rest, parts[start:]) for start in range(len(parts) + 1)
+        )
+    if not parts:
+        return False
+    return fnmatchcase(parts[0], head) and _match_segments(pattern[1:], parts[1:])
+
+
 def _matches(path: str, patterns: Sequence[str]) -> bool:
-    relative = PurePosixPath(path)
-    return any(
-        relative.match(pattern)
-        or (pattern.startswith("**/") and relative.match(pattern[3:]))
-        for pattern in patterns
-    )
+    """Return whether a POSIX-relative path matches any glob pattern.
+
+    Matching works on whole path segments. ``*``, ``?`` and ``[...]`` never
+    cross ``/``; a ``**`` segment matches zero or more segments, except as the
+    last segment, where it matches everything beneath a directory (at least one
+    segment). A pattern without ``/`` is compared with the basename at any
+    depth. A pattern containing ``/`` is anchored at the corpus root.
+    """
+    parts = tuple(path.split("/"))
+    for pattern in patterns:
+        if "/" not in pattern:
+            if fnmatchcase(parts[-1], pattern):
+                return True
+        elif _match_segments(tuple(pattern.split("/")), parts):
+            return True
+    return False
 
 
 def _files(root: Path) -> Iterator[Path]:
