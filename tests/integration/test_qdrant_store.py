@@ -173,3 +173,49 @@ def test_only_the_local_index_notice_is_suppressed() -> None:
         warnings.warn(notice, UserWarning, stacklevel=1)
 
     assert [str(item.message) for item in caught] == [large, "something else", notice]
+
+
+def _hybrid_store(tmp_path: Path) -> QdrantPassageStore:
+    """Three passages: two close to the query vector, one lexical match only."""
+    source = _source()
+    store = QdrantPassageStore(tmp_path / "qdrant")
+    store.recreate_collection(2)
+    vectors = {
+        "near one": (1.0, 0.0),
+        "near two": (0.9, 0.435889894),
+        "zebra lexical": (0.6, 0.8),
+    }
+    for offset, (text, vector) in enumerate(vectors.items()):
+        sparse = {777: 1.0} if "zebra" in text else {offset + 1: 1.0}
+        store.upsert(_passage(source, text, offset), source, vector, sparse)
+    store.write_completion_metadata({"embedding_model": "m"})
+    return store
+
+
+def test_sparse_only_hit_carries_its_real_dense_score(tmp_path: Path) -> None:
+    store = _hybrid_store(tmp_path)
+
+    candidates = store.retrieve((1.0, 0.0), {777: 1.0}, 2)
+
+    by_text = {item.passage.text: item for item in candidates}
+    assert "zebra lexical" in by_text, "the lexical match must be recalled"
+    assert "near two" not in by_text, "it must be outside the dense top 2"
+    assert by_text["zebra lexical"].dense_score == pytest.approx(0.6, abs=1e-6)
+    assert by_text["near one"].dense_score == pytest.approx(1.0, abs=1e-6)
+
+
+def test_candidates_come_back_in_first_stage_order_with_ranks(tmp_path: Path) -> None:
+    store = _hybrid_store(tmp_path)
+
+    candidates = store.retrieve((1.0, 0.0), {777: 1.0}, 3)
+
+    assert [item.stage1_rank for item in candidates] == [0, 1, 2]
+    assert {item.passage.text for item in candidates} == {
+        "near one",
+        "near two",
+        "zebra lexical",
+    }
+    # The fused list is not re-sorted by dense similarity.
+    dense_only = sorted(candidates, key=lambda item: -item.dense_score)
+    assert [item.passage.text for item in dense_only][0] == "near one"
+    assert candidates[0].passage.text in {"near one", "zebra lexical"}

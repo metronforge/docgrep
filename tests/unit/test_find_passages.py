@@ -239,3 +239,69 @@ def test_corrupt_candidate_is_excluded_and_logged(
     assert [hit.passage.passage_id for hit in result.results] == ["good"]
     assert result.total_hits == 1
     assert "bad" in caplog.text
+
+
+def _ranked(
+    passage_id: str, rank: int | None, dense_score: float
+) -> RetrievalCandidate:
+    candidate = _candidate(passage_id, passage_id, dense_score)
+    return RetrievalCandidate(
+        candidate.passage, candidate.source, dense_score, stage1_rank=rank
+    )
+
+
+def test_degraded_mode_follows_the_first_stage_order() -> None:
+    candidates = (
+        _ranked("lexical-only", 0, 0.05),
+        _ranked("dense-favorite", 1, 0.9),
+        _ranked("middle", 2, 0.4),
+    )
+    # Hand the candidates over out of rank order: the rank decides, not the
+    # position and not the dense score.
+    shuffled = (candidates[2], candidates[0], candidates[1])
+    result = _finder(
+        StaticRetriever(shuffled, _metadata()), reranker=FailingReranker()
+    ).run("valid", top_n=3)
+
+    assert result.rerank_skipped
+    assert [hit.passage.passage_id for hit in result.results] == [
+        "lexical-only",
+        "dense-favorite",
+        "middle",
+    ]
+    assert all(hit.reranker_score is None for hit in result.results)
+
+
+def test_degraded_mode_without_ranks_keeps_the_dense_order() -> None:
+    candidates = (_ranked("low", None, 0.1), _ranked("high", None, 0.8))
+    result = _finder(
+        StaticRetriever(candidates, _metadata()), reranker=FailingReranker()
+    ).run("valid", top_n=2)
+
+    assert [hit.passage.passage_id for hit in result.results] == ["high", "low"]
+
+
+def test_reranked_order_ignores_first_stage_ranks() -> None:
+    candidates = (
+        _ranked("a", 0, 0.9),
+        _ranked("b", 1, 0.1),
+    )
+    first = _finder(
+        StaticRetriever(candidates, _metadata()), reranker=EqualReranker()
+    ).run("valid", top_n=2)
+    without_ranks = _finder(
+        StaticRetriever(
+            (_ranked("a", None, 0.9), _ranked("b", None, 0.1)), _metadata()
+        ),
+        reranker=EqualReranker(),
+    ).run("valid", top_n=2)
+
+    assert [hit.passage.passage_id for hit in first.results] == ["a", "b"]
+    assert [(h.passage.passage_id, h.score, h.dense_score) for h in first.results] == [
+        (h.passage.passage_id, h.score, h.dense_score) for h in without_ranks.results
+    ]
+
+
+def test_negative_stage1_rank_is_rejected() -> None:
+    with pytest.raises(ValueError, match="stage1_rank"):
+        _ranked("x", -1, 0.5)
