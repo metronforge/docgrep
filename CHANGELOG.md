@@ -2,6 +2,26 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-10-03)
+
+### Features
+
+- **cli**: Add a read-only status command
+  ([`427f8b9`](https://github.com/metronforge/docgrep/commit/427f8b906f626cf22acbb4e44ba18e315821388b))
+
+- **cli**: Cancel a running index build cooperatively
+  ([`d64359f`](https://github.com/metronforge/docgrep/commit/d64359f74d3043d72e9f09db3b18a74447a0df55))
+
+- **cli**: Resume an interrupted index build
+  ([`f201c86`](https://github.com/metronforge/docgrep/commit/f201c86b5a50c7a3b5e94d8a396e4b0d7c0da8df))
+
+- **usecases**: Add a persisted run state machine and keep staging on abort
+  ([`6fe0095`](https://github.com/metronforge/docgrep/commit/6fe009554a24871b3a291911848630aec50aef5b))
+
+- **usecases**: Log build progress with counters and an ETA
+  ([`d2867e5`](https://github.com/metronforge/docgrep/commit/d2867e5eb019697a9a5df061f938e315b979214d))
+
+
 ## v1.4.0 (2026-10-03)
 
 ### Features
