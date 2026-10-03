@@ -32,7 +32,13 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, ge=1, le=65535)
     # Extra host names accepted in the Host and Origin headers, as a
     # comma-separated list in the environment (for container deployments).
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     allowed_hosts: Annotated[tuple[str, ...], NoDecode] = ()
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def normalize_log_level(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
 
     @field_validator("allowed_hosts", mode="before")
     @classmethod

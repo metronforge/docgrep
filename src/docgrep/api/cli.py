@@ -8,6 +8,7 @@ from pydantic import ValidationError as SettingsValidationError
 
 from docgrep.api.container import Services, create_container
 from docgrep.api.http import SearchResponse, create_app
+from docgrep.api.log_config import configure_logging
 from docgrep.domain.errors import DocgrepError
 from docgrep.settings import Settings
 
@@ -43,6 +44,7 @@ def main(
     args = _parser().parse_args(argv)
     try:
         settings = Settings()
+        configure_logging(settings.log_level)
         if args.command == "serve":
             import uvicorn
 
