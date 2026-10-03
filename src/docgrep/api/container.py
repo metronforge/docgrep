@@ -90,7 +90,11 @@ def create_container(settings: Settings) -> Services:
         tokenizer = _LazyModelTokenizer(real_embedder)
 
     sparse = BM25SparseEncoder()
-    store = QdrantPassageStore(settings.data_dir / "qdrant")
+    store = (
+        QdrantPassageStore(url=settings.qdrant_url)
+        if settings.qdrant_url
+        else QdrantPassageStore(settings.data_dir / "qdrant")
+    )
     manifest = SQLiteManifest(settings.data_dir)
     parsers: Mapping[FileType, DocumentParser] = {
         FileType.TXT: TextParser(settings.corpus_root),
