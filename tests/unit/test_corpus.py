@@ -105,3 +105,21 @@ def test_invalid_corpus_root_raises_structured_error(
 
     assert raised.value.category == "validation_error"
     assert raised.value.details["path"] == str(root)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="the superuser can read any directory")
+@pytest.mark.parametrize("mode", [0o000, 0o044, 0o444, 0o200])
+def test_corpus_root_without_real_access_is_rejected(tmp_path: Path, mode: int) -> None:
+    root = tmp_path / "corpus"
+    root.mkdir()
+    root.chmod(mode)
+
+    try:
+        with pytest.raises(ValidationError) as raised:
+            enumerate_corpus(root)
+    finally:
+        root.chmod(0o755)
+
+    assert raised.value.category == "validation_error"
+    assert str(raised.value) == "corpus is not accessible"
+    assert raised.value.details["reason"] == "corpus root is not a readable directory"
