@@ -51,3 +51,23 @@ def config_drift(
     return tuple(
         key for key in VECTOR_CONFIG_KEYS if recorded.get(key) != runtime.get(key)
     )
+
+
+def swap_already_happened(
+    run: ManifestRunRecord, *, journal_rows: int, staging_published: bool
+) -> bool:
+    """Whether an unfinished run had in fact published its index.
+
+    The alias swap is only reached after every enumerated source was journaled.
+    So a running (interrupted) or aborted run whose recorded staging collection
+    is already the published one died between the swap and the write of its
+    ``swapped`` status, provided the journal covers the planned sources. A run
+    without a recorded plan (older versions) cannot be checked against one; it
+    is accepted when its journal is not empty, so that an empty journal is
+    never committed over the sources of the index that was replaced.
+    """
+    if run.status not in ("running", "aborted") or not staging_published:
+        return False
+    if run.total_sources is None:
+        return journal_rows > 0
+    return journal_rows >= run.total_sources

@@ -40,6 +40,7 @@ from docgrep.domain.run_state import (
     VECTOR_CONFIG_KEYS,
     config_drift,
     run_state,
+    swap_already_happened,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -190,6 +191,7 @@ class BuildIndex:
         upsert_batch_size: int = 256,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        refuse_resumable_by_default: bool = False,
         progress_every_sources: int = 25,
         progress_every_seconds: float = 60.0,
         log_context: Mapping[str, str | int | float] | None = None,
@@ -216,6 +218,7 @@ class BuildIndex:
         self.upsert_batch_size = upsert_batch_size
         self.sleep = sleep
         self.clock = clock
+        self.refuse_resumable_by_default = refuse_resumable_by_default
         self.progress_every_sources = progress_every_sources
         self.progress_every_seconds = progress_every_seconds
         self.log_context = dict(log_context or {})
@@ -262,13 +265,31 @@ class BuildIndex:
         return BuildFailure(source.path, reason, str(error))
 
     def _finish_swapped_run(self) -> ManifestRunRecord | None:
-        """Finish a run whose process died after publishing but before committing.
+        """Finish a run that published its index but did not commit its sources.
 
-        Called with the lock held, so a run that is still swapped is dead.
+        Called with the lock held, so such a run is dead. It is either stored as
+        swapped or, when the process died between the alias swap and the write
+        of that status, still running or aborted with its staging collection
+        already published.
         """
         latest = self.manifest.latest_run()
-        if latest is None or latest.status != "swapped":
+        if latest is None:
             return None
+        reason = "swapped"
+        if latest.status != "swapped":
+            if latest.status not in ("running", "aborted"):
+                return None
+            if latest.staging_collection is None:
+                return None
+            info = self.passage_writer.staging_info(latest.staging_collection)
+            if info is None or not swap_already_happened(
+                latest,
+                journal_rows=len(self.manifest.run_sources(latest.run_id)),
+                staging_published=info.published,
+            ):
+                return None
+            self.manifest.mark_swapped(latest.run_id)
+            reason = "alias_target_reached"
         totals = {"indexed": 0, "skipped": 0, "failed": 0}
         for record in self.manifest.run_sources(latest.run_id):
             totals[record.status.split(":")[0]] += 1
@@ -276,7 +297,12 @@ class BuildIndex:
         self.manifest.finish_run(latest.run_id, "completed", totals)
         _LOG.warning(
             "run_recovered",
-            extra={"run_id": latest.run_id, "previous_status": "swapped", **totals},
+            extra={
+                "run_id": latest.run_id,
+                "previous_status": latest.status,
+                "reason": reason,
+                **totals,
+            },
         )
         return latest
 
@@ -385,12 +411,15 @@ class BuildIndex:
                 details={"run_id": latest.run_id, "state": state},
             )
 
-    def run(self, *, refuse_resumable: bool = False) -> BuildSummary:
+    def run(self, *, refuse_resumable: bool | None = None) -> BuildSummary:
         """Run a full rebuild, marking completion only after all sources finish.
 
         With ``refuse_resumable`` a latest run that could be resumed is not
-        discarded: the call raises ``ResumeAvailable`` instead.
+        discarded: the call raises ``ResumeAvailable`` instead. Left unset, the
+        instance default applies.
         """
+        if refuse_resumable is None:
+            refuse_resumable = self.refuse_resumable_by_default
         started = self.clock()
         with self.lock.hold():
             self._finish_swapped_run()

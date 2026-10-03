@@ -45,9 +45,13 @@ class InMemoryPassageStore:
         self._dimension = dimension
 
     def staging_info(self, name: str) -> StagingInfo | None:
-        if name != "memory-staging" or not self._building:
+        if name != "memory-staging":
             return None
-        return StagingInfo(name, self._dimension, len(self._staged))
+        if self._building:
+            return StagingInfo(name, self._dimension, len(self._staged))
+        if self._completion is not None:  # the one collection is the published one
+            return StagingInfo(name, self._dimension, len(self._items), published=True)
+        return None
 
     def adopt_staging(self, name: str, dimension: int) -> None:
         info = self.staging_info(name)
@@ -196,8 +200,8 @@ class InMemoryManifest:
 
     def mark_swapped(self, run_id: str) -> None:
         run = self._find(run_id)
-        if run.status != "running":
-            raise ValueError("unknown or not running run_id")
+        if run.status not in ("running", "aborted"):
+            raise ValueError("unknown or already finished run_id")
         self._update_run(run_id, status="swapped")
 
     def _find(self, run_id: str) -> ManifestRunRecord:

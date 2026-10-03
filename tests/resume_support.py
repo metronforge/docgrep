@@ -51,9 +51,13 @@ def settings_for(
     )
 
 
-def new_services(settings: Settings) -> Services:
+def new_services(
+    settings: Settings, *, refuse_resumable_by_default: bool = False
+) -> Services:
     """A fresh container, as a new process would have; no sleeping on retries."""
-    services = create_container(settings)
+    services = create_container(
+        settings, refuse_resumable_by_default=refuse_resumable_by_default
+    )
     build: Any = services.build
     build.sleep = lambda seconds: None
     return services
@@ -154,3 +158,31 @@ def search_snapshot(
             [(h.passage.passage_id, h.passage.text, h.score) for h in result.results]
         )
     return snapshot
+
+
+class Crash(BaseException):
+    """A process death: no handler of the build sees it."""
+
+
+class FailsMarkingSwapped:
+    """Delegate to the real manifest but fail exactly at the swapped status write.
+
+    The alias swap has happened by then. A BaseException leaves the run running
+    (a killed process); an ordinary exception makes the build abort it.
+    """
+
+    def __init__(self, inner: Any, error: BaseException) -> None:
+        self.inner = inner
+        self.error = error
+
+    def mark_swapped(self, run_id: str) -> None:
+        raise self.error
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+
+def fail_at_swapped_mark(services: Services, *, crash: bool) -> None:
+    build: Any = services.build
+    error: BaseException = Crash() if crash else OSError("manifest disk error")
+    build.manifest = FailsMarkingSwapped(build.manifest, error)

@@ -190,6 +190,8 @@ class PassageRetriever(Protocol):
 class StatusStore(PassageRetriever, Protocol):
     """A short-timeout read view of the vector store for status reports."""
 
+    def staging_info(self, name: str) -> StagingInfo | None: ...
+
     def close(self) -> None: ...
 
 
@@ -261,7 +263,10 @@ class ManifestWriter(Protocol):
         ...
 
     def mark_swapped(self, run_id: str) -> None:
-        """Record that the run's index is published and its journal is pending."""
+        """Record that the run's index is published and its journal is pending.
+
+        Accepts a running run and, for recovery, an aborted one.
+        """
         ...
 
     def commit_run(self, run_id: str) -> None:

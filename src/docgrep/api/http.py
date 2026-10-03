@@ -26,6 +26,7 @@ from docgrep.domain.errors import (
     ManifestUnavailable,
     ModelUnavailable,
     ParseError,
+    ResumeAvailable,
     StoreUnavailable,
     ValidationError,
 )
@@ -129,6 +130,12 @@ class BuildFailureResponse(BaseModel):
     message: str
 
 
+class BuildRequest(BaseModel):
+    """Optional body of a build request."""
+
+    restart: bool = False
+
+
 class BuildResponse(BaseModel):
     """Synchronous build outcome."""
 
@@ -156,7 +163,9 @@ class BuildResponse(BaseModel):
 def _error_status(error: DocgrepError) -> int:
     if isinstance(error, (ValidationError, ParseError)):
         return 400
-    if isinstance(error, (IndexLockHeld, ConfigDrift, IndexIncomplete)):
+    if isinstance(
+        error, (IndexLockHeld, ConfigDrift, IndexIncomplete, ResumeAvailable)
+    ):
         return 409
     if isinstance(error, (ModelUnavailable, StoreUnavailable, ManifestUnavailable)):
         return 503
@@ -227,7 +236,9 @@ def create_app(
         if initialized is None:
             with initialization_lock:
                 if initialized is None:
-                    initialized = create_container(effective)
+                    initialized = create_container(
+                        effective, refuse_resumable_by_default=True
+                    )
         return initialized
 
     allowed = frozenset(
@@ -288,8 +299,21 @@ def create_app(
         return SearchResponse.from_domain(result)
 
     @app.post("/index/build", response_model=BuildResponse)
-    def build() -> BuildResponse:
-        summary = operations().build.run()
+    def build(request: BuildRequest | None = None) -> BuildResponse:
+        build_operation = operations().build
+        try:
+            if request is not None and request.restart:
+                summary = build_operation.run(refuse_resumable=False)
+            else:
+                summary = build_operation.run()
+        except ResumeAvailable as error:
+            raise ResumeAvailable(
+                "The latest build was interrupted and can be resumed: run "
+                "`docgrep index --resume` on the command line to continue it, "
+                'or send {"restart": true} to start from scratch and discard '
+                "its retained work",
+                details=error.details,
+            ) from error
         return BuildResponse.from_domain(summary)
 
     return app

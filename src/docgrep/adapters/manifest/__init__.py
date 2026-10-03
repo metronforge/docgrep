@@ -268,11 +268,12 @@ class SQLiteManifest:
     def mark_swapped(self, run_id: str) -> None:
         with self._connection() as connection:
             cursor = connection.execute(
-                "UPDATE runs SET status='swapped' WHERE id=? AND status='running'",
+                "UPDATE runs SET status='swapped' "
+                "WHERE id=? AND status IN ('running', 'aborted')",
                 (run_id,),
             )
             if cursor.rowcount != 1:
-                raise ValueError("unknown or not running run_id")
+                raise ValueError("unknown or already finished run_id")
 
     def commit_run(self, run_id: str) -> None:
         """Replace the committed sources with the run's journal in one transaction."""
