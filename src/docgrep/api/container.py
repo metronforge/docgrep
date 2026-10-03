@@ -28,7 +28,9 @@ from docgrep.domain.models import FileType, ScannedFile, SearchResult, Source
 from docgrep.domain.protocols import (
     DocumentParser,
     EmbeddingProvider,
+    ManifestReader,
     Reranker,
+    StatusStore,
     TokenSpanTokenizer,
 )
 from docgrep.settings import Settings
@@ -36,6 +38,7 @@ from docgrep.usecases.build_index import BuildIndex, BuildSummary
 from docgrep.usecases.cancel_index import CancelIndex
 from docgrep.usecases.dry_run import DryRun
 from docgrep.usecases.find_passages import FindPassages
+from docgrep.usecases.inspect_status import InspectStatus
 
 
 class SearchOperation(Protocol):
@@ -133,6 +136,66 @@ def create_dry_run(settings: Settings) -> DryRun:
     )
 
 
+# Seconds to wait for a Qdrant server when only reporting its status.
+STATUS_STORE_TIMEOUT = 2
+
+
+def _vector_config(settings: Settings) -> dict[str, str | int | float]:
+    """The settings, besides the model, that decide what vectors contain."""
+    return {
+        "chunk_size": settings.chunk_size,
+        "chunk_overlap": settings.chunk_overlap,
+        # Together with the embedding model and its dimension, which the build
+        # adds, these are the keys a resume compares (VECTOR_CONFIG_KEYS).
+        "tokenizer": "whitespace"
+        if settings.backend == "fake"
+        else settings.embedding_model,
+        "normalize_embeddings": 1,
+    }
+
+
+def create_status(settings: Settings) -> InspectStatus:
+    """Wire the read-only status report.
+
+    It loads no model, takes no lock and creates nothing: the manifest is
+    opened without migrating it, a local store that does not exist is not
+    created, and a server is pinged with a short timeout.
+    """
+    configure_logging(settings.log_level)
+    manifest_file = settings.data_dir / "manifest.sqlite3"
+    local_store = settings.data_dir / "qdrant"
+
+    def open_manifest() -> ManifestReader | None:
+        if not manifest_file.is_file():
+            return None
+        return SQLiteManifest(settings.data_dir, read_only=True)
+
+    def open_store() -> StatusStore | None:
+        if settings.qdrant_url:
+            return QdrantPassageStore(
+                url=settings.qdrant_url,
+                alias=settings.qdrant_alias,
+                timeout=STATUS_STORE_TIMEOUT,
+            )
+        if not local_store.is_dir():
+            return None
+        return QdrantPassageStore(local_store, alias=settings.qdrant_alias)
+
+    runtime: dict[str, str | int | float] = _vector_config(settings)
+    if settings.backend == "fake":
+        runtime["embedding_model"] = DeterministicEmbedder.model_name
+        runtime["embedding_dimension"] = DeterministicEmbedder.dimension
+    else:
+        runtime["embedding_model"] = settings.embedding_model
+    return InspectStatus(
+        lock=FileIndexLock(settings.data_dir / "index.lock"),
+        open_manifest=open_manifest,
+        open_store=open_store,
+        store_mode="server" if settings.qdrant_url else "local",
+        runtime_config=runtime,
+    )
+
+
 def create_cancel(settings: Settings) -> CancelIndex:
     """Wire the cancel request.
 
@@ -181,16 +244,7 @@ def create_container(settings: Settings) -> Services:
     )
     manifest = SQLiteManifest(settings.data_dir)
     parsers = _parsers(settings)
-    config: Mapping[str, str | int | float] = {
-        "chunk_size": settings.chunk_size,
-        "chunk_overlap": settings.chunk_overlap,
-        # Together with the embedding model and its dimension, which the build
-        # adds, these are the keys a resume compares (VECTOR_CONFIG_KEYS).
-        "tokenizer": "whitespace"
-        if settings.backend == "fake"
-        else settings.embedding_model,
-        "normalize_embeddings": 1,
-    }
+    config = _vector_config(settings)
     return Services(
         search=FindPassages(
             embedder=embedder,

@@ -162,6 +162,7 @@ class QdrantPassageStore:
         url: str | None = None,
         alias: str = DEFAULT_ALIAS,
         local_point_limit: int = LOCAL_POINT_LIMIT,
+        timeout: int | None = None,
     ) -> None:
         if (path is None) == (url is None):
             raise ValueError("exactly one of path and url is required")
@@ -172,7 +173,7 @@ class QdrantPassageStore:
         if url is not None:
             address = _server_address(url)
             try:
-                self._client = QdrantClient(url=address)
+                self._client = QdrantClient(url=address, timeout=timeout)
                 self._client.get_collections()
             except Exception as error:
                 raise StoreUnavailable(
@@ -186,7 +187,12 @@ class QdrantPassageStore:
             except Exception as error:
                 raise StoreUnavailable(
                     "Cannot open Qdrant storage",
-                    details={"path": str(path), "reason": str(error)},
+                    details={
+                        "path": str(path),
+                        "reason": str(error),
+                        # Another process holds the single-process local store.
+                        "busy": "already accessed by another instance" in str(error),
+                    },
                 ) from error
         self._staging: str | None = None
         self._dimension: int | None = None

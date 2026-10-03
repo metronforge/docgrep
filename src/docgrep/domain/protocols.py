@@ -187,6 +187,12 @@ class PassageRetriever(Protocol):
     def count_passages(self) -> int: ...
 
 
+class StatusStore(PassageRetriever, Protocol):
+    """A short-timeout read view of the vector store for status reports."""
+
+    def close(self) -> None: ...
+
+
 class ManifestReader(Protocol):
     """Read committed source outcomes and the most recent indexing run."""
 
