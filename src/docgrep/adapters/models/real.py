@@ -26,8 +26,6 @@ class SentenceModel(Protocol):
     @property
     def tokenizer(self) -> OffsetTokenizer: ...
 
-    def get_sentence_embedding_dimension(self) -> int | None: ...
-
     def encode(
         self,
         texts: Sequence[str],
@@ -91,6 +89,19 @@ def _unavailable(name: str, error: Exception) -> ModelUnavailable:
         f"Model {name} is unavailable",
         details={"model": name, "reason": str(error)},
     )
+
+
+def _embedding_dimension(model: object) -> int | None:
+    """Read the vector size with whichever accessor the library version has.
+
+    Newer sentence-transformers releases renamed the accessor and warn when the
+    old name is used, so the new name is preferred when it exists.
+    """
+    for name in ("get_embedding_dimension", "get_sentence_embedding_dimension"):
+        accessor = getattr(model, name, None)
+        if callable(accessor):
+            return cast(int | None, accessor())
+    raise AttributeError("model has no embedding dimension accessor")
 
 
 class ModelTokenizer:
@@ -166,7 +177,7 @@ class BgeEmbedder:
     def dimension(self) -> int:
         """Return the loaded model's fixed embedding dimension."""
         try:
-            dimension = self._get_model().get_sentence_embedding_dimension()
+            dimension = _embedding_dimension(self._get_model())
             if dimension is None or dimension <= 0:
                 raise ValueError("model has no embedding dimension")
             return dimension
