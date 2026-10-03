@@ -2,6 +2,40 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-10-03)
+
+### Build System
+
+- **deps**: Select the torch backend through cpu and cu130 extras
+  ([`1d29f84`](https://github.com/metronforge/docgrep/commit/1d29f84f00ee1c42d170392a782914075105af13))
+
+### Chores
+
+- **settings**: Move the allowed hosts comment to its field
+  ([`98c46d7`](https://github.com/metronforge/docgrep/commit/98c46d78ca2e64a5c93793a107ccf48372a9b0f0))
+
+### Continuous Integration
+
+- Run the Qdrant server tests and document the server setup
+  ([`886ba82`](https://github.com/metronforge/docgrep/commit/886ba82b63e15085af7853327295fde32bb7a13f))
+
+### Documentation
+
+- Add ADR-0010 and ADR-0011
+  ([`e30de11`](https://github.com/metronforge/docgrep/commit/e30de11840b92ae887da1cecb51d92095187e4bf))
+
+- Amend ADR-0011 to the cpu and cu130 extras
+  ([`5a8d3a5`](https://github.com/metronforge/docgrep/commit/5a8d3a513a3f66cd1e41738ee9d460fc02c311aa))
+
+### Features
+
+- **adapters**: Make the Qdrant alias configurable
+  ([`16c80f1`](https://github.com/metronforge/docgrep/commit/16c80f12faf61a80f1b9d85ec342d652917403b4))
+
+- **adapters**: Support a Qdrant server next to local mode
+  ([`983b59c`](https://github.com/metronforge/docgrep/commit/983b59cf1e41491f5c28ce52acaa2098a6d9738f))
+
+
 ## v1.1.0 (2026-10-03)
 
 ### Bug Fixes
