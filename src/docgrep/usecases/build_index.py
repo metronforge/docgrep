@@ -1,19 +1,15 @@
 """Build an index through domain ports while preserving per-source outcomes."""
 
-import fcntl
 import logging
 import time
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TypeVar
 
 from docgrep.domain.errors import (
     BuildFailed,
     DocgrepError,
-    IndexLockHeld,
     StoreUnavailable,
 )
 from docgrep.domain.models import FileType, Source
@@ -22,6 +18,7 @@ from docgrep.domain.protocols import (
     CorpusEnumerator,
     DocumentParser,
     EmbeddingProvider,
+    IndexLock,
     ManifestWriter,
     PassageWriter,
     SparseEncoder,
@@ -58,7 +55,7 @@ class BuildIndex:
     def __init__(
         self,
         *,
-        data_dir: Path,
+        lock: IndexLock,
         enumerator: CorpusEnumerator,
         parsers: Mapping[FileType, DocumentParser],
         chunker: Chunker,
@@ -73,7 +70,7 @@ class BuildIndex:
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        self.data_dir = data_dir
+        self.lock = lock
         self.enumerator = enumerator
         self.parsers = parsers
         self.chunker = chunker
@@ -85,28 +82,6 @@ class BuildIndex:
         self.docgrep_version = docgrep_version
         self.batch_size = batch_size
         self.sleep = sleep
-
-    @contextmanager
-    def _lock(self) -> Iterator[None]:
-        try:
-            self.data_dir.mkdir(parents=True, exist_ok=True)
-            with (self.data_dir / "index.lock").open("a+b") as handle:
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as error:
-                    raise IndexLockHeld(
-                        "An index build is already running",
-                        details={"path": str(self.data_dir / "index.lock")},
-                    ) from error
-                try:
-                    yield
-                finally:
-                    fcntl.flock(handle, fcntl.LOCK_UN)
-        except OSError as error:
-            raise StoreUnavailable(
-                "Cannot access the index lock",
-                details={"path": str(self.data_dir / "index.lock")},
-            ) from error
 
     def _retry(self, operation: Callable[[], _T]) -> _T:
         for attempt in range(3):
@@ -178,7 +153,7 @@ class BuildIndex:
         started = time.monotonic()
         totals = {"indexed": 0, "skipped": 0, "failed": 0}
         failures: list[BuildFailure] = []
-        with self._lock():
+        with self.lock.hold():
             run_id = self.manifest.start_run(self.config)
             replacement_started = False
             try:

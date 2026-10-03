@@ -1,6 +1,7 @@
 """Ports implemented by adapters at the domain boundary."""
 
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
 from typing import Literal, Protocol
 
 from docgrep.domain.models import (
@@ -74,6 +75,18 @@ class PassageWriter(Protocol):
     ) -> None: ...
 
     def clear_completion_metadata(self) -> None: ...
+
+
+class IndexLock(Protocol):
+    """Guard the exclusive index write lock while a build runs.
+
+    Entering the context manager returned by ``hold`` acquires the lock without
+    waiting. It raises ``IndexLockHeld`` when another operation owns the lock
+    and ``StoreUnavailable`` when the lock cannot be accessed. Exceptions raised
+    inside the managed block propagate unchanged, and the lock is released.
+    """
+
+    def hold(self) -> AbstractContextManager[None]: ...
 
 
 class Reranker(Protocol):

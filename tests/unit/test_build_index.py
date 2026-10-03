@@ -1,12 +1,14 @@
 """Build orchestration through domain ports and in-memory fakes."""
 
 import fcntl
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from docgrep.adapters.chunking import TokenChunker, WhitespaceTokenizer
+from docgrep.adapters.filelock import FileIndexLock
 from docgrep.adapters.models.deterministic import DeterministicEmbedder
 from docgrep.domain.errors import (
     BuildFailed,
@@ -21,6 +23,7 @@ from docgrep.domain.models import (
     Passage,
     Source,
 )
+from docgrep.domain.protocols import IndexLock
 from docgrep.usecases.build_index import BuildIndex
 from fakes import InMemoryManifest, InMemoryPassageStore
 
@@ -85,11 +88,13 @@ def build(
     *,
     store: InMemoryPassageStore | None = None,
     embedder: DeterministicEmbedder | None = None,
+    lock: IndexLock | None = None,
+    manifest: InMemoryManifest | None = None,
 ) -> tuple[BuildIndex, InMemoryManifest, InMemoryPassageStore]:
-    manifest = InMemoryManifest()
+    manifest = manifest or InMemoryManifest()
     passage_store = store or InMemoryPassageStore()
     use_case = BuildIndex(
-        data_dir=tmp_path,
+        lock=lock or FileIndexLock(tmp_path / "index.lock"),
         enumerator=Sources(*sources),
         parsers={FileType.TXT: Parser(), FileType.PDF: Parser()},
         chunker=TokenChunker(WhitespaceTokenizer(), 2, 0),
@@ -210,3 +215,76 @@ def test_enumeration_failure_preserves_existing_collection(tmp_path: Path) -> No
 
     assert run_status(manifest) == "aborted"
     assert store.read_completion_metadata() == {"embedding_model": "previous"}
+
+
+class FakeLock:
+    """Records acquisition and release; optionally refuses to be acquired."""
+
+    def __init__(self, refuse: Exception | None = None) -> None:
+        self.refuse = refuse
+        self.events: list[str] = []
+
+    @contextmanager
+    def hold(self) -> Iterator[None]:
+        if self.refuse is not None:
+            self.events.append("refused")
+            raise self.refuse
+        self.events.append("acquired")
+        try:
+            yield
+        finally:
+            self.events.append("released")
+
+
+def test_build_runs_inside_the_injected_lock(tmp_path: Path) -> None:
+    lock = FakeLock()
+    use_case, manifest, _ = build(tmp_path, (source("good.txt"),), lock=lock)
+
+    use_case.run()
+
+    assert lock.events == ["acquired", "released"]
+    assert run_status(manifest) == "completed"
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [IndexLockHeld("busy"), StoreUnavailable("Cannot access the index lock")],
+)
+def test_lock_acquisition_failures_propagate_before_any_work(
+    tmp_path: Path, refusal: Exception
+) -> None:
+    lock = FakeLock(refuse=refusal)
+    use_case, manifest, store = build(tmp_path, (source("good.txt"),), lock=lock)
+
+    with pytest.raises(type(refusal)) as raised:
+        use_case.run()
+
+    assert raised.value is refusal
+    assert lock.events == ["refused"]
+    assert manifest.latest_run() is None
+    assert store.read_completion_metadata() is None
+
+
+class OSErrorManifest(InMemoryManifest):
+    def start_run(self, config: Mapping[str, str | int | float]) -> str:
+        raise OSError(5, "input/output error")
+
+
+@pytest.mark.parametrize("use_real_lock", [False, True])
+def test_os_error_in_the_build_is_not_reported_as_a_lock_failure(
+    tmp_path: Path, use_real_lock: bool
+) -> None:
+    lock = FileIndexLock(tmp_path / "index.lock") if use_real_lock else FakeLock()
+    use_case, _, _ = build(
+        tmp_path, (source("good.txt"),), lock=lock, manifest=OSErrorManifest()
+    )
+
+    with pytest.raises(OSError, match="input/output error"):
+        use_case.run()
+
+    if isinstance(lock, FakeLock):
+        assert lock.events == ["acquired", "released"]
+    else:
+        # The real lock was released: a second build can acquire it again.
+        with lock.hold():
+            pass
