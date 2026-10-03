@@ -125,5 +125,9 @@ def create_container(settings: Settings) -> Services:
             manifest=manifest,
             config=config,
             docgrep_version=__version__,
+            log_context={
+                "corpus_root": settings.corpus_root.resolve().name,
+                "backend": settings.backend,
+            },
         ),
     )

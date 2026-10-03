@@ -174,3 +174,25 @@ def test_stdout_is_unchanged_by_logging_and_logs_go_to_stderr(tmp_path: Path) ->
         "note.txt (score 0.731)\nA rare blue comet crosses the sky.\n\n"
     )
     assert "INFO" not in searched.stdout
+
+
+def test_info_records_reach_stderr_while_stdout_stays_the_same(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "note.txt").write_text("A rare blue comet crosses the sky.", "utf-8")
+
+    built = _run_cli(tmp_path, "index")
+    searched = _run_cli(tmp_path, "search", "blue comet")
+
+    assert re.fullmatch(
+        r"Build 1: 1 indexed, 0 skipped, 0 failed in \d+\.\d\ds\n", built.stdout
+    )
+    assert searched.stdout == (
+        "note.txt (score 0.731)\nA rare blue comet crosses the sky.\n\n"
+    )
+    assert " INFO docgrep.usecases.build_index index_build_started " in built.stderr
+    assert " index_build_finished " in built.stderr
+    assert " INFO docgrep.usecases.find_passages search_completed " in searched.stderr
+    assert "blue comet" not in searched.stderr

@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict
 
 from docgrep import __version__
 from docgrep.api.container import Services, create_container
-from docgrep.api.log_config import configure_logging, warn_if_not_loopback
+from docgrep.api.log_config import (
+    configure_logging,
+    log_server_start,
+    warn_if_not_loopback,
+)
 from docgrep.domain.errors import (
     ConfigDrift,
     DocgrepError,
@@ -200,6 +204,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         nonlocal initialized
+        log_server_start(effective)
         warn_if_not_loopback(effective.host)
         yield
         # Release a container created on demand so its models can be freed even
