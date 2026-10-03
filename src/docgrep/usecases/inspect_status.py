@@ -8,7 +8,11 @@ from docgrep.domain.errors import DocgrepError
 from docgrep.domain.models import ManifestRunRecord
 from docgrep.domain.progress import estimate_eta_seconds
 from docgrep.domain.protocols import IndexLock, ManifestReader, StatusStore
-from docgrep.domain.run_state import VECTOR_CONFIG_KEYS, run_state
+from docgrep.domain.run_state import (
+    VECTOR_CONFIG_KEYS,
+    run_state,
+    swap_already_happened,
+)
 from docgrep.domain.status import (
     ActiveOperation,
     CollectionView,
@@ -95,7 +99,8 @@ class InspectStatus:
             manifest_ok = False
             warn("manifest_unreadable", f"The manifest cannot be read: {_short(error)}")
 
-        store_view, metadata, passages = self._read_store()
+        staging = None if latest is None else latest.staging_collection
+        store_view, metadata, passages, published = self._read_store(staging)
         if store_view.status == "unreachable":
             warn(
                 "store_unreachable",
@@ -130,6 +135,19 @@ class InspectStatus:
         state = None
         if latest is not None:
             state = run_state(latest, lock_held=lock_held)
+            if (
+                state in ("interrupted", "aborted")
+                and manifest is not None
+                and published
+                and swap_already_happened(
+                    latest,
+                    journal_rows=self._journal_rows(manifest, latest),
+                    staging_published=True,
+                )
+            ):
+                # It died between the alias swap and the swapped status; the
+                # next build or resume finishes it. Only reported here.
+                state = "swapped"
             run_view = RunView(
                 latest.run_id,
                 latest.status,
@@ -186,8 +204,9 @@ class InspectStatus:
         )
 
     def _read_store(
-        self,
-    ) -> tuple[StoreView, Mapping[str, str | int | float] | None, int | None]:
+        self, staging: str | None
+    ) -> tuple[StoreView, Mapping[str, str | int | float] | None, int | None, bool]:
+        """Read the store; also whether ``staging`` is already the published index."""
         mode = self.store_mode
         try:
             store = self.open_store()
@@ -197,22 +216,32 @@ class InspectStatus:
                 StoreView(mode, "busy" if busy else "unreachable", _short(error)),
                 None,
                 None,
+                False,
             )
         if store is None:
-            return StoreView(mode, "absent", "No local store exists yet"), None, None
+            view = StoreView(mode, "absent", "No local store exists yet")
+            return view, None, None, False
         try:
-            return (
-                StoreView(mode, "reachable"),
-                store.read_completion_metadata(),
-                store.count_passages(),
-            )
+            metadata = store.read_completion_metadata()
+            passages = store.count_passages()
+            info = None if staging is None else store.staging_info(staging)
+            published = info is not None and info.published
+            return StoreView(mode, "reachable"), metadata, passages, published
         except Exception as error:
-            return StoreView(mode, "unreachable", _short(error)), None, None
+            view = StoreView(mode, "unreachable", _short(error))
+            return view, None, None, False
         finally:
             try:
                 store.close()
             except Exception:
                 _LOG.debug("status_store_close_failed", exc_info=True)
+
+    @staticmethod
+    def _journal_rows(manifest: ManifestReader, run: ManifestRunRecord) -> int:
+        try:
+            return len(manifest.run_sources(run.run_id))
+        except Exception:
+            return -1
 
     def _drift(
         self, metadata: Mapping[str, str | int | float] | None

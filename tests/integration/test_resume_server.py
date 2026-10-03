@@ -9,11 +9,13 @@ import pytest
 from qdrant_client import QdrantClient, models
 
 from docgrep.adapters.manifest import SQLiteManifest
-from docgrep.domain.errors import StoreUnavailable
+from docgrep.domain.errors import NothingToResume, StoreUnavailable
 from resume_support import (
+    Crash,
     cancel_at_embed_call,
     close,
     dump_points,
+    fail_at_swapped_mark,
     fail_upsert_at,
     new_services,
     search_snapshot,
@@ -162,3 +164,37 @@ def test_points_of_a_half_written_source_that_changed_or_vanished_are_removed(
         for c in server.get_aliases().aliases
         if c.alias_name == INTERRUPTED
     ]
+
+
+def test_a_run_that_died_after_the_swap_is_finished_on_a_server(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    write_corpus(corpus, SOURCES)
+    reference_points, reference_search = _clean_reference(corpus, tmp_path)
+    settings = settings_for(corpus, tmp_path / "data", url=URL, alias=INTERRUPTED)
+    services = new_services(settings)
+    fail_at_swapped_mark(services, crash=True)
+    with pytest.raises(Crash):
+        services.build.run()
+    close(services)
+    manifest = SQLiteManifest(tmp_path / "data")
+    run = manifest.latest_run()
+    assert run is not None and run.status == "running"
+
+    resumed = new_services(settings)
+    summary = resumed.build.resume()
+    searched = search_snapshot(resumed)
+    close(resumed)
+
+    assert summary.recovered and summary.indexed == SOURCES
+    done = SQLiteManifest(tmp_path / "data")
+    finished = done.latest_run()
+    assert finished is not None and finished.status == "completed"
+    assert all(done.get_source(f"doc{i:03d}.txt") is not None for i in range(SOURCES))
+    assert dump_points(settings) == reference_points
+    assert searched == reference_search
+    again = new_services(settings)
+    with pytest.raises(NothingToResume):
+        again.build.resume()
+    close(again)

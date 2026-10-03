@@ -40,6 +40,7 @@ from docgrep.domain.run_state import (
     VECTOR_CONFIG_KEYS,
     config_drift,
     run_state,
+    swap_already_happened,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -262,13 +263,31 @@ class BuildIndex:
         return BuildFailure(source.path, reason, str(error))
 
     def _finish_swapped_run(self) -> ManifestRunRecord | None:
-        """Finish a run whose process died after publishing but before committing.
+        """Finish a run that published its index but did not commit its sources.
 
-        Called with the lock held, so a run that is still swapped is dead.
+        Called with the lock held, so such a run is dead. It is either stored as
+        swapped or, when the process died between the alias swap and the write
+        of that status, still running or aborted with its staging collection
+        already published.
         """
         latest = self.manifest.latest_run()
-        if latest is None or latest.status != "swapped":
+        if latest is None:
             return None
+        reason = "swapped"
+        if latest.status != "swapped":
+            if latest.status not in ("running", "aborted"):
+                return None
+            if latest.staging_collection is None:
+                return None
+            info = self.passage_writer.staging_info(latest.staging_collection)
+            if info is None or not swap_already_happened(
+                latest,
+                journal_rows=len(self.manifest.run_sources(latest.run_id)),
+                staging_published=info.published,
+            ):
+                return None
+            self.manifest.mark_swapped(latest.run_id)
+            reason = "alias_target_reached"
         totals = {"indexed": 0, "skipped": 0, "failed": 0}
         for record in self.manifest.run_sources(latest.run_id):
             totals[record.status.split(":")[0]] += 1
@@ -276,7 +295,12 @@ class BuildIndex:
         self.manifest.finish_run(latest.run_id, "completed", totals)
         _LOG.warning(
             "run_recovered",
-            extra={"run_id": latest.run_id, "previous_status": "swapped", **totals},
+            extra={
+                "run_id": latest.run_id,
+                "previous_status": latest.status,
+                "reason": reason,
+                **totals,
+            },
         )
         return latest
 

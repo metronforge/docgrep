@@ -96,6 +96,9 @@ class StubStore:
     def retrieve(self, *args: Any) -> tuple[()]:
         return ()
 
+    def staging_info(self, name: str) -> None:
+        return None
+
     def close(self) -> None:
         self.closed = True
 
