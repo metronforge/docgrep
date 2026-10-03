@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.5.1 (2026-10-03)
+
+### Bug Fixes
+
+- **api**: Make POST /index/build refuse to discard a resumable run
+  ([`774f0c9`](https://github.com/metronforge/docgrep/commit/774f0c95452f02eabe5ac3ac7cc94b7202efc917))
+
+- **usecases**: Finish a run that died between the alias swap and its status
+  ([`117de74`](https://github.com/metronforge/docgrep/commit/117de74d3a556410fb006808ac02133ada892515))
+
+
 ## v1.5.0 (2026-10-03)
 
 ### Features
