@@ -52,6 +52,7 @@ mypy_path = "src"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
+addopts = ["-m", "not gpu"]
 markers = ["gpu: requires real models or GPU hardware"]
 
 [tool.semantic_release]
