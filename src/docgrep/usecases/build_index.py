@@ -67,6 +67,7 @@ class BuildIndex:
         docgrep_version: str,
         batch_size: int = 32,
         sleep: Callable[[float], None] = time.sleep,
+        log_context: Mapping[str, str | int | float] | None = None,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -82,6 +83,7 @@ class BuildIndex:
         self.docgrep_version = docgrep_version
         self.batch_size = batch_size
         self.sleep = sleep
+        self.log_context = dict(log_context or {})
 
     def _retry(self, operation: Callable[[], _T]) -> _T:
         for attempt in range(3):
@@ -98,7 +100,8 @@ class BuildIndex:
     ) -> BuildFailure:
         self.manifest.record_source(source, f"failed:{reason}", str(error))
         _LOG.warning(
-            "index_source_failed", extra={"path": source.path, "reason": reason}
+            "index_source_failed",
+            extra={"source_id": source.source_id, "category": reason},
         )
         return BuildFailure(source.path, reason, str(error))
 
@@ -155,6 +158,9 @@ class BuildIndex:
         failures: list[BuildFailure] = []
         with self.lock.hold():
             run_id = self.manifest.start_run(self.config)
+            _LOG.info(
+                "index_build_started", extra={"run_id": run_id, **self.log_context}
+            )
             replacement_started = False
             try:
                 sources = self.enumerator.enumerate()
@@ -183,11 +189,22 @@ class BuildIndex:
                 raise BuildFailed(
                     "Index build aborted", details={"reason": str(error)}
                 ) from error
+        elapsed = time.monotonic() - started
+        _LOG.info(
+            "index_build_finished",
+            extra={
+                "run_id": run_id,
+                "indexed": totals["indexed"],
+                "skipped": totals["skipped"],
+                "failed": totals["failed"],
+                "duration_ms": round(elapsed * 1000, 1),
+            },
+        )
         return BuildSummary(
             run_id,
             totals["indexed"],
             totals["skipped"],
             totals["failed"],
-            time.monotonic() - started,
+            elapsed,
             tuple(failures),
         )

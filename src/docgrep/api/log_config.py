@@ -7,6 +7,8 @@ import sys
 import time
 from typing import IO
 
+from docgrep.settings import Settings
+
 _PACKAGE_LOGGER = "docgrep"
 _STANDARD_FIELDS = frozenset(
     {*logging.makeLogRecord({}).__dict__, "message", "asctime", "taskName"}
@@ -79,3 +81,16 @@ def warn_if_not_loopback(host: str) -> None:
             "server_host_not_loopback",
             extra={"host": host},
         )
+
+
+def log_server_start(settings: Settings) -> None:
+    """Record where the server listens and what it serves."""
+    logging.getLogger(_PACKAGE_LOGGER).info(
+        "server_started",
+        extra={
+            "host": settings.host,
+            "port": settings.port,
+            "backend": settings.backend,
+            "data_dir": str(settings.data_dir),
+        },
+    )

@@ -1,11 +1,15 @@
 """Lazy local embedding and cross-encoder adapters."""
 
+import logging
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from importlib import import_module
 from math import isfinite
 from typing import Protocol, cast
 
 from docgrep.domain.errors import ModelUnavailable
+
+_LOG = logging.getLogger(__name__)
 
 
 class OffsetTokenizer(Protocol):
@@ -60,6 +64,26 @@ def _device(setting: str, cuda_available: Callable[[], bool]) -> str:
     if setting != "auto":
         return setting
     return "cuda" if cuda_available() else "cpu"
+
+
+def _load_logged[T](
+    loader: Callable[[str, str], T],
+    name: str,
+    device_setting: str,
+    cuda_available: Callable[[], bool],
+) -> T:
+    device = _device(device_setting, cuda_available)
+    started = time.monotonic()
+    model = loader(name, device)
+    _LOG.info(
+        "model_loaded",
+        extra={
+            "model": name,
+            "device": device,
+            "load_ms": round((time.monotonic() - started) * 1000, 1),
+        },
+    )
+    return model
 
 
 def _unavailable(name: str, error: Exception) -> ModelUnavailable:
@@ -131,8 +155,8 @@ class BgeEmbedder:
     def _get_model(self) -> SentenceModel:
         if self._model is None:
             try:
-                self._model = self._loader(
-                    self.model_name, _device(self._device, self._cuda_available)
+                self._model = _load_logged(
+                    self._loader, self.model_name, self._device, self._cuda_available
                 )
             except Exception as error:
                 raise _unavailable(self.model_name, error) from error
@@ -207,8 +231,8 @@ class BgeReranker:
     def _get_model(self) -> CrossModel:
         if self._model is None:
             try:
-                self._model = self._loader(
-                    self.model_name, _device(self._device, self._cuda_available)
+                self._model = _load_logged(
+                    self._loader, self.model_name, self._device, self._cuda_available
                 )
             except Exception as error:
                 raise _unavailable(self.model_name, error) from error

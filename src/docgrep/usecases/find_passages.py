@@ -129,7 +129,7 @@ class FindPassages:
             rerank_skip_reason: str | None = None,
             hint: str | None = None,
         ) -> SearchResult:
-            return SearchResult(
+            outcome = SearchResult(
                 passages,
                 total_hits,
                 (time.monotonic() - started) * 1000,
@@ -138,6 +138,17 @@ class FindPassages:
                 rerank_skip_reason,
                 hint,
             )
+            # Counts and timings only: neither the query nor passage text is logged.
+            _LOG.info(
+                "search_completed",
+                extra={
+                    "top_n": limit,
+                    "total_hits": outcome.total_hits,
+                    "took_ms": round(outcome.took_ms, 1),
+                    "rerank_skipped": outcome.rerank_skipped,
+                },
+            )
+            return outcome
 
         if self.retriever.count_passages() == 0:
             return result((), 0, hint="The index is empty")
