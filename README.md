@@ -4,11 +4,14 @@ docgrep searches a local document corpus and returns ranked, verbatim passages w
 
 ## Install
 
-Use Python 3.12 and [uv](https://docs.astral.sh/uv/):
+Use Python 3.12 and [uv](https://docs.astral.sh/uv/). Choose the PyTorch build explicitly when you sync:
 
 ```sh
-uv sync
+uv sync --extra cpu     # CPU-only torch, no CUDA libraries
+uv sync --extra cu130   # CUDA 13.0 build (needs a recent NVIDIA driver, R580 or newer)
 ```
+
+Then run commands without re-syncing, for example after `export UV_NO_SYNC=1` (or with `uv run --no-sync ...`). A plain `uv run` or `uv sync` re-resolves without extras and replaces torch with the PyPI build, which is the CUDA build with about 3 GB of nvidia packages. `scripts/check.sh` sets `UV_NO_SYNC=1` itself and stops with a hint when no environment exists.
 
 The default backend uses `BAAI/bge-m3` for embeddings and `BAAI/bge-reranker-v2-m3` for reranking. Model weights download on first use. For a small local trial without model downloads, set `DOCGREP_BACKEND=fake` as shown below.
 
