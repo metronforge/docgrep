@@ -45,15 +45,21 @@ def _matches(path: str, patterns: Sequence[str]) -> bool:
     cross ``/``; a ``**`` segment matches zero or more segments, except as the
     last segment, where it matches everything beneath a directory (at least one
     segment). A pattern without ``/`` is compared with the basename at any
-    depth. A pattern containing ``/`` is anchored at the corpus root. A
+    depth. A pattern containing ``/`` is anchored at the corpus root. A single
+    leading ``/`` is dropped and anchors the pattern at the corpus root even
+    when no other ``/`` remains: ``/draft.md`` matches only a root-level
+    ``draft.md``, and ``/notes/private/**`` equals ``notes/private/**``. A
     trailing ``/`` is shorthand for a trailing ``/**``: ``dir/`` matches
     everything beneath ``dir``.
     """
     parts = tuple(path.split("/"))
     for pattern in patterns:
+        anchored = pattern.startswith("/")
+        if anchored:
+            pattern = pattern[1:]
         if pattern.endswith("/"):
             pattern += "**"
-        if "/" not in pattern:
+        if not anchored and "/" not in pattern:
             if fnmatchcase(parts[-1], pattern):
                 return True
         elif _match_segments(tuple(pattern.split("/")), parts):
