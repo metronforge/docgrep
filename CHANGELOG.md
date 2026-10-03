@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-10-03)
+
+### Features
+
+- **adapters**: Run the embedding model in half precision on CUDA
+  ([`97d0e71`](https://github.com/metronforge/docgrep/commit/97d0e7176e86269e98b320f930bb262067f2c7e3))
+
+- **adapters**: Write passages in batches
+  ([`e2e872b`](https://github.com/metronforge/docgrep/commit/e2e872b1880e4df273abea4b12862792be000f10))
+
+- **cli**: Add a read-only dry-run command for the corpus (UC-19)
+  ([`75cc12e`](https://github.com/metronforge/docgrep/commit/75cc12e5d397fdbfeae1c41571c204f17285edcc))
+
+
 ## v1.3.0 (2026-10-03)
 
 ### Documentation
