@@ -91,9 +91,11 @@ def create_container(settings: Settings) -> Services:
 
     sparse = BM25SparseEncoder()
     store = (
-        QdrantPassageStore(url=settings.qdrant_url)
+        QdrantPassageStore(url=settings.qdrant_url, alias=settings.qdrant_alias)
         if settings.qdrant_url
-        else QdrantPassageStore(settings.data_dir / "qdrant")
+        else QdrantPassageStore(
+            settings.data_dir / "qdrant", alias=settings.qdrant_alias
+        )
     )
     manifest = SQLiteManifest(settings.data_dir)
     parsers: Mapping[FileType, DocumentParser] = {

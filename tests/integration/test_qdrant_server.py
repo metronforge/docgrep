@@ -31,7 +31,7 @@ def _wipe(client: QdrantClient) -> None:
             ]
         )
     for collection in client.get_collections().collections:
-        if collection.name.startswith("docgrep_"):
+        if collection.name.startswith(("docgrep_", "alpha_", "beta_")):
             client.delete_collection(collection.name)
 
 
@@ -252,3 +252,52 @@ def test_container_builds_and_searches_while_a_second_container_reads(
     assert (summary.indexed, summary.failed) == (1, 0)
     assert result.results[0].passage.text == "A rare blue comet crosses the sky."
     assert not (tmp_path / "data" / "qdrant").exists()
+
+
+def _alias_targets(client: QdrantClient) -> dict[str, str]:
+    return {a.alias_name: a.collection_name for a in client.get_aliases().aliases}
+
+
+def test_two_aliases_on_one_server_build_and_search_independently(
+    client: QdrantClient,
+) -> None:
+    alpha = QdrantPassageStore(url=URL, alias="alpha")
+    beta = QdrantPassageStore(url=URL, alias="beta")
+    _build(alpha, "model-a", {"alpha text": (1.0, 0.0)})
+    _build(beta, "model-b", {"beta text": (1.0, 0.0), "beta more": (0.9, 0.435889894)})
+
+    targets = _alias_targets(client)
+    assert set(targets) == {"alpha", "beta"}
+    assert targets["alpha"].startswith("alpha_") and targets["beta"].startswith("beta_")
+    assert alpha.read_completion_metadata() == {"embedding_model": "model-a"}
+    assert beta.read_completion_metadata() == {"embedding_model": "model-b"}
+    assert alpha.count_passages() == 1 and beta.count_passages() == 2
+    assert [c.passage.text for c in alpha.retrieve((1.0, 0.0), {1: 1.0}, 5)] == [
+        "alpha text"
+    ]
+    assert {c.passage.text for c in beta.retrieve((1.0, 0.0), {1: 1.0}, 5)} == {
+        "beta text",
+        "beta more",
+    }
+
+
+def test_swapping_one_alias_leaves_the_other_untouched(client: QdrantClient) -> None:
+    alpha = QdrantPassageStore(url=URL, alias="alpha")
+    beta = QdrantPassageStore(url=URL, alias="beta")
+    _build(alpha, "a1", {"alpha old": (1.0, 0.0)})
+    _build(beta, "b1", {"beta only": (1.0, 0.0)})
+    before = _alias_targets(client)
+
+    _build(alpha, "a2", {"alpha new": (1.0, 0.0), "alpha extra": (0.9, 0.435889894)})
+
+    after = _alias_targets(client)
+    assert after["beta"] == before["beta"]
+    assert after["alpha"] != before["alpha"]
+    names = {c.name for c in client.get_collections().collections}
+    assert before["alpha"] not in names and before["beta"] in names
+    assert beta.read_completion_metadata() == {"embedding_model": "b1"}
+    assert [c.passage.text for c in beta.retrieve((1.0, 0.0), {1: 1.0}, 5)] == [
+        "beta only"
+    ]
+    assert alpha.count_passages() == 2
+    assert alpha.read_completion_metadata() == {"embedding_model": "a2"}

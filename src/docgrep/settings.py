@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     # URL of a Qdrant server; without it the index lives in local mode under
     # the data directory.
     qdrant_url: str | None = None
+    # Name of the read alias; give each corpus on a shared server its own.
+    qdrant_alias: str = "docgrep"
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     # Extra host names accepted in the Host and Origin headers, as a

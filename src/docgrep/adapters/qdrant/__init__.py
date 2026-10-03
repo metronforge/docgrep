@@ -2,6 +2,7 @@
 
 import logging
 import math
+import re
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -17,7 +18,8 @@ from docgrep.domain.errors import StoreUnavailable, ValidationError
 from docgrep.domain.models import FileType, Passage, RetrievalCandidate, Source
 
 _LOG = logging.getLogger(__name__)
-_ALIAS = "docgrep"
+DEFAULT_ALIAS = "docgrep"
+_ALIAS_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 LOCAL_POINT_LIMIT = 20_000
 _LOCAL_MODE_ADVICE = (
     "local mode is intended for tests and small corpora; "
@@ -56,6 +58,16 @@ def warn_if_local_mode_is_large(passages: int, limit: int = LOCAL_POINT_LIMIT) -
         _LOG.warning(_LOCAL_MODE_ADVICE, extra={"passages": passages, "limit": limit})
 
 
+def _valid_alias(alias: str) -> str:
+    if not _ALIAS_PATTERN.fullmatch(alias):
+        raise ValidationError(
+            "qdrant_alias must be non-empty and use only letters, digits, "
+            "underscores and hyphens",
+            details={"setting": "qdrant_alias"},
+        )
+    return alias
+
+
 def _server_address(url: str) -> str:
     """Validate an http(s) server URL and return it without credentials."""
     try:
@@ -77,7 +89,7 @@ def _server_address(url: str) -> str:
     )
 
 
-def local_passage_count(path: Path) -> int | None:
+def local_passage_count(path: Path, alias: str = DEFAULT_ALIAS) -> int | None:
     """Count the passages of an existing local store, or None when unavailable.
 
     The store is opened only for the count and closed again, so it does not
@@ -86,7 +98,7 @@ def local_passage_count(path: Path) -> int | None:
     if not path.is_dir():
         return None
     try:
-        store = QdrantPassageStore(path)
+        store = QdrantPassageStore(path, alias=alias)
     except StoreUnavailable:
         return None
     try:
@@ -137,10 +149,12 @@ class QdrantPassageStore:
         path: Path | None = None,
         *,
         url: str | None = None,
+        alias: str = DEFAULT_ALIAS,
         local_point_limit: int = LOCAL_POINT_LIMIT,
     ) -> None:
         if (path is None) == (url is None):
             raise ValueError("exactly one of path and url is required")
+        self._alias = _valid_alias(alias)
         self._local = url is None
         self._local_point_limit = local_point_limit
         if url is not None:
@@ -171,7 +185,7 @@ class QdrantPassageStore:
 
     def _active_collection(self) -> str | None:
         for alias in self._client.get_aliases().aliases:
-            if alias.alias_name == _ALIAS:
+            if alias.alias_name == self._alias:
                 return alias.collection_name
         return None
 
@@ -181,7 +195,7 @@ class QdrantPassageStore:
             raise ValueError("dimension must be positive")
         if self._staging is not None:
             self._client.delete_collection(self._staging)
-        collection = f"docgrep_{uuid4().hex}"
+        collection = f"{self._alias}_{uuid4().hex}"
         self._client.create_collection(
             collection_name=collection,
             vectors_config={
@@ -280,13 +294,13 @@ class QdrantPassageStore:
         if previous is not None:
             operations.append(
                 models.DeleteAliasOperation(
-                    delete_alias=models.DeleteAlias(alias_name=_ALIAS)
+                    delete_alias=models.DeleteAlias(alias_name=self._alias)
                 )
             )
         operations.append(
             models.CreateAliasOperation(
                 create_alias=models.CreateAlias(
-                    collection_name=self._staging, alias_name=_ALIAS
+                    collection_name=self._staging, alias_name=self._alias
                 )
             )
         )
@@ -309,7 +323,7 @@ class QdrantPassageStore:
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None:
         if self._active_collection() is None:
             return None
-        records = self._client.retrieve(_ALIAS, [_MARKER_ID], with_payload=True)
+        records = self._client.retrieve(self._alias, [_MARKER_ID], with_payload=True)
         if not records or records[0].payload is None:
             return None
         metadata = records[0].payload.get("metadata")
@@ -326,7 +340,7 @@ class QdrantPassageStore:
         if self._active_collection() is None:
             return 0
         return self._client.count(
-            _ALIAS, count_filter=_PASSAGE_FILTER, exact=True
+            self._alias, count_filter=_PASSAGE_FILTER, exact=True
         ).count
 
     @_domain_errors
@@ -360,7 +374,7 @@ class QdrantPassageStore:
                 )
             )
         fused = self._client.query_points(
-            _ALIAS,
+            self._alias,
             prefetch=prefetch,
             query=models.FusionQuery(fusion=models.Fusion.RRF),
             query_filter=_PASSAGE_FILTER,

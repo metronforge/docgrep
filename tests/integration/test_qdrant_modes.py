@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from qdrant_client import QdrantClient
 
 from docgrep.adapters.qdrant import (
     LOCAL_POINT_LIMIT,
@@ -124,3 +125,69 @@ def test_local_passage_count_is_none_while_another_client_holds_the_store(
     _fill(store, 2)
 
     assert local_passage_count(tmp_path / "qdrant") is None
+
+
+@pytest.mark.parametrize(
+    "alias", ["", " ", "a b", "a/b", "a.b", "alias!", "é", "a\n", "-x y"]
+)
+def test_invalid_aliases_are_structured_configuration_errors(
+    tmp_path: Path, alias: str
+) -> None:
+    with pytest.raises(ValidationError) as raised:
+        QdrantPassageStore(tmp_path / "q", alias=alias)
+
+    assert raised.value.category == "validation_error"
+    assert raised.value.details == {"setting": "qdrant_alias"}
+
+
+def test_qdrant_alias_is_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DOCGREP_QDRANT_ALIAS", raising=False)
+    assert Settings().qdrant_alias == "docgrep"
+
+    monkeypatch.setenv("DOCGREP_QDRANT_ALIAS", "library-2")
+    assert Settings().qdrant_alias == "library-2"
+
+
+def _names(path: Path) -> tuple[dict[str, str], list[str]]:
+    client = QdrantClient(path=str(path))
+    try:
+        aliases = {
+            a.alias_name: a.collection_name for a in client.get_aliases().aliases
+        }
+        return aliases, [c.name for c in client.get_collections().collections]
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    ("alias", "prefix"), [("docgrep", "docgrep_"), ("a-b_9", "a-b_9_")]
+)
+def test_alias_names_the_read_alias_and_the_collections(
+    tmp_path: Path, alias: str, prefix: str
+) -> None:
+    path = tmp_path / "qdrant"
+    store = QdrantPassageStore(path, alias=alias)
+    _fill(store, 2)
+    assert store.count_passages() == 2
+    _fill(store, 3)
+    store.close()
+
+    aliases, collections = _names(path)
+    assert list(aliases) == [alias]
+    assert collections == [aliases[alias]]
+    assert collections[0].startswith(prefix)
+    assert local_passage_count(path, alias) == 3
+    assert local_passage_count(path, "other") == 0
+
+
+def test_the_default_alias_is_unchanged(tmp_path: Path) -> None:
+    path = tmp_path / "qdrant"
+    store = QdrantPassageStore(path)
+    _fill(store, 1)
+    store.close()
+
+    aliases, collections = _names(path)
+    assert list(aliases) == ["docgrep"] and collections[0].startswith("docgrep_")
+    assert local_passage_count(path) == 1
