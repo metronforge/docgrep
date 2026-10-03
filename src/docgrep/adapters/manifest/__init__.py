@@ -39,8 +39,19 @@ def _now() -> str:
 class SQLiteManifest:
     """Commit each run or source outcome to a SQLite file in the data directory."""
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, *, read_only: bool = False) -> None:
+        """Open the manifest; ``read_only`` neither creates nor migrates anything.
+
+        A read-only manifest only runs SELECT statements and tolerates a schema
+        that predates the newest columns.
+        """
         self.path = data_dir / "manifest.sqlite3"
+        if read_only:
+            if not self.path.is_file():
+                raise ManifestUnavailable(
+                    "No manifest exists", details={"path": str(self.path)}
+                )
+            return
         try:
             data_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -298,6 +309,10 @@ class SQLiteManifest:
                 raise ValueError("unknown or finished run_id")
 
     @staticmethod
+    def _optional(row: sqlite3.Row, name: str) -> object:
+        return row[name] if name in row.keys() else None
+
+    @staticmethod
     def _record(row: sqlite3.Row, passages: int | None = None) -> ManifestSourceRecord:
         source = Source(
             source_id=cast(str, row["source_id"]),
@@ -351,9 +366,14 @@ class SQLiteManifest:
             kind=cast(str, row["kind"]),
             started_at=cast(str, row["started_at"]),
             finished_at=cast(str | None, row["finished_at"]),
-            staging_collection=cast(str | None, row["staging_collection"]),
-            resumed_from=cast(str | None, row["resumed_from"]),
-            cancel_requested_at=cast(str | None, row["cancel_requested_at"]),
-            total_sources=cast(int | None, row["total_sources"]),
-            carried_sources=cast(int | None, row["carried_sources"]) or 0,
+            staging_collection=cast(
+                str | None, self._optional(row, "staging_collection")
+            ),
+            resumed_from=cast(str | None, self._optional(row, "resumed_from")),
+            cancel_requested_at=cast(
+                str | None, self._optional(row, "cancel_requested_at")
+            ),
+            total_sources=cast(int | None, self._optional(row, "total_sources")),
+            carried_sources=cast(int | None, self._optional(row, "carried_sources"))
+            or 0,
         )

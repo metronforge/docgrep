@@ -77,6 +77,33 @@ A resume is refused, before anything is written, when it cannot be a coherent co
 - `staging_inconsistent`: the retained staging collection is missing, has another vector dimension, holds fewer passages than the run recorded as indexed, or is the published index itself. Use `--restart` (or check `docgrep status` first in the last case).
 - `corpus_drift`: more than 5% of the sources the run had indexed changed or vanished. Use `--restart`. Below that threshold, changed and vanished sources have their staged passages removed, and changed ones are processed again.
 
+### Status
+
+```sh
+uv run docgrep status          # plain text
+uv run docgrep status --json   # the same report with stable key names
+```
+
+`docgrep status` is read-only: it takes no lock, loads no model, writes nothing (it does not even create a data directory or a local store that does not exist) and never fails because a component is degraded; it exits with 0 unless the command line or the settings are invalid. It reports what it can read and lists what it cannot as warnings. It works while a build runs in another process, and in local mode it reports `busy` instead of failing when another process holds the Qdrant store. A Qdrant server is pinged with a 2 second timeout.
+
+The `index_state` is one of:
+
+- `not_built`: no completed index exists.
+- `ready`: a completed index exists and the latest run is not waiting for anything (a build running right now does not change this).
+- `aborted_pending_resume`, `cancelled_pending_resume`, `interrupted_pending_resume`: the latest run is unfinished and can be resumed. An interrupted run is one that is recorded as `running` while nothing holds the index lock; the state is derived on every read and never stored.
+- `swap_pending_commit`: a run published its index but died before committing its sources; the next build or `docgrep index --resume` finishes it.
+- `manifest_unreadable`: the manifest cannot be read.
+
+The JSON output has these keys (`schema_version` is 1; sections that do not apply are `null`):
+
+- `schema_version`, `index_state`.
+- `latest_run`: `run_id`, `status` (stored: `running`, `swapped`, `completed`, `aborted` or `cancelled`), `state` (the status, or `interrupted` for a `running` run without a lock holder), `started_at`, `finished_at`, `totals` (`indexed`, `skipped`, `failed`), `total_sources`, `resumed_from` and `carried_sources` (sources taken over from the resumed run).
+- `active_operation`: present while the index lock is held. `kind` (`build` or `resume`), `run_id`, `started_at`, `sources_done` and `passages_written` (from the run's journal, so they include carried-over sources), `sources_total`, `elapsed_seconds`, `eta_seconds` (`null` until computable; the pace of this process, ignoring carried-over sources) and `cancel_requested_at`.
+- `vector_store`: `mode` (`local` or `server`), `status` (`reachable`, `unreachable`, `busy` or `absent` for a local store that does not exist yet) and `reason`, a short text for the degraded cases.
+- `collection`: when the index can be read. `passage_count`, `embedding_model`, `embedding_dimension`, `embedding_dtype`, `docgrep_version` and `completed_at`.
+- `drift`: a list of `field`, `indexed` and `runtime` for the settings that decide what vectors contain (see the resume rules above) and differ from the index. Only keys the index recorded and that are known without loading a model are compared.
+- `warnings`: a list of `code` and `message`, for example `store_unreachable`, `store_busy`, `manifest_unreadable`, `config_drift`, `resume_available`, `swap_pending_commit`, `index_incomplete`, `lock_held_without_run` and `lock_unreadable`.
+
 ## Dry run
 
 `docgrep dry-run` previews what a build would do with the configured corpus. It reads directory entries only: it takes no index lock, writes no manifest, does not open Qdrant, loads no model and creates no file, and it uses the configured corpus root, include and exclude patterns, so it predicts what `docgrep index` would enumerate.

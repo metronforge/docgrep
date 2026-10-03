@@ -14,6 +14,7 @@ from docgrep.api.container import (
     create_cancel,
     create_container,
     create_dry_run,
+    create_status,
 )
 from docgrep.api.http import SearchResponse, create_app
 from docgrep.api.log_config import configure_logging
@@ -22,6 +23,7 @@ from docgrep.domain.errors import DocgrepError
 from docgrep.settings import Settings
 from docgrep.usecases.cancel_index import CancelIndex, CancelResult
 from docgrep.usecases.dry_run import DEFAULT_LIMIT, DryRun
+from docgrep.usecases.inspect_status import InspectStatus
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -63,6 +65,10 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "cancel", help="Ask a running index build to stop after its current batch"
     )
+    status = commands.add_parser(
+        "status", help="Show the state of the index and of long operations"
+    )
+    status.add_argument("--json", action="store_true")
     commands.add_parser("serve", help="Start the local HTTP API")
     return parser
 
@@ -167,6 +173,73 @@ def _format_cancel(result: CancelResult) -> tuple[str, int]:
     return "Nothing is running.\n", 1
 
 
+def _duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown"
+    minutes, rest = divmod(round(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m {rest}s" if minutes else f"{rest}s"
+
+
+def _format_status(report: dict[str, Any]) -> str:
+    """Render the status report as plain text; counts, ids and timestamps only."""
+    store = report["vector_store"]
+    lines = [
+        f"Index: {report['index_state']}",
+        f"Vector store: {store['mode']}, {store['status']}"
+        + (f" ({store['reason']})" if store["reason"] else ""),
+    ]
+    collection = report["collection"]
+    if collection is not None:
+        lines.append(
+            f"Collection: {collection['passage_count']} passages, "
+            f"model {collection['embedding_model']} "
+            f"(dimension {collection['embedding_dimension']}, "
+            f"{collection['embedding_dtype']}), docgrep "
+            f"{collection['docgrep_version']}, completed {collection['completed_at']}"
+        )
+    run = report["latest_run"]
+    if run is None:
+        lines.append("Latest run: none")
+    else:
+        totals = run["totals"]
+        lines.append(
+            f"Latest run: {run['run_id']} {run['state']}, started "
+            f"{run['started_at']}, finished {run['finished_at'] or '-'}, "
+            f"{totals.get('indexed', 0)} indexed, {totals.get('skipped', 0)} "
+            f"skipped, {totals.get('failed', 0)} failed of "
+            f"{run['total_sources'] if run['total_sources'] is not None else '?'}"
+            " sources"
+            + (f", resumed from {run['resumed_from']}" if run["resumed_from"] else "")
+        )
+    active = report["active_operation"]
+    if active is not None:
+        total = active["sources_total"] if active["sources_total"] is not None else "?"
+        lines.append(
+            f"Active operation: {active['kind']} (run {active['run_id']}), "
+            f"{active['sources_done']}/{total} sources, "
+            f"{active['passages_written']} passages, elapsed "
+            f"{_duration(active['elapsed_seconds'])}, ETA "
+            f"{_duration(active['eta_seconds'])}"
+            + (
+                f", cancel requested at {active['cancel_requested_at']}"
+                if active["cancel_requested_at"]
+                else ""
+            )
+        )
+    for entry in report["drift"]:
+        lines.append(
+            f"Drift: {entry['field']} is {entry['indexed']} in the index and "
+            f"{entry['runtime']} in the runtime configuration"
+        )
+    if report["warnings"]:
+        lines.append("Warnings:")
+        lines.extend(f"  {w['code']}: {w['message']}" for w in report["warnings"])
+    return "\n".join(lines) + "\n"
+
+
 def _warn_user(message: str) -> None:
     sys.stderr.write(message + "\n")
 
@@ -183,6 +256,7 @@ def main(
     container_factory: Callable[[Settings], Services] = create_container,
     dry_run_factory: Callable[[Settings], DryRun] = create_dry_run,
     cancel_factory: Callable[[Settings], CancelIndex] = create_cancel,
+    status_factory: Callable[[Settings], InspectStatus] = create_status,
     register_signal: Register = signal.signal,
 ) -> int:
     """Run one CLI command and return a process exit status.
@@ -218,6 +292,14 @@ def main(
         if args.command == "index" and args.no_retry_failed and not args.resume:
             sys.stderr.write("usage: --no-retry-failed requires --resume\n")
             return 1
+
+        if args.command == "status":
+            status_report = status_factory(settings).run().as_dict()
+            if args.json:
+                sys.stdout.write(json.dumps(status_report, indent=2) + "\n")
+            else:
+                sys.stdout.write(_format_status(status_report))
+            return 0
 
         if args.command == "cancel":
             text, status = _format_cancel(cancel_factory(settings).run())
