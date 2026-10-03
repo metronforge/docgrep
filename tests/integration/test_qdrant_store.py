@@ -1,10 +1,11 @@
 """Integration checks for the embedded Qdrant passage store."""
 
+import warnings
 from pathlib import Path
 
 import pytest
 
-from docgrep.adapters.qdrant import QdrantPassageStore
+from docgrep.adapters.qdrant import QdrantPassageStore, _without_local_index_warning
 from docgrep.domain.errors import StoreUnavailable
 from docgrep.domain.models import FileType, Passage, Source, make_passage_id
 from docgrep.domain.protocols import PassageRetriever, PassageWriter
@@ -141,3 +142,34 @@ def test_qdrant_query_failure_raises_domain_error(tmp_path: Path) -> None:
     store.write_completion_metadata({"embedding_model": "fake"})
     with pytest.raises(StoreUnavailable):
         store.retrieve((1.0,), {1: 1.0}, 10)
+
+
+def test_building_a_collection_does_not_emit_the_local_index_notice(
+    tmp_path: Path,
+) -> None:
+    store = QdrantPassageStore(tmp_path / "qdrant")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        store.recreate_collection(2)
+        store.upsert(_passage(_source(), "alpha beta"), _source(), (1.0, 0.0), {1: 1.0})
+        store.write_completion_metadata({"embedding_model": "m"})
+
+    assert [str(item.message) for item in caught] == []
+
+
+def test_only_the_local_index_notice_is_suppressed() -> None:
+    notice = "Payload indexes have no effect in the local Qdrant. Use a server."
+    large = (
+        "Local mode is not recommended for collections with more than 20,000 points."
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with _without_local_index_warning():
+            warnings.warn(notice, UserWarning, stacklevel=1)
+            warnings.warn(large, UserWarning, stacklevel=1)
+            warnings.warn("something else", RuntimeWarning, stacklevel=1)
+        warnings.warn(notice, UserWarning, stacklevel=1)
+
+    assert [str(item.message) for item in caught] == [large, "something else", notice]

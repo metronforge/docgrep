@@ -1,7 +1,9 @@
 """Embedded Qdrant passage storage."""
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+import warnings
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -21,6 +23,23 @@ _PASSAGE_FILTER = models.Filter(
         )
     ]
 )
+
+
+@contextmanager
+def _without_local_index_warning() -> Iterator[None]:
+    """Hide only the notice that local mode ignores payload index requests.
+
+    The indexes are still requested so the schema matches a server deployment.
+    Every other warning, such as the one about large local collections, stays
+    visible.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Payload indexes have no effect in the local Qdrant",
+            category=UserWarning,
+        )
+        yield
 
 
 def _domain_errors[**P, T](operation: Callable[P, T]) -> Callable[P, T]:
@@ -78,14 +97,15 @@ class QdrantPassageStore:
                 "sparse": models.SparseVectorParams(modifier=models.Modifier.IDF)
             },
         )
-        for field, schema in (
-            ("source_id", models.PayloadSchemaType.KEYWORD),
-            ("author", models.PayloadSchemaType.KEYWORD),
-            ("year", models.PayloadSchemaType.INTEGER),
-            ("file_type", models.PayloadSchemaType.KEYWORD),
-            ("path", models.PayloadSchemaType.KEYWORD),
-        ):
-            self._client.create_payload_index(collection, field, schema)
+        with _without_local_index_warning():
+            for field, schema in (
+                ("source_id", models.PayloadSchemaType.KEYWORD),
+                ("author", models.PayloadSchemaType.KEYWORD),
+                ("year", models.PayloadSchemaType.INTEGER),
+                ("file_type", models.PayloadSchemaType.KEYWORD),
+                ("path", models.PayloadSchemaType.KEYWORD),
+            ):
+                self._client.create_payload_index(collection, field, schema)
         self._staging = collection
         self._dimension = dimension
 
