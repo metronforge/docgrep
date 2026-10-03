@@ -33,6 +33,7 @@ Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOC
 - `**` as a whole segment matches zero or more segments; as the last segment it matches everything beneath a directory.
 - A pattern without `/` (for example `*.tmp`) is compared with the file name at any depth.
 - A pattern containing `/` (for example `notes/private/**`) is anchored at the corpus root; use a leading `**/` to match at any depth.
+- A trailing `/` is shorthand for a trailing `/**`: `notes/private/` matches everything beneath that directory.
 
 ## Search
 
