@@ -13,11 +13,17 @@ from docgrep.domain.models import (
     FileType,
     ManifestRunRecord,
     ManifestSourceRecord,
+    RunStatus,
     Source,
 )
 
 # Columns added to the runs table after the first schema; added when missing.
-_RUN_COLUMNS = ("staging_collection", "resumed_from", "cancel_requested_at")
+_RUN_COLUMNS = (
+    ("staging_collection", "TEXT"),
+    ("resumed_from", "TEXT"),
+    ("cancel_requested_at", "TEXT"),
+    ("total_sources", "INTEGER"),
+)
 
 _SOURCE_COLUMNS = (
     "path, source_id, hash, mtime, size, file_type, status, error, "
@@ -93,9 +99,9 @@ class SQLiteManifest:
             existing = {
                 row["name"] for row in connection.execute("PRAGMA table_info(runs)")
             }
-            for column in _RUN_COLUMNS:
+            for column, kind in _RUN_COLUMNS:
                 if column not in existing:
-                    connection.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
+                    connection.execute(f"ALTER TABLE runs ADD COLUMN {column} {kind}")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -196,6 +202,23 @@ class SQLiteManifest:
             if cursor.rowcount != 1:
                 raise ValueError("unknown run_id")
 
+    def set_total_sources(self, run_id: str, total: int) -> None:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE runs SET total_sources=? WHERE id=?", (total, run_id)
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("unknown run_id")
+
+    def mark_swapped(self, run_id: str) -> None:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE runs SET status='swapped' WHERE id=? AND status='running'",
+                (run_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("unknown or not running run_id")
+
     def commit_run(self, run_id: str) -> None:
         """Replace the committed sources with the run's journal in one transaction."""
         with self._connection() as connection:
@@ -216,15 +239,15 @@ class SQLiteManifest:
     def finish_run(
         self,
         run_id: str,
-        status: Literal["completed", "aborted"],
+        status: Literal["completed", "aborted", "cancelled"],
         totals: Mapping[str, int],
     ) -> None:
-        if status not in ("completed", "aborted"):
+        if status not in ("completed", "aborted", "cancelled"):
             raise ValueError("invalid run status")
         with self._connection() as connection:
             cursor = connection.execute(
                 "UPDATE runs SET status=?, finished_at=?, totals=? "
-                "WHERE id=? AND status='running'",
+                "WHERE id=? AND status IN ('running', 'swapped')",
                 (status, _now(), json.dumps(dict(totals), sort_keys=True), run_id),
             )
             if cursor.rowcount != 1:
@@ -278,7 +301,7 @@ class SQLiteManifest:
         totals = cast(dict[str, int], json.loads(row["totals"]))
         return ManifestRunRecord(
             run_id=str(row["id"]),
-            status=cast(Literal["running", "completed", "aborted"], row["status"]),
+            status=cast(RunStatus, row["status"]),
             config=tuple(sorted(config.items())),
             totals=tuple(sorted(totals.items())),
             kind=cast(str, row["kind"]),
@@ -287,4 +310,5 @@ class SQLiteManifest:
             staging_collection=cast(str | None, row["staging_collection"]),
             resumed_from=cast(str | None, row["resumed_from"]),
             cancel_requested_at=cast(str | None, row["cancel_requested_at"]),
+            total_sources=cast(int | None, row["total_sources"]),
         )

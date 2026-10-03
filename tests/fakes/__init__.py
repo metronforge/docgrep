@@ -20,34 +20,46 @@ class InMemoryPassageStore:
         self._items: dict[
             str, tuple[Passage, Source, tuple[float, ...], dict[int, float]]
         ] = {}
+        self._staged: dict[
+            str, tuple[Passage, Source, tuple[float, ...], dict[int, float]]
+        ] = {}
         self._completion: dict[str, str | int | float] | None = None
         self._building = False
         self.orphans: list[str] = []
 
+    def _target(
+        self,
+    ) -> dict[str, tuple[Passage, Source, tuple[float, ...], dict[int, float]]]:
+        """Writes go to the collection being built, else to the published one."""
+        return self._staged if self._building else self._items
+
     def recreate_collection(self, dimension: int) -> None:
         if dimension <= 0:
             raise ValueError("dimension must be positive")
-        self._items.clear()
-        self._completion = None
+        self._staged = {}
         self._building = True
 
     def staging_name(self) -> str | None:
         return "memory-staging" if self._building else None
 
     def staging_collections(self) -> tuple[str, ...]:
-        return tuple(self.orphans)
+        retained = ["memory-staging"] if self._building else []
+        return tuple([*self.orphans, *retained])
 
     def drop_collection(self, name: str) -> None:
+        if name == "memory-staging" and self._building:
+            self._staged = {}
+            self._building = False
+            return
         if name not in self.orphans:
             raise ValueError("not a staging collection of this store")
         self.orphans.remove(name)
 
     def delete_source_points(self, source_id: str) -> int:
-        doomed = [
-            pid for pid, item in self._items.items() if item[1].source_id == source_id
-        ]
+        target = self._target()
+        doomed = [pid for pid, item in target.items() if item[1].source_id == source_id]
         for passage_id in doomed:
-            del self._items[passage_id]
+            del target[passage_id]
         return len(doomed)
 
     def upsert(
@@ -57,7 +69,7 @@ class InMemoryPassageStore:
         dense_vector: Sequence[float],
         sparse_vector: Mapping[int, float],
     ) -> None:
-        self._items[passage.passage_id] = (
+        self._target()[passage.passage_id] = (
             passage,
             source,
             tuple(dense_vector),
@@ -110,11 +122,15 @@ class InMemoryPassageStore:
     def write_completion_metadata(
         self, metadata: Mapping[str, str | int | float]
     ) -> None:
+        if self._building:
+            self._items = self._staged
+            self._staged = {}
         self._completion = dict(metadata)
         self._building = False
 
     def clear_completion_metadata(self) -> None:
-        self._completion = None
+        """Drop the collection being built; the published one is untouched."""
+        self._staged = {}
         self._building = False
 
 
@@ -131,6 +147,26 @@ class InMemoryManifest:
 
     def latest_run(self) -> ManifestRunRecord | None:
         return self._runs[-1] if self._runs else None
+
+    def set_total_sources(self, run_id: str, total: int) -> None:
+        self._update_run(run_id, total_sources=total)
+
+    def mark_swapped(self, run_id: str) -> None:
+        run = self._find(run_id)
+        if run.status != "running":
+            raise ValueError("unknown or not running run_id")
+        self._update_run(run_id, status="swapped")
+
+    def _find(self, run_id: str) -> ManifestRunRecord:
+        for run in self._runs:
+            if run.run_id == run_id:
+                return run
+        raise ValueError("unknown run_id")
+
+    def _update_run(self, run_id: str, **changes: object) -> None:
+        self._find(run_id)
+        index = next(i for i, run in enumerate(self._runs) if run.run_id == run_id)
+        self._runs[index] = replace(self._runs[index], **changes)
 
     def start_run(self, config: Mapping[str, str | int | float]) -> str:
         run_id = str(len(self._runs) + 1)
@@ -181,12 +217,14 @@ class InMemoryManifest:
     def finish_run(
         self,
         run_id: str,
-        status: Literal["completed", "aborted"],
+        status: Literal["completed", "aborted", "cancelled"],
         totals: Mapping[str, int],
     ) -> None:
         if not self._runs or self._runs[-1].run_id != run_id:
             raise ValueError("unknown run_id")
-        if status not in ("completed", "aborted"):
+        if self._runs[-1].status not in ("running", "swapped"):
+            raise ValueError("unknown or finished run_id")
+        if status not in ("completed", "aborted", "cancelled"):
             raise ValueError("invalid run status")
         self._runs[-1] = replace(
             self._runs[-1], status=status, totals=tuple(sorted(totals.items()))

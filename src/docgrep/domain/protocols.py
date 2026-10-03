@@ -131,6 +131,14 @@ class IndexLock(Protocol):
 
     def hold(self) -> AbstractContextManager[None]: ...
 
+    def is_held(self) -> bool:
+        """Whether the lock is owned right now, by anyone including this process.
+
+        A non-blocking try that never keeps the lock beyond the probe. Callers
+        must not ask while they hold the lock themselves.
+        """
+        ...
+
 
 class Reranker(Protocol):
     """Score each query-passage pair in input order; larger is more relevant."""
@@ -199,6 +207,14 @@ class ManifestWriter(Protocol):
         """Remember which collection a run is writing into."""
         ...
 
+    def set_total_sources(self, run_id: str, total: int) -> None:
+        """Remember how many sources the run plans to cover."""
+        ...
+
+    def mark_swapped(self, run_id: str) -> None:
+        """Record that the run's index is published and its journal is pending."""
+        ...
+
     def commit_run(self, run_id: str) -> None:
         """Replace the committed sources with the run's journal, atomically."""
         ...
@@ -206,9 +222,15 @@ class ManifestWriter(Protocol):
     def finish_run(
         self,
         run_id: str,
-        status: Literal["completed", "aborted"],
+        status: Literal["completed", "aborted", "cancelled"],
         totals: Mapping[str, int],
-    ) -> None: ...
+    ) -> None:
+        """Close a running or swapped run with a final status."""
+        ...
+
+
+class Manifest(ManifestReader, ManifestWriter, Protocol):
+    """Both sides of the manifest, for operations that read what they wrote."""
 
 
 class CitationFormatter(Protocol):

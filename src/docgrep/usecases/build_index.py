@@ -12,7 +12,7 @@ from docgrep.domain.errors import (
     DocgrepError,
     StoreUnavailable,
 )
-from docgrep.domain.models import FileType, Source
+from docgrep.domain.models import FileType, ManifestRunRecord, Source
 from docgrep.domain.progress import estimate_eta_seconds
 from docgrep.domain.protocols import (
     Chunker,
@@ -20,7 +20,7 @@ from docgrep.domain.protocols import (
     DocumentParser,
     EmbeddingProvider,
     IndexLock,
-    ManifestWriter,
+    Manifest,
     PassageWriter,
     SparseEncoder,
 )
@@ -128,7 +128,7 @@ class BuildIndex:
         embedder: EmbeddingProvider,
         sparse_encoder: SparseEncoder,
         passage_writer: PassageWriter,
-        manifest: ManifestWriter,
+        manifest: Manifest,
         config: Mapping[str, str | int | float],
         docgrep_version: str,
         batch_size: int = 32,
@@ -186,6 +186,25 @@ class BuildIndex:
             extra={"source_id": source.source_id, "category": reason},
         )
         return BuildFailure(source.path, reason, str(error))
+
+    def _finish_swapped_run(self) -> ManifestRunRecord | None:
+        """Finish a run whose process died after publishing but before committing.
+
+        Called with the lock held, so a run that is still swapped is dead.
+        """
+        latest = self.manifest.latest_run()
+        if latest is None or latest.status != "swapped":
+            return None
+        totals = {"indexed": 0, "skipped": 0, "failed": 0}
+        for record in self.manifest.run_sources(latest.run_id):
+            totals[record.status.split(":")[0]] += 1
+        self.manifest.commit_run(latest.run_id)
+        self.manifest.finish_run(latest.run_id, "completed", totals)
+        _LOG.warning(
+            "run_recovered",
+            extra={"run_id": latest.run_id, "previous_status": "swapped", **totals},
+        )
+        return latest
 
     def _drop_orphaned_staging_collections(self) -> None:
         for name in self.passage_writer.staging_collections():
@@ -260,15 +279,16 @@ class BuildIndex:
         totals = {"indexed": 0, "skipped": 0, "failed": 0}
         failures: list[BuildFailure] = []
         with self.lock.hold():
+            self._finish_swapped_run()
             run_id = self.manifest.start_run(self.config)
             _LOG.info(
                 "index_build_started", extra={"run_id": run_id, **self.log_context}
             )
-            replacement_started = False
+            swapped = False
             try:
                 self._drop_orphaned_staging_collections()
                 sources = self.enumerator.enumerate()
-                replacement_started = True
+                self.manifest.set_total_sources(run_id, len(sources))
                 self.passage_writer.recreate_collection(self.embedder.dimension)
                 staging = self.passage_writer.staging_name()
                 if staging is not None:
@@ -300,13 +320,20 @@ class BuildIndex:
                 self.passage_writer.write_completion_metadata(metadata)
                 # The alias now points at the new index; only then do the
                 # committed sources follow, so queries never see a description
-                # of an index that is not published yet.
+                # of an index that is not published yet. A process that dies
+                # in between leaves the run swapped, and the next start
+                # finishes it.
+                self.manifest.mark_swapped(run_id)
+                swapped = True
                 self.manifest.commit_run(run_id)
                 self.manifest.finish_run(run_id, "completed", totals)
             except Exception as error:
-                if replacement_started:
-                    self.passage_writer.clear_completion_metadata()
-                self.manifest.finish_run(run_id, "aborted", totals)
+                # Before the swap the staging collection and the journal stay,
+                # so the run can be resumed; the live index and the committed
+                # sources are untouched. After the swap the live index is
+                # complete and valid, and the run stays swapped for recovery.
+                if not swapped:
+                    self.manifest.finish_run(run_id, "aborted", totals)
                 if isinstance(error, DocgrepError):
                     raise
                 raise BuildFailed(
