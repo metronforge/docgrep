@@ -59,6 +59,7 @@ class _CorpusEnumerator:
             self._settings.corpus_root,
             self._settings.include_globs,
             self._settings.exclude_globs,
+            self._settings.data_dir,
         )
 
 
