@@ -414,3 +414,66 @@ def test_delete_source_points_removes_exactly_that_source(client: QdrantClient) 
     store.upsert(_passage(source, "staged b", 0), source, (1.0, 0.0), {1: 1.0})
     assert store.delete_source_points("b.txt") == 1
     assert store.count_passages() == 1
+
+
+def test_a_batched_build_matches_a_per_point_build_on_the_server(
+    tmp_path: Path, client: QdrantClient
+) -> None:
+    import random
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    rng = random.Random(3)
+    (corpus / "big.txt").write_text(
+        " ".join(f"w{rng.randrange(400)}" for _ in range(3000)), encoding="utf-8"
+    )
+    (corpus / "small.txt").write_text("w7 w12 and some more words here", "utf-8")
+
+    def build(alias: str, batch_size: int) -> tuple[int, list[object]]:
+        services = create_container(
+            Settings(
+                corpus_root=corpus,
+                data_dir=tmp_path / f"data-{alias}",
+                backend="fake",
+                chunk_size=10,
+                chunk_overlap=2,
+                qdrant_url=URL,
+                qdrant_alias=alias,
+                upsert_batch_size=batch_size,
+            )
+        )
+        summary = services.build.run()
+        assert (summary.indexed, summary.failed) == (2, 0)
+        results = [
+            [
+                (h.passage.passage_id, h.score, h.dense_score, h.passage.text)
+                for h in services.search.run(query, top_n=10).results
+            ]
+            for query in ("w7 w12", "w301", "w55 w2")
+        ]
+        count = client.count(alias, exact=True).count
+        return count, results
+
+    single_count, single_results = build("alpha", 1)
+    batched_count, batched_results = build("beta", 256)
+
+    assert single_count == batched_count > 300
+    assert any(single_results)
+    assert batched_results == single_results
+
+    def points(alias: str) -> dict[str, object]:
+        found: dict[str, object] = {}
+        offset = None
+        while True:
+            batch, offset = client.scroll(
+                alias, limit=200, offset=offset, with_payload=True, with_vectors=True
+            )
+            for point in batch:
+                payload = dict(point.payload or {})
+                if payload.get("record_type") == "completion":
+                    payload.pop("metadata")
+                found[str(point.id)] = (payload, point.vector)
+            if offset is None:
+                return found
+
+    assert points("alpha") == points("beta")

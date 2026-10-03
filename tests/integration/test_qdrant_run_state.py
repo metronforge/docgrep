@@ -202,6 +202,14 @@ class FailForSource:
             raise StoreUnavailable("disk full")
         self.inner.upsert(passage, source, dense_vector, sparse_vector)
 
+    def upsert_batch(
+        self,
+        items: Sequence[tuple[Passage, Source, Sequence[float], Mapping[int, float]]],
+    ) -> None:
+        if any(source.path == self.path for _, source, _, _ in items):
+            raise StoreUnavailable("disk full")
+        self.inner.upsert_batch(items)
+
     def __getattr__(self, name: str) -> object:
         return getattr(self.inner, name)
 

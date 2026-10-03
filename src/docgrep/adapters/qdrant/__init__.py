@@ -224,16 +224,13 @@ class QdrantPassageStore:
         self._staging = collection
         self._dimension = dimension
 
-    @_domain_errors
-    def upsert(
+    def _point(
         self,
         passage: Passage,
         source: Source,
         dense_vector: Sequence[float],
         sparse_vector: Mapping[int, float],
-    ) -> None:
-        if self._staging is None:
-            raise StoreUnavailable("No collection is being built")
+    ) -> models.PointStruct:
         if len(dense_vector) != self._dimension:
             raise ValueError("Dense vector dimension does not match collection")
         indices = sorted(sparse_vector)
@@ -257,22 +254,48 @@ class QdrantPassageStore:
             "indexed_at": source.indexed_at,
             "parser_version": source.parser_version,
         }
+        return models.PointStruct(
+            id=str(uuid5(NAMESPACE_URL, passage.passage_id)),
+            vector={
+                "dense": list(dense_vector),
+                "sparse": models.SparseVector(
+                    indices=indices,
+                    values=[sparse_vector[index] for index in indices],
+                ),
+            },
+            payload=payload,
+        )
+
+    @_domain_errors
+    def upsert(
+        self,
+        passage: Passage,
+        source: Source,
+        dense_vector: Sequence[float],
+        sparse_vector: Mapping[int, float],
+    ) -> None:
+        if self._staging is None:
+            raise StoreUnavailable("No collection is being built")
         self._client.upsert(
             collection_name=self._staging,
-            points=[
-                models.PointStruct(
-                    id=str(uuid5(NAMESPACE_URL, passage.passage_id)),
-                    vector={
-                        "dense": list(dense_vector),
-                        "sparse": models.SparseVector(
-                            indices=indices,
-                            values=[sparse_vector[index] for index in indices],
-                        ),
-                    },
-                    payload=payload,
-                )
-            ],
+            points=[self._point(passage, source, dense_vector, sparse_vector)],
         )
+
+    @_domain_errors
+    def upsert_batch(
+        self,
+        items: Sequence[tuple[Passage, Source, Sequence[float], Mapping[int, float]]],
+    ) -> None:
+        """Write several passages with one client call.
+
+        Every item is validated and converted first, so a bad item writes nothing.
+        """
+        if self._staging is None:
+            raise StoreUnavailable("No collection is being built")
+        if not items:
+            return
+        points = [self._point(*item) for item in items]
+        self._client.upsert(collection_name=self._staging, points=points)
 
     @_domain_errors
     def write_completion_metadata(
