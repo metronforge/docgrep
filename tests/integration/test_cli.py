@@ -58,7 +58,7 @@ def test_console_index_and_search_match_http_schema(tmp_path: Path) -> None:
         chunk_size=10,
         chunk_overlap=2,
     )
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings), base_url="http://127.0.0.1") as client:
         http_response = client.post("/search", json={"query": "blue comet", "top_n": 1})
     assert http_response.status_code == 200
     http_result = http_response.json()

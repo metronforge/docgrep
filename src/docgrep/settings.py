@@ -1,10 +1,10 @@
 """Environment-backed configuration for the local service."""
 
 from pathlib import Path
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     backend: Literal["real", "fake"] = "real"
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
+    # Extra host names accepted in the Host and Origin headers, as a
+    # comma-separated list in the environment (for container deployments).
+    allowed_hosts: Annotated[tuple[str, ...], NoDecode] = ()
+
+    @field_validator("allowed_hosts", mode="before")
+    @classmethod
+    def split_allowed_hosts(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
 
     @model_validator(mode="after")
     def validate_limits(self) -> Self:

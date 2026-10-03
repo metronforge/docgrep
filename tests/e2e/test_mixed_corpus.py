@@ -70,7 +70,7 @@ def test_mixed_corpus_http_build_search_and_rebuild(
         ),
     )
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings), base_url="http://127.0.0.1") as client:
         snapshots = []
         for _ in range(2):
             built = client.post("/index/build")
