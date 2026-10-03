@@ -141,3 +141,51 @@ def test_trailing_slash_include_selects_only_that_directory(corpus: Path) -> Non
         "notes/private/deep/er/c.md",
     ]
     assert _paths(corpus, include=("v1/", "v2/")) == ["v1/file.txt", "v2/file.txt"]
+
+
+def test_leading_slash_directory_pattern_equals_the_anchored_pattern(
+    corpus: Path,
+) -> None:
+    assert _paths(corpus, exclude=("/notes/private/**",)) == _paths(
+        corpus, exclude=("notes/private/**",)
+    )
+    assert "notes/private/deep/b.txt" not in _paths(
+        corpus, exclude=("/notes/private/**",)
+    )
+    assert _paths(corpus, include=("/notes/private/**",)) == _paths(
+        corpus, include=("notes/private/**",)
+    )
+    assert _paths(corpus, exclude=("/notes/private/",)) == _paths(
+        corpus, exclude=("notes/private/**",)
+    )
+
+
+def test_leading_slash_plain_name_matches_only_at_the_root(corpus: Path) -> None:
+    excluded = _paths(corpus, exclude=("/draft.md",))
+    assert "draft.md" not in excluded
+    assert "notes/draft.md" in excluded
+
+    included = _paths(corpus, include=("/draft.md",))
+    assert included == ["draft.md"]
+    assert _paths(corpus, include=("/root.md", "/a.tmp")) == ["a.tmp", "root.md"]
+
+
+def test_leading_slash_with_double_star_and_wildcards(corpus: Path) -> None:
+    assert _paths(corpus, include=("/**/draft.md",)) == ["draft.md", "notes/draft.md"]
+    assert _paths(corpus, include=("/*.md",)) == ["draft.md", "root.md"]
+    assert "x/y/z/scratch.tmp" in _paths(corpus, exclude=("/*.tmp",))
+    assert "a.tmp" not in _paths(corpus, exclude=("/*.tmp",))
+    assert _paths(corpus, include=("/v[12]/*",)) == ["v1/file.txt", "v2/file.txt"]
+
+
+def test_patterns_without_a_leading_slash_are_unchanged(corpus: Path) -> None:
+    assert _paths(corpus, exclude=("draft.md",)) == _paths(
+        corpus, exclude=("**/draft.md",)
+    )
+    assert "notes/draft.md" not in _paths(corpus, exclude=("draft.md",))
+    assert "x/y/z/scratch.tmp" not in _paths(corpus, exclude=("*.tmp",))
+    assert "other/private/d.txt" in _paths(corpus, exclude=("private/**",))
+
+
+def test_only_one_leading_slash_is_removed(corpus: Path) -> None:
+    assert _paths(corpus, exclude=("//draft.md",)) == _paths(corpus)
