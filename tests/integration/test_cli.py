@@ -6,9 +6,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
+from docgrep.api.cli import main
+from docgrep.api.container import Services
 from docgrep.api.http import create_app
+from docgrep.domain.errors import StoreUnavailable
 from docgrep.settings import Settings
 
 
@@ -80,3 +84,75 @@ def test_console_reports_structured_failures(tmp_path: Path) -> None:
     invalid_query = _run_cli(tmp_path, "search", "   ")
     assert invalid_query.returncode != 0
     assert "validation_error" in invalid_query.stderr
+
+
+def test_index_with_failed_sources_exits_non_zero_but_reports_everything(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "good.txt").write_text("A rare blue comet.", encoding="utf-8")
+    (corpus / "broken.pdf").write_bytes(b"this is not a pdf")
+
+    built = _run_cli(tmp_path, "index")
+
+    assert built.returncode == 1
+    assert "1 indexed, 0 skipped, 1 failed" in built.stdout
+    assert "broken.pdf: parse_error" in built.stdout
+
+    clean = tmp_path / "clean"
+    (clean / "corpus").mkdir(parents=True)
+    (clean / "corpus" / "good.txt").write_text("A rare blue comet.", "utf-8")
+    assert _run_cli(clean, "index").returncode == 0
+
+
+def test_error_output_includes_the_underlying_reason(tmp_path: Path) -> None:
+    (tmp_path / "corpus").mkdir()
+    blocker = tmp_path / "data"
+    blocker.write_text("a file, not a directory", encoding="utf-8")
+
+    result = _run_cli(tmp_path, "index")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.startswith(
+        "store_unavailable: Cannot open Qdrant storage (reason: "
+    )
+    assert "Traceback" not in result.stderr
+
+
+class _Boom:
+    def run(self, *args: object, **kwargs: object) -> None:
+        raise OSError(28, "No space left on device")
+
+
+def test_unexpected_os_errors_are_reported_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("DOCGREP_CORPUS_ROOT", str(tmp_path))
+    monkeypatch.setenv("DOCGREP_DATA_DIR", str(tmp_path / "data"))
+
+    def factory(_settings: Settings) -> Services:
+        return Services(search=_Boom(), build=_Boom())
+
+    assert main(["index"], container_factory=factory) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "io_error: [Errno 28] No space left on device\n"
+
+
+def test_domain_error_reason_is_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("DOCGREP_CORPUS_ROOT", str(tmp_path))
+    monkeypatch.setenv("DOCGREP_DATA_DIR", str(tmp_path / "data"))
+
+    def factory(_settings: Settings) -> Services:
+        raise StoreUnavailable(
+            "Cannot open Qdrant storage", details={"reason": "already accessed"}
+        )
+
+    assert main(["search", "x"], container_factory=factory) == 1
+    assert capsys.readouterr().err == (
+        "store_unavailable: Cannot open Qdrant storage (reason: already accessed)\n"
+    )

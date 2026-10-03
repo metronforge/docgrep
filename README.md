@@ -35,6 +35,10 @@ Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOC
 - A pattern containing `/` (for example `notes/private/**`) is anchored at the corpus root; use a leading `**/` to match at any depth.
 - A trailing `/` is shorthand for a trailing `/**`: `notes/private/` matches everything beneath that directory.
 
+## Exit codes
+
+`docgrep` exits with 0 on success and 1 on failure. `docgrep index` also exits with 1 when the build completed but one or more sources failed; the summary and the failed sources are still printed on standard output. Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
+
 ## Search
 
 ```sh
