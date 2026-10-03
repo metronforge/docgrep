@@ -57,16 +57,23 @@ def _matches(path: str, patterns: Sequence[str]) -> bool:
     return False
 
 
-def _files(root: Path) -> Iterator[Path]:
+def _files(root: Path, skipped_dir: Path | None = None) -> Iterator[Path]:
     def raise_walk_error(error: OSError) -> None:
         raise error
+
+    def is_skipped(directory: Path) -> bool:
+        return directory.name == ".git" or (
+            skipped_dir is not None and directory.resolve() == skipped_dir
+        )
 
     for directory, subdirs, filenames in os.walk(
         root, followlinks=False, onerror=raise_walk_error
     ):
         current = Path(directory)
         subdirs[:] = sorted(
-            name for name in subdirs if not (current / name).is_symlink()
+            name
+            for name in subdirs
+            if not (current / name).is_symlink() and not is_skipped(current / name)
         )
         for name in sorted(filenames):
             path = current / name
@@ -86,14 +93,31 @@ def enumerate_corpus(
     corpus_root: Path,
     include_globs: Sequence[str] = ("**/*",),
     exclude_globs: Sequence[str] = (),
+    data_dir: Path | None = None,
 ) -> tuple[Source, ...]:
-    """Return files in relative-path order, including unsupported types."""
+    """Return files in relative-path order, including unsupported types.
+
+    ``.git`` directories are never entered. When ``data_dir`` lies inside the
+    corpus it is skipped as well, so index files are not listed as sources; a
+    corpus root that is ``data_dir`` or lies inside it is a configuration error.
+    """
+    skipped_dir: Path | None = None
+    if data_dir is not None:
+        resolved_data = data_dir.resolve()
+        resolved_root = corpus_root.resolve()
+        if resolved_root == resolved_data or resolved_data in resolved_root.parents:
+            raise ValidationError(
+                "corpus root must not be inside the data directory",
+                details={"corpus_root": str(corpus_root), "data_dir": str(data_dir)},
+            )
+        if resolved_root in resolved_data.parents:
+            skipped_dir = resolved_data
     try:
         root_stat = corpus_root.stat()
         if not corpus_root.is_dir() or not root_stat.st_mode & 0o444:
             raise OSError("corpus root is not a readable directory")
         sources = []
-        for path in _files(corpus_root):
+        for path in _files(corpus_root, skipped_dir):
             relative = path.relative_to(corpus_root).as_posix()
             if not _matches(relative, include_globs) or _matches(
                 relative, exclude_globs
