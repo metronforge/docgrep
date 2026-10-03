@@ -76,6 +76,26 @@ class PassageWriter(Protocol):
 
     def clear_completion_metadata(self) -> None: ...
 
+    def staging_name(self) -> str | None:
+        """Name of the collection being built, or None when no build is open."""
+        ...
+
+    def staging_collections(self) -> tuple[str, ...]:
+        """Unpublished collections that carry this store's staging name pattern.
+
+        The published collection and collections of other stores are never listed.
+        """
+        ...
+
+    def drop_collection(self, name: str) -> None:
+        """Remove one listed staging collection; refuse any other name."""
+        ...
+
+    def delete_source_points(self, source_id: str) -> int:
+        """Delete every passage of a source from the collection being built, or
+        from the published collection when none is open; return how many."""
+        ...
+
 
 class IndexLock(Protocol):
     """Guard the exclusive index write lock while a build runs.
@@ -125,6 +145,10 @@ class ManifestReader(Protocol):
 
     def latest_run(self) -> ManifestRunRecord | None: ...
 
+    def run_sources(self, run_id: str) -> tuple[ManifestSourceRecord, ...]:
+        """The journal of one run: every source outcome it recorded, by path."""
+        ...
+
 
 class ManifestWriter(Protocol):
     """Record an indexing run and per-source outcomes durably at each call."""
@@ -137,7 +161,24 @@ class ManifestWriter(Protocol):
         status: str,
         error: str | None = None,
         embedding_model: str | None = None,
-    ) -> None: ...
+        *,
+        run_id: str | None = None,
+        passages: int = 0,
+    ) -> None:
+        """Record a source outcome.
+
+        With a run id the outcome goes to that run's journal only; without one it
+        updates the committed sources directly.
+        """
+        ...
+
+    def set_staging_collection(self, run_id: str, name: str) -> None:
+        """Remember which collection a run is writing into."""
+        ...
+
+    def commit_run(self, run_id: str) -> None:
+        """Replace the committed sources with the run's journal, atomically."""
+        ...
 
     def finish_run(
         self,

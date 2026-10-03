@@ -185,6 +185,7 @@ class ManifestSourceRecord:
     status: str
     error: str | None = None
     embedding_model: str | None = None
+    passages: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,3 +199,6 @@ class ManifestRunRecord:
     kind: str = "build"
     started_at: str | None = None
     finished_at: str | None = None
+    staging_collection: str | None = None
+    resumed_from: str | None = None
+    cancel_requested_at: str | None = None

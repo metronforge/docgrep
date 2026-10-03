@@ -96,28 +96,39 @@ class BuildIndex:
         raise AssertionError("retry loop exhausted")
 
     def _record_failure(
-        self, source: Source, reason: str, error: Exception
+        self, source: Source, reason: str, error: Exception, run_id: str
     ) -> BuildFailure:
-        self.manifest.record_source(source, f"failed:{reason}", str(error))
+        self.manifest.record_source(
+            source, f"failed:{reason}", str(error), run_id=run_id
+        )
         _LOG.warning(
             "index_source_failed",
             extra={"source_id": source.source_id, "category": reason},
         )
         return BuildFailure(source.path, reason, str(error))
 
-    def _index_source(self, source: Source) -> tuple[str, BuildFailure | None]:
+    def _drop_orphaned_staging_collections(self) -> None:
+        for name in self.passage_writer.staging_collections():
+            self.passage_writer.drop_collection(name)
+            _LOG.info("orphaned_staging_collection_dropped", extra={"collection": name})
+
+    def _index_source(
+        self, source: Source, run_id: str
+    ) -> tuple[str, BuildFailure | None]:
         parser = self.parsers.get(source.file_type)
         if parser is None:
-            self.manifest.record_source(source, "skipped:unsupported")
+            self.manifest.record_source(source, "skipped:unsupported", run_id=run_id)
             return "skipped", None
         try:
             document = parser.parse(source)
             if document.requires_ocr:
-                self.manifest.record_source(document.source, "skipped:requires_ocr")
+                self.manifest.record_source(
+                    document.source, "skipped:requires_ocr", run_id=run_id
+                )
                 return "skipped", None
             passages = self.chunker.chunk(document)
         except Exception as error:
-            return "failed", self._record_failure(source, "parse_error", error)
+            return "failed", self._record_failure(source, "parse_error", error, run_id)
 
         all_vectors: list[tuple[float, ...]] = []
         for start in range(0, len(passages), self.batch_size):
@@ -130,7 +141,7 @@ class BuildIndex:
                     raise ValueError("embedder returned wrong vector count")
             except Exception as error:
                 return "failed", self._record_failure(
-                    document.source, "embedding_error", error
+                    document.source, "embedding_error", error, run_id
                 )
             all_vectors.extend(vectors)
         for passage, vector in zip(passages, all_vectors, strict=True):
@@ -147,7 +158,11 @@ class BuildIndex:
                     details={"path": source.path, "reason": str(error)},
                 ) from error
         self.manifest.record_source(
-            document.source, "indexed", embedding_model=self.embedder.model_name
+            document.source,
+            "indexed",
+            embedding_model=self.embedder.model_name,
+            run_id=run_id,
+            passages=len(passages),
         )
         return "indexed", None
 
@@ -163,11 +178,15 @@ class BuildIndex:
             )
             replacement_started = False
             try:
+                self._drop_orphaned_staging_collections()
                 sources = self.enumerator.enumerate()
                 replacement_started = True
                 self.passage_writer.recreate_collection(self.embedder.dimension)
+                staging = self.passage_writer.staging_name()
+                if staging is not None:
+                    self.manifest.set_staging_collection(run_id, staging)
                 for source in sources:
-                    outcome, failure = self._index_source(source)
+                    outcome, failure = self._index_source(source, run_id)
                     totals[outcome] += 1
                     if failure is not None:
                         failures.append(failure)
@@ -179,6 +198,10 @@ class BuildIndex:
                     completed_at=datetime.now(UTC).isoformat(),
                 )
                 self.passage_writer.write_completion_metadata(metadata)
+                # The alias now points at the new index; only then do the
+                # committed sources follow, so queries never see a description
+                # of an index that is not published yet.
+                self.manifest.commit_run(run_id)
                 self.manifest.finish_run(run_id, "completed", totals)
             except Exception as error:
                 if replacement_started:

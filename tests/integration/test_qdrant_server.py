@@ -10,6 +10,7 @@ from qdrant_client import QdrantClient, models
 
 from docgrep.adapters.qdrant import QdrantPassageStore
 from docgrep.api.container import create_container
+from docgrep.domain.errors import StoreUnavailable
 from docgrep.domain.models import FileType, Passage, Source, make_passage_id
 from docgrep.settings import Settings
 
@@ -301,3 +302,115 @@ def test_swapping_one_alias_leaves_the_other_untouched(client: QdrantClient) -> 
     ]
     assert alpha.count_passages() == 2
     assert alpha.read_completion_metadata() == {"embedding_model": "a2"}
+
+
+def _leave_orphan(store: QdrantPassageStore) -> str:
+    store.recreate_collection(2)
+    source = _source("half.txt")
+    store.upsert(_passage(source, "half built", 0), source, (1.0, 0.0), {1: 1.0})
+    name = store.staging_name()
+    assert name is not None
+    return name
+
+
+def _collection_names(client: QdrantClient) -> set[str]:
+    return {c.name for c in client.get_collections().collections}
+
+
+def test_orphans_are_listed_and_dropped_per_alias(client: QdrantClient) -> None:
+    alpha = QdrantPassageStore(url=URL, alias="alpha")
+    beta = QdrantPassageStore(url=URL, alias="beta")
+    _build(alpha, "a", {"alpha text": (1.0, 0.0)})
+    _build(beta, "b", {"beta text": (1.0, 0.0)})
+    alpha_orphan = _leave_orphan(alpha)
+    beta_orphan = _leave_orphan(beta)
+    # A second client of the same alias sees the leftover as an orphan.
+    alpha_again = QdrantPassageStore(url=URL, alias="alpha")
+    published = _alias_targets(client)
+
+    assert alpha_again.staging_collections() == (alpha_orphan,)
+    assert beta.staging_collections() == (beta_orphan,)
+    with pytest.raises(StoreUnavailable) as foreign:
+        alpha_again.drop_collection(beta_orphan)
+    assert "staging collection" in str(foreign.value.details["reason"])
+    with pytest.raises(StoreUnavailable) as live:
+        alpha_again.drop_collection(published["alpha"])
+    assert "published" in str(live.value.details["reason"])
+    alpha_again.drop_collection(alpha_orphan)
+
+    names = _collection_names(client)
+    assert alpha_orphan not in names
+    assert (
+        beta_orphan in names
+        and published["alpha"] in names
+        and published["beta"] in names
+    )
+    assert alpha_again.staging_collections() == ()
+    assert beta.read_completion_metadata() == {"embedding_model": "b"}
+
+
+def test_a_build_removes_its_own_alias_orphans_and_leaves_other_aliases_alone(
+    tmp_path: Path, client: QdrantClient
+) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "note.txt").write_text("A rare blue comet crosses the sky.", "utf-8")
+    other = QdrantPassageStore(url=URL, alias="beta")
+    _build(other, "b", {"beta text": (1.0, 0.0)})
+    beta_orphan = _leave_orphan(other)
+    crashed = QdrantPassageStore(url=URL, alias="alpha")
+    alpha_orphan = _leave_orphan(crashed)
+    settings = Settings(
+        corpus_root=corpus,
+        data_dir=tmp_path / "data",
+        backend="fake",
+        chunk_size=10,
+        chunk_overlap=2,
+        qdrant_url=URL,
+        qdrant_alias="alpha",
+    )
+    services = create_container(settings)
+
+    summary = services.build.run()
+
+    assert (summary.indexed, summary.failed) == (1, 0)
+    names = _collection_names(client)
+    assert alpha_orphan not in names
+    assert beta_orphan in names
+    assert _alias_targets(client)["alpha"] in names
+    result = services.search.run("blue comet", top_n=1)
+    assert result.results[0].passage.text == "A rare blue comet crosses the sky."
+    assert other.read_completion_metadata() == {"embedding_model": "b"}
+
+
+def test_delete_source_points_removes_exactly_that_source(client: QdrantClient) -> None:
+    store = _store()
+    store.recreate_collection(2)
+    sources = {"a.txt": 2, "b.txt": 1}
+    offset = 0
+    for name, count in sources.items():
+        source = _source(name)
+        for index in range(count):
+            store.upsert(
+                _passage(source, f"{name} {index}", offset),
+                source,
+                (1.0, 0.0),
+                {offset + 1: 1.0},
+            )
+            offset += 1
+    store.write_completion_metadata({"embedding_model": "m"})
+
+    assert store.delete_source_points("a.txt") == 2
+
+    assert store.count_passages() == 1
+    assert [c.passage.text for c in store.retrieve((1.0, 0.0), {3: 1.0}, 5)] == [
+        "b.txt 0"
+    ]
+    assert store.read_completion_metadata() == {"embedding_model": "m"}
+    assert store.delete_source_points("a.txt") == 0
+
+    store.recreate_collection(2)
+    source = _source("b.txt")
+    store.upsert(_passage(source, "staged b", 0), source, (1.0, 0.0), {1: 1.0})
+    assert store.delete_source_points("b.txt") == 1
+    assert store.count_passages() == 1
