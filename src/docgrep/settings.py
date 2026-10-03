@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     device: Literal["cuda", "cpu", "auto"] = "auto"
+    # Embedding weight precision: auto means float16 on CUDA, float32 otherwise.
+    embedding_dtype: Literal["auto", "float16", "float32"] = "auto"
     # Reranker weight precision: auto means float16 on CUDA, float32 otherwise.
     reranker_dtype: Literal["auto", "float16", "float32"] = "auto"
     backend: Literal["real", "fake"] = "real"

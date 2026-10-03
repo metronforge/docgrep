@@ -84,7 +84,9 @@ def create_container(settings: Settings) -> Services:
         reranker = LexicalReranker()
         tokenizer = WhitespaceTokenizer()
     else:
-        real_embedder = BgeEmbedder(settings.embedding_model, settings.device)
+        real_embedder = BgeEmbedder(
+            settings.embedding_model, settings.device, dtype=settings.embedding_dtype
+        )
         embedder = real_embedder
         reranker = BgeReranker(
             settings.reranker_model, settings.device, dtype=settings.reranker_dtype

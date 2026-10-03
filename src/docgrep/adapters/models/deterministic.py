@@ -17,6 +17,7 @@ class DeterministicEmbedder:
 
     model_name = "deterministic-hash-v1"
     dimension = 64
+    dtype = "float32"
 
     def embed(self, texts: Sequence[str]) -> tuple[tuple[float, ...], ...]:
         vectors: list[tuple[float, ...]] = []

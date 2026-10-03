@@ -205,3 +205,34 @@ def test_half_precision_reranker_agrees_with_full_precision_on_a_tiny_set() -> N
         for name, scores in results.items()
     }
     assert best["float16"] == best["float32"] == 1
+
+
+@pytest.mark.gpu
+@pytest.mark.usefixtures("require_cuda")
+def test_half_precision_embeddings_match_full_precision() -> None:
+    import gc
+
+    import torch
+
+    passages = [
+        "A cat is sleeping on the sofa.",
+        "Quantum mechanics studies matter at small scales.",
+        "Кошка спит на диване.",
+    ]
+    vectors: dict[str, tuple[tuple[float, ...], ...]] = {}
+    for dtype in ("float32", "float16"):
+        embedder = BgeEmbedder("BAAI/bge-m3", "auto", dtype=dtype)
+        vectors[dtype] = embedder.embed(passages)
+        assert embedder.dimension == 1024
+        del embedder
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    half, full = vectors["float16"], vectors["float32"]
+    assert len(half) == len(passages)
+    for low, high in zip(half, full, strict=True):
+        assert len(low) == 1024
+        assert all(math.isfinite(value) and type(value) is float for value in low)
+        cosine = sum(a * b for a, b in zip(low, high, strict=True))
+        assert cosine > 0.999
+        assert math.isclose(math.hypot(*low), 1.0, abs_tol=1e-9)

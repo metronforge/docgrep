@@ -4,7 +4,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from importlib import import_module
-from math import isfinite
+from math import isfinite, sqrt
 from typing import Protocol, cast
 
 from docgrep.domain.errors import ModelUnavailable
@@ -44,9 +44,15 @@ class CrossModel(Protocol):
     ) -> Iterable[float]: ...
 
 
-def _load_sentence_model(name: str, device: str) -> SentenceModel:
+def _load_sentence_model(
+    name: str, device: str, dtype: str = "float32"
+) -> SentenceModel:
     model_type = import_module("sentence_transformers").SentenceTransformer
-    return cast(SentenceModel, model_type(name, device=device))
+    if dtype == "float32":
+        return cast(SentenceModel, model_type(name, device=device))
+    return cast(
+        SentenceModel, model_type(name, device=device, model_kwargs={"dtype": dtype})
+    )
 
 
 def _load_cross_model(name: str, device: str, dtype: str = "float32") -> CrossModel:
@@ -68,7 +74,7 @@ def _device(setting: str, cuda_available: Callable[[], bool]) -> str:
     return "cuda" if cuda_available() else "cpu"
 
 
-def resolve_reranker_dtype(setting: str, device: str) -> tuple[str, bool]:
+def resolve_dtype(setting: str, device: str) -> tuple[str, bool]:
     """Pick the weight precision for a device.
 
     Returns the effective dtype and whether an explicit float16 request had to
@@ -80,6 +86,14 @@ def resolve_reranker_dtype(setting: str, device: str) -> tuple[str, bool]:
     if device.startswith("cuda"):
         return "float16", False
     return "float32", setting == "float16"
+
+
+resolve_reranker_dtype = resolve_dtype
+
+
+def _unit_length(vector: Sequence[float]) -> tuple[float, ...]:
+    norm = sqrt(sum(value * value for value in vector))
+    return tuple(vector) if norm == 0 else tuple(value / norm for value in vector)
 
 
 def _load_logged[T](
@@ -176,18 +190,47 @@ class BgeEmbedder:
         device: str = "auto",
         loader: Callable[[str, str], SentenceModel] | None = None,
         cuda_available: Callable[[], bool] | None = None,
+        dtype: str = "auto",
+        factory: Callable[[str, str, str], SentenceModel] | None = None,
     ) -> None:
         self.model_name = model_name
+        self.dtype_setting = dtype
         self._device = device
-        self._loader = loader or _load_sentence_model
+        self._loader = loader
+        self._factory = factory or _load_sentence_model
         self._cuda_available = cuda_available or _torch_cuda_available
         self._model: SentenceModel | None = None
+
+    @property
+    def dtype(self) -> str:
+        """The precision the model runs in on the configured device."""
+        device = _device(self._device, self._cuda_available)
+        return resolve_dtype(self.dtype_setting, device)[0]
 
     def _get_model(self) -> SentenceModel:
         if self._model is None:
             try:
+                device = _device(self._device, self._cuda_available)
+                dtype, fell_back = resolve_dtype(self.dtype_setting, device)
+                if fell_back:
+                    _LOG.warning(
+                        "embedding_dtype_fallback",
+                        extra={
+                            "requested": self.dtype_setting,
+                            "device": device,
+                            "dtype": dtype,
+                        },
+                    )
+                injected = self._loader
+                factory = self._factory
                 self._model = _load_logged(
-                    self._loader, self.model_name, self._device, self._cuda_available
+                    (lambda n, d: injected(n, d))
+                    if injected is not None
+                    else (lambda n, d: factory(n, d, dtype)),
+                    self.model_name,
+                    device,
+                    self._cuda_available,
+                    None if injected is not None else {"dtype": dtype},
                 )
             except Exception as error:
                 raise _unavailable(self.model_name, error) from error
@@ -221,8 +264,11 @@ class BgeEmbedder:
         if not texts:
             return ()
         try:
+            half = self.dtype == "float16"
             vectors = tuple(
-                tuple(float(value) for value in vector)
+                # Half-precision output is unit length only to about 1e-3, so it is
+                # normalized again in float32 and callers always get float vectors.
+                (_unit_length if half else tuple)([float(value) for value in vector])
                 for vector in self._get_model().encode(
                     texts,
                     normalize_embeddings=True,
