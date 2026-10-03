@@ -11,6 +11,7 @@ from docgrep.domain.models import (
     Passage,
     RankedPassage,
     RetrievalCandidate,
+    ScannedFile,
     Source,
 )
 
@@ -37,6 +38,16 @@ class CorpusEnumerator(Protocol):
     """Return source records in deterministic order, including unsupported files."""
 
     def enumerate(self) -> tuple[Source, ...]: ...
+
+
+class CorpusScanner(Protocol):
+    """List every corpus file from directory entries alone, in path order.
+
+    Nothing is read or hashed. Files that the include and exclude patterns keep
+    out of a build are included and carry the pattern responsible.
+    """
+
+    def scan(self) -> tuple[ScannedFile, ...]: ...
 
 
 class EmbeddingProvider(Protocol):

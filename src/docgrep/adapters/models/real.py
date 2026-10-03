@@ -181,6 +181,17 @@ class ModelTokenizer:
             raise _unavailable(self._model_name, error) from error
 
 
+def load_tokenizer(model_name: str) -> ModelTokenizer:
+    """Load only the tokenizer files of a model: no weights and no device."""
+    try:
+        tokenizer = import_module("transformers").AutoTokenizer.from_pretrained(
+            model_name
+        )
+    except Exception as error:
+        raise _unavailable(model_name, error) from error
+    return ModelTokenizer(cast(OffsetTokenizer, tokenizer), model_name)
+
+
 class BgeEmbedder:
     """Load a Sentence Transformer on first use and return normalized vectors."""
 

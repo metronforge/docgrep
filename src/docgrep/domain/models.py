@@ -58,6 +58,23 @@ class Source:
 
 
 @dataclass(frozen=True, slots=True)
+class ScannedFile:
+    """A file seen by a stat-only scan of the corpus; its content was not read."""
+
+    path: str
+    size: int
+    extension: str
+    file_type: FileType | None = None
+    excluded_by: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.path:
+            raise ValueError("path must not be empty")
+        if self.size < 0:
+            raise ValueError("size must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
 class Passage:
     """An exact text span from a source document."""
 

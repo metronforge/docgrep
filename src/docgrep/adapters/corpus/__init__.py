@@ -8,7 +8,7 @@ from pathlib import Path
 from blake3 import blake3
 
 from docgrep.domain.errors import ValidationError
-from docgrep.domain.models import FileType, Source
+from docgrep.domain.models import FileType, ScannedFile, Source
 
 _FILE_TYPES = {
     ".txt": FileType.TXT,
@@ -38,8 +38,8 @@ def _match_segments(pattern: Sequence[str], parts: Sequence[str]) -> bool:
     return fnmatchcase(parts[0], head) and _match_segments(pattern[1:], parts[1:])
 
 
-def _matches(path: str, patterns: Sequence[str]) -> bool:
-    """Return whether a POSIX-relative path matches any glob pattern.
+def _matching_pattern(path: str, patterns: Sequence[str]) -> str | None:
+    """Return the first glob pattern a POSIX-relative path matches, or None.
 
     Matching works on whole path segments. ``*``, ``?`` and ``[...]`` never
     cross ``/``; a ``**`` segment matches zero or more segments, except as the
@@ -53,7 +53,8 @@ def _matches(path: str, patterns: Sequence[str]) -> bool:
     everything beneath ``dir``.
     """
     parts = tuple(path.split("/"))
-    for pattern in patterns:
+    for original in patterns:
+        pattern = original
         anchored = pattern.startswith("/")
         if anchored:
             pattern = pattern[1:]
@@ -61,10 +62,15 @@ def _matches(path: str, patterns: Sequence[str]) -> bool:
             pattern += "**"
         if not anchored and "/" not in pattern:
             if fnmatchcase(parts[-1], pattern):
-                return True
+                return original
         elif _match_segments(tuple(pattern.split("/")), parts):
-            return True
-    return False
+            return original
+    return None
+
+
+def _matches(path: str, patterns: Sequence[str]) -> bool:
+    """Return whether a POSIX-relative path matches any glob pattern."""
+    return _matching_pattern(path, patterns) is not None
 
 
 def _files(root: Path, skipped_dir: Path | None = None) -> Iterator[Path]:
@@ -99,6 +105,33 @@ def _content_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _skipped_data_dir(corpus_root: Path, data_dir: Path | None) -> Path | None:
+    """Resolve the data directory to skip, or reject a corpus inside it."""
+    if data_dir is None:
+        return None
+    resolved_data = data_dir.resolve()
+    resolved_root = corpus_root.resolve()
+    if resolved_root == resolved_data or resolved_data in resolved_root.parents:
+        raise ValidationError(
+            "corpus root must not be inside the data directory",
+            details={"corpus_root": str(corpus_root), "data_dir": str(data_dir)},
+        )
+    return resolved_data if resolved_root in resolved_data.parents else None
+
+
+def _require_readable_root(corpus_root: Path) -> None:
+    corpus_root.stat()
+    if not corpus_root.is_dir() or not os.access(corpus_root, os.R_OK | os.X_OK):
+        raise OSError("corpus root is not a readable directory")
+
+
+def _inaccessible(corpus_root: Path, error: OSError) -> ValidationError:
+    return ValidationError(
+        "corpus is not accessible",
+        details={"path": str(corpus_root), "reason": str(error)},
+    )
+
+
 def enumerate_corpus(
     corpus_root: Path,
     include_globs: Sequence[str] = ("**/*",),
@@ -111,21 +144,9 @@ def enumerate_corpus(
     corpus it is skipped as well, so index files are not listed as sources; a
     corpus root that is ``data_dir`` or lies inside it is a configuration error.
     """
-    skipped_dir: Path | None = None
-    if data_dir is not None:
-        resolved_data = data_dir.resolve()
-        resolved_root = corpus_root.resolve()
-        if resolved_root == resolved_data or resolved_data in resolved_root.parents:
-            raise ValidationError(
-                "corpus root must not be inside the data directory",
-                details={"corpus_root": str(corpus_root), "data_dir": str(data_dir)},
-            )
-        if resolved_root in resolved_data.parents:
-            skipped_dir = resolved_data
+    skipped_dir = _skipped_data_dir(corpus_root, data_dir)
     try:
-        corpus_root.stat()
-        if not corpus_root.is_dir() or not os.access(corpus_root, os.R_OK | os.X_OK):
-            raise OSError("corpus root is not a readable directory")
+        _require_readable_root(corpus_root)
         sources = []
         for path in _files(corpus_root, skipped_dir):
             relative = path.relative_to(corpus_root).as_posix()
@@ -147,8 +168,48 @@ def enumerate_corpus(
                 )
             )
     except OSError as error:
-        raise ValidationError(
-            "corpus is not accessible",
-            details={"path": str(corpus_root), "reason": str(error)},
-        ) from error
+        raise _inaccessible(corpus_root, error) from error
     return tuple(sorted(sources, key=lambda source: source.path))
+
+
+NOT_MATCHED_BY_INCLUDES = "not_matched_by_includes"
+
+
+def scan_corpus(
+    corpus_root: Path,
+    include_globs: Sequence[str] = ("**/*",),
+    exclude_globs: Sequence[str] = (),
+    data_dir: Path | None = None,
+) -> tuple[ScannedFile, ...]:
+    """List every file under the corpus root from directory entries alone.
+
+    Nothing is read or hashed. Each file reports its size, extension, file type
+    bucket (None for an unrecognised extension) and, when the include and exclude
+    patterns would keep a build from enumerating it, the pattern responsible:
+    ``not_matched_by_includes`` or the matching exclude pattern. The walk,
+    the skipped directories and the matcher are those of ``enumerate_corpus``.
+    """
+    skipped_dir = _skipped_data_dir(corpus_root, data_dir)
+    try:
+        _require_readable_root(corpus_root)
+        scanned = []
+        for path in _files(corpus_root, skipped_dir):
+            relative = path.relative_to(corpus_root).as_posix()
+            excluded_by = None
+            if not _matches(relative, include_globs):
+                excluded_by = NOT_MATCHED_BY_INCLUDES
+            else:
+                excluded_by = _matching_pattern(relative, exclude_globs)
+            extension = path.suffix.lower()
+            scanned.append(
+                ScannedFile(
+                    path=relative,
+                    size=path.stat().st_size,
+                    extension=extension,
+                    file_type=_FILE_TYPES.get(extension),
+                    excluded_by=excluded_by,
+                )
+            )
+    except OSError as error:
+        raise _inaccessible(corpus_root, error) from error
+    return tuple(sorted(scanned, key=lambda item: item.path))

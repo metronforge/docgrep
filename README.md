@@ -47,6 +47,34 @@ Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOC
 
 Diagnostics go to standard error as one line per record: a UTC timestamp, the level, the logger name, the message and any extra fields as `key=value` pairs. Command output on standard output is not affected. `DOCGREP_LOG_LEVEL` selects the level (`DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`; default `INFO`). The server logs a warning at start when `DOCGREP_HOST` is not a loopback address, because the API has no authentication.
 
+## Dry run
+
+`docgrep dry-run` previews what a build would do with the configured corpus. It reads directory entries only: it takes no index lock, writes no manifest, does not open Qdrant, loads no model and creates no file, and it uses the configured corpus root, include and exclude patterns, so it predicts what `docgrep index` would enumerate.
+
+```sh
+uv run docgrep dry-run                     # plain-text report
+uv run docgrep dry-run --json              # machine-readable report with a file list
+uv run docgrep dry-run --path-prefix books/ --sample 20 --seed 1
+```
+
+The report gives the total number of files, and for each file type the count and the total, average and largest size. Types that docgrep recognises but cannot parse yet (for example EPUB, DOCX and DjVu) are listed separately as recognised without a parser, files with other extensions as unsupported with the 20 most common extensions, and excluded files with the pattern that excluded them (`not_matched_by_includes` when no include pattern matched).
+
+- `--path-prefix` restricts every figure to paths starting with the given relative prefix.
+- `--limit` (1 to 500, default 100) and `--offset` page the file list, which is part of the JSON output only.
+- `--sample N` (1 to 50, off by default) parses and chunks N randomly chosen files of the supported types, spread proportionally over the types, with the seed given by `--seed` (default 0), so the same seed picks the same files. Nothing is embedded or written. For each type it reports passages per file and per MB (1 MB is 1,000,000 bytes), parse plus chunk seconds per file and the fraction flagged as needing OCR, and then extrapolates the passage count and parse time of the whole corpus both by file count and by size. These are estimates from a sample, not measurements. Sampling reads whole files, which is why it is opt-in; with the real backend it loads the tokenizer files of the embedding model, never its weights.
+
+The report never contains file content, only counts, sizes, timings, patterns and, in the JSON file list and sample, relative paths. Invalid values give a `validation_error` and exit status 1.
+
+The JSON output has these keys (`schema_version` is 1):
+
+- `schema_version`, `scope` (`path_prefix`), `totals` (`files`, `size_bytes`, `included`, `excluded`).
+- `types`: a list sorted by type with `type`, `status` (`supported` or `recognised_without_parser`), `files`, `size_bytes`, `average_size_bytes` and `largest_size_bytes`.
+- `unsupported`: `files`, `size_bytes`, `average_size_bytes`, `largest_size_bytes` and `extensions`, a list of `extension` and `files`.
+- `would_be_indexed` (`files`, `size_bytes`) and `recognised_without_parser` (`files`, `size_bytes`, `types`).
+- `excluded`: `files`, `size_bytes` and `by_pattern`, a list of `pattern` and `files`.
+- `files`: `offset`, `limit`, `total` and `items`, a list of `path`, `size_bytes`, `extension`, `type` (null when unsupported), `status` (`indexed`, `recognised_without_parser`, `unsupported` or `excluded`) and `excluded_by`.
+- `sample`: null without `--sample`, otherwise `requested`, `seed`, `note` and `types`, a list of `type`, `sampled_files`, `parsed`, `failed`, `requires_ocr_fraction`, `passages_per_file`, `passages_per_mb`, `parse_chunk_seconds_per_file` and `estimate` (`note`, `corpus_files`, `corpus_size_bytes`, and `by_file_count` and `by_size`, each with `passages` and `parse_chunk_seconds`).
+
 ## Search
 
 ```sh
