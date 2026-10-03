@@ -205,12 +205,19 @@ class ManifestSourceRecord:
     passages: int | None = None
 
 
+RunStatus = Literal["running", "swapped", "completed", "aborted", "cancelled"]
+
+
 @dataclass(frozen=True, slots=True)
 class ManifestRunRecord:
-    """A single indexing run and its committed counters."""
+    """A single indexing run and its committed counters.
+
+    ``swapped`` means the new index is published but the committed sources have
+    not been replaced from the run's journal yet.
+    """
 
     run_id: str
-    status: Literal["running", "completed", "aborted"]
+    status: RunStatus
     config: tuple[tuple[str, str | int | float], ...]
     totals: tuple[tuple[str, int], ...] = ()
     kind: str = "build"
@@ -219,3 +226,4 @@ class ManifestRunRecord:
     staging_collection: str | None = None
     resumed_from: str | None = None
     cancel_requested_at: str | None = None
+    total_sources: int | None = None

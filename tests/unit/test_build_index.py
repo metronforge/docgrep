@@ -224,6 +224,9 @@ class FakeLock:
         self.refuse = refuse
         self.events: list[str] = []
 
+    def is_held(self) -> bool:
+        return False
+
     @contextmanager
     def hold(self) -> Iterator[None]:
         if self.refuse is not None:

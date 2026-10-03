@@ -35,6 +35,18 @@ class FileIndexLock:
             ) from error
         return handle
 
+    def is_held(self) -> bool:
+        """Try the lock without waiting and release it at once."""
+        try:
+            handle = self._acquire()
+        except IndexLockHeld:
+            return True
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            handle.close()
+        return False
+
     @contextmanager
     def hold(self) -> Iterator[None]:
         """Acquire the lock, run the managed block, then release the lock.

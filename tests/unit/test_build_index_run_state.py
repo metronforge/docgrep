@@ -270,10 +270,12 @@ def test_a_failing_commit_aborts_the_run_and_reports_the_error(
     with pytest.raises(BuildFailed):
         use_case.run()
 
+    # The live index is complete and valid, so the run stays swapped and the
+    # next start finishes it.
     run = manifest.latest_run()
-    assert run is not None and run.status == "aborted"
+    assert run is not None and run.status == "swapped"
     assert manifest.get_source("old.txt") is not None
-    assert events.log[-2:] == ["commit_run", "finish_run:aborted"]
+    assert events.log[-1] == "commit_run"
 
 
 def test_an_enumeration_failure_drops_nothing_it_should_not(tmp_path: Path) -> None:

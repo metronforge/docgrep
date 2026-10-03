@@ -288,7 +288,9 @@ def test_aborted_and_running_builds_leave_search_and_sources_untouched(
     assert [
         (r.source.path, r.status, r.passages) for r in manifest.run_sources(run.run_id)
     ] == [("b.txt", "indexed", 1)]
-    assert inner.staging_collections() == ()
+    # The staging collection is retained so the run can be resumed.
+    assert inner.staging_collections() == (run.staging_collection,)
+    assert run.staging_collection != inner._active_collection()
 
 
 def test_a_completed_build_swaps_the_index_and_then_commits_the_sources(
