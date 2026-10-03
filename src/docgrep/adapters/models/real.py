@@ -49,9 +49,13 @@ def _load_sentence_model(name: str, device: str) -> SentenceModel:
     return cast(SentenceModel, model_type(name, device=device))
 
 
-def _load_cross_model(name: str, device: str) -> CrossModel:
+def _load_cross_model(name: str, device: str, dtype: str = "float32") -> CrossModel:
     model_type = import_module("sentence_transformers").CrossEncoder
-    return cast(CrossModel, model_type(name, device=device))
+    if dtype == "float32":
+        return cast(CrossModel, model_type(name, device=device))
+    return cast(
+        CrossModel, model_type(name, device=device, model_kwargs={"dtype": dtype})
+    )
 
 
 def _torch_cuda_available() -> bool:
@@ -64,11 +68,26 @@ def _device(setting: str, cuda_available: Callable[[], bool]) -> str:
     return "cuda" if cuda_available() else "cpu"
 
 
+def resolve_reranker_dtype(setting: str, device: str) -> tuple[str, bool]:
+    """Pick the weight precision for a device.
+
+    Returns the effective dtype and whether an explicit float16 request had to
+    fall back to float32 because the device is not a CUDA device. ``auto`` means
+    float16 on CUDA and float32 elsewhere.
+    """
+    if setting == "float32":
+        return "float32", False
+    if device.startswith("cuda"):
+        return "float16", False
+    return "float32", setting == "float16"
+
+
 def _load_logged[T](
     loader: Callable[[str, str], T],
     name: str,
     device_setting: str,
     cuda_available: Callable[[], bool],
+    extra: Mapping[str, str] | None = None,
 ) -> T:
     device = _device(device_setting, cuda_available)
     started = time.monotonic()
@@ -79,6 +98,7 @@ def _load_logged[T](
             "model": name,
             "device": device,
             "load_ms": round((time.monotonic() - started) * 1000, 1),
+            **(extra or {}),
         },
     )
     return model
@@ -232,18 +252,41 @@ class BgeReranker:
         device: str = "auto",
         loader: Callable[[str, str], CrossModel] | None = None,
         cuda_available: Callable[[], bool] | None = None,
+        dtype: str = "auto",
+        factory: Callable[[str, str, str], CrossModel] | None = None,
     ) -> None:
         self.model_name = model_name
+        self.dtype = dtype
         self._device = device
-        self._loader = loader or _load_cross_model
+        self._loader = loader
+        self._factory = factory or _load_cross_model
         self._cuda_available = cuda_available or _torch_cuda_available
         self._model: CrossModel | None = None
 
     def _get_model(self) -> CrossModel:
         if self._model is None:
             try:
+                device = _device(self._device, self._cuda_available)
+                dtype, fell_back = resolve_reranker_dtype(self.dtype, device)
+                if fell_back:
+                    _LOG.warning(
+                        "reranker_dtype_fallback",
+                        extra={
+                            "requested": self.dtype,
+                            "device": device,
+                            "dtype": dtype,
+                        },
+                    )
+                injected = self._loader
+                factory = self._factory
                 self._model = _load_logged(
-                    self._loader, self.model_name, self._device, self._cuda_available
+                    (lambda n, d: injected(n, d))
+                    if injected is not None
+                    else (lambda n, d: factory(n, d, dtype)),
+                    self.model_name,
+                    device,
+                    self._cuda_available,
+                    {"dtype": dtype},
                 )
             except Exception as error:
                 raise _unavailable(self.model_name, error) from error

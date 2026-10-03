@@ -174,3 +174,34 @@ def test_real_bge_embedding_and_reranking() -> None:
         ["A cat is sleeping on the sofa.", "Quantum mechanics studies matter."],
     )
     assert relevant > irrelevant
+
+
+@pytest.mark.gpu
+@pytest.mark.usefixtures("require_cuda")
+def test_half_precision_reranker_agrees_with_full_precision_on_a_tiny_set() -> None:
+    import gc
+
+    import torch
+
+    query = "cat sleeping"
+    passages = [
+        "Quantum mechanics studies matter at small scales.",
+        "A cat is sleeping on the sofa.",
+        "The stock market closed higher on Tuesday.",
+        "Dogs bark when a stranger approaches the house.",
+    ]
+    results: dict[str, tuple[float, ...]] = {}
+    for dtype in ("float32", "float16"):
+        reranker = BgeReranker("BAAI/bge-reranker-v2-m3", "auto", dtype=dtype)
+        results[dtype] = reranker.score(query, passages)
+        del reranker
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    assert all(math.isfinite(score) for score in results["float16"])
+    assert len(results["float16"]) == len(passages)
+    best = {
+        name: max(range(len(passages)), key=scores.__getitem__)
+        for name, scores in results.items()
+    }
+    assert best["float16"] == best["float32"] == 1
