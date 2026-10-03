@@ -155,6 +155,7 @@ class QdrantPassageStore:
         if (path is None) == (url is None):
             raise ValueError("exactly one of path and url is required")
         self._alias = _valid_alias(alias)
+        self._staging_pattern = re.compile(re.escape(self._alias) + r"_[0-9a-f]{32}")
         self._local = url is None
         self._local_point_limit = local_point_limit
         if url is not None:
@@ -318,6 +319,69 @@ class QdrantPassageStore:
             self._client.delete_collection(self._staging)
             self._staging = None
             self._dimension = None
+
+    def staging_name(self) -> str | None:
+        """Name of the collection being built, or None when no build is open."""
+        return self._staging
+
+    @_domain_errors
+    def staging_collections(self) -> tuple[str, ...]:
+        """Unpublished collections named like this store's staging collections.
+
+        The match is exact (the alias, an underscore and 32 hex digits), so the
+        collections of another alias that merely starts with this alias are never
+        listed, and the published collection is excluded.
+        """
+        published = self._active_collection()
+        return tuple(
+            sorted(
+                collection.name
+                for collection in self._client.get_collections().collections
+                if self._staging_pattern.fullmatch(collection.name)
+                and collection.name != published
+            )
+        )
+
+    @_domain_errors
+    def drop_collection(self, name: str) -> None:
+        """Remove one unpublished staging collection of this store."""
+        if not self._staging_pattern.fullmatch(name):
+            raise ValueError("not a staging collection of this store")
+        if name == self._active_collection():
+            raise ValueError("refusing to drop the published collection")
+        self._client.delete_collection(name)
+        if name == self._staging:
+            self._staging = None
+            self._dimension = None
+
+    @_domain_errors
+    def delete_source_points(self, source_id: str) -> int:
+        """Delete all passages of a source; returns how many were removed.
+
+        Works on the collection being built, or on the published one when no
+        build is open.
+        """
+        collection = self._staging or self._active_collection()
+        if collection is None:
+            return 0
+        source_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="record_type", match=models.MatchValue(value="passage")
+                ),
+                models.FieldCondition(
+                    key="source_id", match=models.MatchValue(value=source_id)
+                ),
+            ]
+        )
+        found = self._client.count(
+            collection, count_filter=source_filter, exact=True
+        ).count
+        if found:
+            self._client.delete(
+                collection, points_selector=models.FilterSelector(filter=source_filter)
+            )
+        return found
 
     @_domain_errors
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None:

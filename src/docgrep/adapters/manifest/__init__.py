@@ -16,6 +16,14 @@ from docgrep.domain.models import (
     Source,
 )
 
+# Columns added to the runs table after the first schema; added when missing.
+_RUN_COLUMNS = ("staging_collection", "resumed_from", "cancel_requested_at")
+
+_SOURCE_COLUMNS = (
+    "path, source_id, hash, mtime, size, file_type, status, error, "
+    "parser_version, embedding_model, indexed_at, title, author, year"
+)
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -61,8 +69,33 @@ class SQLiteManifest:
                     author TEXT,
                     year INTEGER
                 );
+                CREATE TABLE IF NOT EXISTS run_sources (
+                    run_id INTEGER NOT NULL,
+                    path TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    hash TEXT,
+                    mtime REAL,
+                    size INTEGER,
+                    file_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    parser_version TEXT,
+                    embedding_model TEXT,
+                    indexed_at TEXT,
+                    title TEXT,
+                    author TEXT,
+                    year INTEGER,
+                    passages INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (run_id, path)
+                );
                 """
             )
+            existing = {
+                row["name"] for row in connection.execute("PRAGMA table_info(runs)")
+            }
+            for column in _RUN_COLUMNS:
+                if column not in existing:
+                    connection.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -97,17 +130,52 @@ class SQLiteManifest:
         status: str,
         error: str | None = None,
         embedding_model: str | None = None,
+        *,
+        run_id: str | None = None,
+        passages: int = 0,
     ) -> None:
         if status != "indexed" and not status.startswith(("skipped:", "failed:")):
             raise ValueError("invalid source status")
         indexed_at = (source.indexed_at or _now()) if status == "indexed" else None
+        values = (
+            source.path,
+            source.source_id,
+            source.content_hash,
+            source.mtime,
+            source.size,
+            source.file_type.value,
+            status,
+            error,
+            source.parser_version,
+            embedding_model,
+            indexed_at,
+            source.title,
+            source.author,
+            source.year,
+        )
         with self._connection() as connection:
+            if run_id is not None:
+                connection.execute(
+                    f"""
+                    INSERT INTO run_sources (run_id, {_SOURCE_COLUMNS}, passages)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id, path) DO UPDATE SET
+                        source_id=excluded.source_id, hash=excluded.hash,
+                        mtime=excluded.mtime, size=excluded.size,
+                        file_type=excluded.file_type, status=excluded.status,
+                        error=excluded.error, parser_version=excluded.parser_version,
+                        embedding_model=excluded.embedding_model,
+                        indexed_at=excluded.indexed_at, title=excluded.title,
+                        author=excluded.author, year=excluded.year,
+                        passages=excluded.passages
+                    """,
+                    (run_id, *values, passages),
+                )
+                return
             connection.execute(
-                """
-                INSERT INTO sources (
-                    path, source_id, hash, mtime, size, file_type, status, error,
-                    parser_version, embedding_model, indexed_at, title, author, year
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                f"""
+                INSERT INTO sources ({_SOURCE_COLUMNS})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     source_id=excluded.source_id, hash=excluded.hash,
                     mtime=excluded.mtime, size=excluded.size,
@@ -117,22 +185,32 @@ class SQLiteManifest:
                     indexed_at=excluded.indexed_at, title=excluded.title,
                     author=excluded.author, year=excluded.year
                 """,
-                (
-                    source.path,
-                    source.source_id,
-                    source.content_hash,
-                    source.mtime,
-                    source.size,
-                    source.file_type.value,
-                    status,
-                    error,
-                    source.parser_version,
-                    embedding_model,
-                    indexed_at,
-                    source.title,
-                    source.author,
-                    source.year,
-                ),
+                values,
+            )
+
+    def set_staging_collection(self, run_id: str, name: str) -> None:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE runs SET staging_collection=? WHERE id=?", (name, run_id)
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("unknown run_id")
+
+    def commit_run(self, run_id: str) -> None:
+        """Replace the committed sources with the run's journal in one transaction."""
+        with self._connection() as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM runs WHERE id=?", (run_id,)
+                ).fetchone()
+                is None
+            ):
+                raise ValueError("unknown run_id")
+            connection.execute("DELETE FROM sources")
+            connection.execute(
+                f"INSERT INTO sources ({_SOURCE_COLUMNS}) "
+                f"SELECT {_SOURCE_COLUMNS} FROM run_sources WHERE run_id=?",
+                (run_id,),
             )
 
     def finish_run(
@@ -152,13 +230,8 @@ class SQLiteManifest:
             if cursor.rowcount != 1:
                 raise ValueError("unknown or finished run_id")
 
-    def get_source(self, path: str) -> ManifestSourceRecord | None:
-        with self._connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM sources WHERE path=?", (path,)
-            ).fetchone()
-        if row is None:
-            return None
+    @staticmethod
+    def _record(row: sqlite3.Row, passages: int | None = None) -> ManifestSourceRecord:
         source = Source(
             source_id=cast(str, row["source_id"]),
             path=cast(str, row["path"]),
@@ -177,7 +250,22 @@ class SQLiteManifest:
             cast(str, row["status"]),
             cast(str | None, row["error"]),
             cast(str | None, row["embedding_model"]),
+            passages,
         )
+
+    def get_source(self, path: str) -> ManifestSourceRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM sources WHERE path=?", (path,)
+            ).fetchone()
+        return None if row is None else self._record(row)
+
+    def run_sources(self, run_id: str) -> tuple[ManifestSourceRecord, ...]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM run_sources WHERE run_id=? ORDER BY path", (run_id,)
+            ).fetchall()
+        return tuple(self._record(row, cast(int, row["passages"])) for row in rows)
 
     def latest_run(self) -> ManifestRunRecord | None:
         with self._connection() as connection:
@@ -196,4 +284,7 @@ class SQLiteManifest:
             kind=cast(str, row["kind"]),
             started_at=cast(str, row["started_at"]),
             finished_at=cast(str | None, row["finished_at"]),
+            staging_collection=cast(str | None, row["staging_collection"]),
+            resumed_from=cast(str | None, row["resumed_from"]),
+            cancel_requested_at=cast(str | None, row["cancel_requested_at"]),
         )
