@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from docgrep import __version__
 from docgrep.api.container import Services, create_container
+from docgrep.api.log_config import configure_logging, warn_if_not_loopback
 from docgrep.domain.errors import (
     ConfigDrift,
     DocgrepError,
@@ -193,11 +194,13 @@ def create_app(
 ) -> FastAPI:
     """Create an HTTP app with one shared composition root per process."""
     effective = settings or Settings()
+    configure_logging(effective.log_level)
     initialized = services
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         nonlocal initialized
+        warn_if_not_loopback(effective.host)
         yield
         # Release a container created on demand so its models can be freed even
         # while the framework still caches the endpoint functions.

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -156,3 +157,20 @@ def test_domain_error_reason_is_printed(
     assert capsys.readouterr().err == (
         "store_unavailable: Cannot open Qdrant storage (reason: already accessed)\n"
     )
+
+
+def test_stdout_is_unchanged_by_logging_and_logs_go_to_stderr(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "note.txt").write_text("A rare blue comet crosses the sky.", "utf-8")
+
+    built = _run_cli(tmp_path, "index")
+
+    assert re.fullmatch(
+        r"Build 1: 1 indexed, 0 skipped, 0 failed in \d+\.\d\ds\n", built.stdout
+    )
+    searched = _run_cli(tmp_path, "search", "blue comet")
+    assert searched.stdout == (
+        "note.txt (score 0.731)\nA rare blue comet crosses the sky.\n\n"
+    )
+    assert "INFO" not in searched.stdout

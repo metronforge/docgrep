@@ -18,6 +18,7 @@ from docgrep.adapters.parsers.markdown import MarkdownParser
 from docgrep.adapters.parsers.pdf import PdfParser
 from docgrep.adapters.parsers.text import TextParser
 from docgrep.adapters.qdrant import QdrantPassageStore
+from docgrep.api.log_config import configure_logging
 from docgrep.domain.models import FileType, SearchResult, Source
 from docgrep.domain.protocols import (
     DocumentParser,
@@ -73,6 +74,7 @@ class _LazyModelTokenizer:
 
 def create_container(settings: Settings) -> Services:
     """Wire selected models to local Qdrant, SQLite, parsers, and use cases."""
+    configure_logging(settings.log_level)
     embedder: EmbeddingProvider
     reranker: Reranker
     tokenizer: TokenSpanTokenizer
