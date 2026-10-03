@@ -35,9 +35,9 @@ class Settings(BaseSettings):
     qdrant_alias: str = "docgrep"
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     # Extra host names accepted in the Host and Origin headers, as a
     # comma-separated list in the environment (for container deployments).
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     allowed_hosts: Annotated[tuple[str, ...], NoDecode] = ()
 
     @field_validator("log_level", mode="before")
