@@ -70,3 +70,7 @@ This runs lint, formatting, strict type checking, and the CPU test suite, includ
 ```sh
 uv run pytest -m gpu -q
 ```
+
+## License
+
+License: Apache-2.0
