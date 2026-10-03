@@ -121,9 +121,45 @@ def test_fake_backend_import_does_not_load_ml_libraries() -> None:
     subprocess.run([sys.executable, "-c", script], check=True)
 
 
+@pytest.mark.parametrize(
+    ("setting", "cuda", "expected", "probed"),
+    [
+        ("auto", True, "cuda", True),
+        ("auto", False, "cpu", True),
+        ("cpu", True, "cpu", False),
+        ("cuda", False, "cuda", False),
+    ],
+)
+def test_device_selection_uses_the_injected_availability_probe(
+    setting: str, cuda: bool, expected: str, probed: bool
+) -> None:
+    probes: list[bool] = []
+
+    def probe() -> bool:
+        probes.append(True)
+        return cuda
+
+    chosen: list[str] = []
+
+    def load_embedding(_name: str, device: str) -> FakeSentenceModel:
+        chosen.append(device)
+        return FakeSentenceModel()
+
+    def load_reranker(_name: str, device: str) -> FakeCrossModel:
+        chosen.append(device)
+        return FakeCrossModel()
+
+    _ = BgeEmbedder("e", setting, load_embedding, probe).dimension
+    BgeReranker("r", setting, load_reranker, probe).score("q", ["p"])
+
+    assert chosen == [expected, expected]
+    assert bool(probes) is probed
+
+
 @pytest.mark.gpu
+@pytest.mark.usefixtures("require_cuda")
 def test_real_bge_embedding_and_reranking() -> None:
-    embedder = BgeEmbedder("BAAI/bge-m3", "cuda")
+    embedder = BgeEmbedder("BAAI/bge-m3", "auto")
     vectors = embedder.embed(["a cat sleeps", "a dog runs"])
     assert embedder.dimension == 1024
     assert len(vectors) == 2
@@ -132,7 +168,7 @@ def test_real_bge_embedding_and_reranking() -> None:
         for vector in vectors
     )
 
-    reranker = BgeReranker("BAAI/bge-reranker-v2-m3", "cuda")
+    reranker = BgeReranker("BAAI/bge-reranker-v2-m3", "auto")
     relevant, irrelevant = reranker.score(
         "cat sleeping",
         ["A cat is sleeping on the sofa.", "Quantum mechanics studies matter."],

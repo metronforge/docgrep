@@ -1,5 +1,7 @@
 """HTTP transport over local storage and deterministic models."""
 
+import gc
+import weakref
 from pathlib import Path
 
 import pytest
@@ -123,3 +125,23 @@ def test_invalid_json_body_is_a_structured_400(tmp_path: Path) -> None:
         response = client.post("/search", json={"top_n": "wrong"})
     assert response.status_code == 400
     assert response.json()["category"] == "validation_error"
+
+
+def test_container_created_on_demand_is_released_at_shutdown(tmp_path: Path) -> None:
+    def live_services() -> dict[int, Services]:
+        return {
+            id(item): item for item in gc.get_objects() if isinstance(item, Services)
+        }
+
+    gc.collect()
+    before = set(live_services())
+    with TestClient(create_app(_settings(tmp_path)), base_url="http://127.0.0.1") as c:
+        assert c.post("/index/build").status_code == 200
+        current = live_services()
+        created = [item for key, item in current.items() if key not in before]
+        assert len(created) == 1
+        search = weakref.ref(created[0].search)
+        del created, current
+
+    gc.collect()
+    assert search() is None

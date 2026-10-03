@@ -1,6 +1,7 @@
 """FastAPI transport for local search and full index builds."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from threading import Lock
 from urllib.parse import urlsplit
 
@@ -192,8 +193,18 @@ def create_app(
 ) -> FastAPI:
     """Create an HTTP app with one shared composition root per process."""
     effective = settings or Settings()
-    app = FastAPI(title="docgrep", version=__version__)
     initialized = services
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        nonlocal initialized
+        yield
+        # Release a container created on demand so its models can be freed even
+        # while the framework still caches the endpoint functions.
+        if services is None:
+            initialized = None
+
+    app = FastAPI(title="docgrep", version=__version__, lifespan=lifespan)
     initialization_lock = Lock()
 
     def operations() -> Services:

@@ -52,11 +52,14 @@ def _load_cross_model(name: str, device: str) -> CrossModel:
     return cast(CrossModel, model_type(name, device=device))
 
 
-def _device(setting: str) -> str:
+def _torch_cuda_available() -> bool:
+    return bool(import_module("torch").cuda.is_available())
+
+
+def _device(setting: str, cuda_available: Callable[[], bool]) -> str:
     if setting != "auto":
         return setting
-    torch = import_module("torch")
-    return "cuda" if bool(torch.cuda.is_available()) else "cpu"
+    return "cuda" if cuda_available() else "cpu"
 
 
 def _unavailable(name: str, error: Exception) -> ModelUnavailable:
@@ -117,16 +120,20 @@ class BgeEmbedder:
         model_name: str,
         device: str = "auto",
         loader: Callable[[str, str], SentenceModel] | None = None,
+        cuda_available: Callable[[], bool] | None = None,
     ) -> None:
         self.model_name = model_name
         self._device = device
         self._loader = loader or _load_sentence_model
+        self._cuda_available = cuda_available or _torch_cuda_available
         self._model: SentenceModel | None = None
 
     def _get_model(self) -> SentenceModel:
         if self._model is None:
             try:
-                self._model = self._loader(self.model_name, _device(self._device))
+                self._model = self._loader(
+                    self.model_name, _device(self._device, self._cuda_available)
+                )
             except Exception as error:
                 raise _unavailable(self.model_name, error) from error
         return self._model
@@ -189,16 +196,20 @@ class BgeReranker:
         model_name: str,
         device: str = "auto",
         loader: Callable[[str, str], CrossModel] | None = None,
+        cuda_available: Callable[[], bool] | None = None,
     ) -> None:
         self.model_name = model_name
         self._device = device
         self._loader = loader or _load_cross_model
+        self._cuda_available = cuda_available or _torch_cuda_available
         self._model: CrossModel | None = None
 
     def _get_model(self) -> CrossModel:
         if self._model is None:
             try:
-                self._model = self._loader(self.model_name, _device(self._device))
+                self._model = self._loader(
+                    self.model_name, _device(self._device, self._cuda_available)
+                )
             except Exception as error:
                 raise _unavailable(self.model_name, error) from error
         return self._model
