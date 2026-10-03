@@ -58,3 +58,4 @@ markers = ["gpu: requires real models or GPU hardware"]
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
 version_variables = ["src/docgrep/__init__.py:__version__"]
+build_command = "pip install uv && uv lock && git add uv.lock"
