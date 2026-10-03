@@ -48,6 +48,11 @@ class EmbeddingProvider(Protocol):
     @property
     def dimension(self) -> int: ...
 
+    @property
+    def dtype(self) -> str:
+        """Precision the model computes in; information only, never a contract."""
+        ...
+
     def embed(self, texts: Sequence[str]) -> tuple[tuple[float, ...], ...]: ...
 
 

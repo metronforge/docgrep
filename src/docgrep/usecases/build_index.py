@@ -194,6 +194,8 @@ class BuildIndex:
                 metadata.update(
                     embedding_model=self.embedder.model_name,
                     embedding_dimension=self.embedder.dimension,
+                    # Information only: vectors of either precision are compatible.
+                    embedding_dtype=self.embedder.dtype,
                     docgrep_version=self.docgrep_version,
                     completed_at=datetime.now(UTC).isoformat(),
                 )
