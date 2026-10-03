@@ -14,7 +14,7 @@ The default backend uses `BAAI/bge-m3` for embeddings and `BAAI/bge-reranker-v2-
 
 ## Configure and index
 
-Set a corpus directory and a separate directory for the local Qdrant index and SQLite manifest:
+Set a corpus directory and a separate data directory for the SQLite manifest and, in local mode, the Qdrant index (see [Running with a Qdrant server](#running-with-a-qdrant-server) for larger corpora):
 
 ```sh
 export DOCGREP_CORPUS_ROOT=/absolute/path/to/documents
@@ -70,6 +70,25 @@ curl -X POST http://127.0.0.1:8000/search \
 `POST /index/build` triggers the same full rebuild as `docgrep index`. `GET /health` and `GET /info` provide basic service information.
 
 When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
+
+## Running with a Qdrant server
+
+Without further configuration the index is stored in Qdrant's embedded local mode under the data directory. Local mode is intended for tests and small corpora: search time grows with the collection size, Qdrant advises against it beyond about 20,000 points, and only one process can open the store, so `docgrep index` and `docgrep search` fail while `docgrep serve` is running. docgrep logs a warning when a local collection holds more than 20,000 passages.
+
+For larger corpora run a Qdrant server and point docgrep at it. The server image tag must match the major and minor version of `qdrant-client` (1.19):
+
+```sh
+docker run -d --name docgrep-qdrant -p 127.0.0.1:6333:6333 \
+  -v docgrep-qdrant:/qdrant/storage qdrant/qdrant:v1.19.1
+export DOCGREP_QDRANT_URL=http://localhost:6333
+uv run docgrep index
+```
+
+With `DOCGREP_QDRANT_URL` set, nothing is stored in local mode, payload indexes take effect, and the CLI and the server can run at the same time. The data directory still holds the SQLite manifest. Tests that need a server are marked `qdrant_server` and run when `DOCGREP_TEST_QDRANT_URL` is set:
+
+```sh
+DOCGREP_TEST_QDRANT_URL=http://localhost:6333 uv run pytest -m qdrant_server
+```
 
 ## Tests
 
