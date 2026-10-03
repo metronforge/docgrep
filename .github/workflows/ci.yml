@@ -17,7 +17,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.0
         with:
           python-version: "3.12"
-      - run: uv sync --locked
+      - run: uv sync --locked --extra cpu
       - name: Wait for Qdrant
         run: |
           for attempt in $(seq 1 30); do
