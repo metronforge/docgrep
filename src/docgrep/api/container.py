@@ -86,7 +86,9 @@ def create_container(settings: Settings) -> Services:
     else:
         real_embedder = BgeEmbedder(settings.embedding_model, settings.device)
         embedder = real_embedder
-        reranker = BgeReranker(settings.reranker_model, settings.device)
+        reranker = BgeReranker(
+            settings.reranker_model, settings.device, dtype=settings.reranker_dtype
+        )
         tokenizer = _LazyModelTokenizer(real_embedder)
 
     sparse = BM25SparseEncoder()
