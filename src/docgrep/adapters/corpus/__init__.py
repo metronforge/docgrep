@@ -117,8 +117,8 @@ def enumerate_corpus(
         if resolved_root in resolved_data.parents:
             skipped_dir = resolved_data
     try:
-        root_stat = corpus_root.stat()
-        if not corpus_root.is_dir() or not root_stat.st_mode & 0o444:
+        corpus_root.stat()
+        if not corpus_root.is_dir() or not os.access(corpus_root, os.R_OK | os.X_OK):
             raise OSError("corpus root is not a readable directory")
         sources = []
         for path in _files(corpus_root, skipped_dir):
