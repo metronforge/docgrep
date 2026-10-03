@@ -1,16 +1,18 @@
 """In-memory implementations of persistence and retrieval boundaries."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Literal
 
+from docgrep.domain.errors import StagingInconsistent
 from docgrep.domain.models import (
     ManifestRunRecord,
     ManifestSourceRecord,
     Passage,
     RetrievalCandidate,
     Source,
+    StagingInfo,
 )
 
 
@@ -26,6 +28,7 @@ class InMemoryPassageStore:
         ] = {}
         self._completion: dict[str, str | int | float] | None = None
         self._building = False
+        self._dimension = 0
         self.orphans: list[str] = []
 
     def _target(
@@ -39,6 +42,27 @@ class InMemoryPassageStore:
             raise ValueError("dimension must be positive")
         self._staged = {}
         self._building = True
+        self._dimension = dimension
+
+    def staging_info(self, name: str) -> StagingInfo | None:
+        if name != "memory-staging" or not self._building:
+            return None
+        return StagingInfo(name, self._dimension, len(self._staged))
+
+    def adopt_staging(self, name: str, dimension: int) -> None:
+        info = self.staging_info(name)
+        if info is None:
+            raise StagingInconsistent(
+                "The staging collection no longer exists", details={"collection": name}
+            )
+        if info.dimension != dimension:
+            raise StagingInconsistent(
+                "The staging collection has a different vector dimension",
+                details={"collection": name},
+            )
+
+    def staged_source_ids(self) -> frozenset[str]:
+        return frozenset(item[1].source_id for item in self._target().values())
 
     def staging_name(self) -> str | None:
         return "memory-staging" if self._building else None
@@ -158,8 +182,17 @@ class InMemoryManifest:
     def cancel_requested_at(self, run_id: str) -> str | None:
         return self._find(run_id).cancel_requested_at
 
-    def set_total_sources(self, run_id: str, total: int) -> None:
-        self._update_run(run_id, total_sources=total)
+    def set_total_sources(self, run_id: str, total: int, *, carried: int = 0) -> None:
+        self._update_run(run_id, total_sources=total, carried_sources=carried)
+
+    def carry_over(
+        self, from_run_id: str, to_run_id: str, paths: Collection[str]
+    ) -> None:
+        source = self._journal.get(from_run_id, {})
+        target = self._journal.setdefault(to_run_id, {})
+        for path in paths:
+            if path in source:
+                target[path] = source[path]
 
     def mark_swapped(self, run_id: str) -> None:
         run = self._find(run_id)
@@ -178,10 +211,20 @@ class InMemoryManifest:
         index = next(i for i, run in enumerate(self._runs) if run.run_id == run_id)
         self._runs[index] = replace(self._runs[index], **changes)
 
-    def start_run(self, config: Mapping[str, str | int | float]) -> str:
+    def start_run(
+        self,
+        config: Mapping[str, str | int | float],
+        *,
+        resumed_from: str | None = None,
+    ) -> str:
         run_id = str(len(self._runs) + 1)
         self._runs.append(
-            ManifestRunRecord(run_id, "running", tuple(sorted(config.items())))
+            ManifestRunRecord(
+                run_id,
+                "running",
+                tuple(sorted(config.items())),
+                resumed_from=resumed_from,
+            )
         )
         return run_id
 

@@ -27,7 +27,25 @@ from docgrep.usecases.dry_run import DEFAULT_LIMIT, DryRun
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="docgrep")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("index", help="Build a full index of the configured corpus")
+    index = commands.add_parser(
+        "index", help="Build a full index of the configured corpus"
+    )
+    mode = index.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue the latest aborted, cancelled or interrupted build",
+    )
+    mode.add_argument(
+        "--restart",
+        action="store_true",
+        help="Discard an unfinished build and start from scratch",
+    )
+    index.add_argument(
+        "--no-retry-failed",
+        action="store_true",
+        help="With --resume: keep sources that failed instead of trying them again",
+    )
     search = commands.add_parser("search", help="Find verbatim passages")
     search.add_argument("query")
     search.add_argument("--top-n", type=int, dest="top_n")
@@ -197,6 +215,10 @@ def main(
                 sys.stdout.write(_format_dry_run(report.as_dict(with_files=False)))
             return 0
 
+        if args.command == "index" and args.no_retry_failed and not args.resume:
+            sys.stderr.write("usage: --no-retry-failed requires --resume\n")
+            return 1
+
         if args.command == "cancel":
             text, status = _format_cancel(cancel_factory(settings).run())
             sys.stdout.write(text)
@@ -209,15 +231,35 @@ def main(
                 _warn_user,
                 register=register_signal,
             ):
-                summary = services.build.run()
+                if args.resume:
+                    summary = services.build.resume(
+                        retry_failed=not args.no_retry_failed
+                    )
+                else:
+                    summary = services.build.run(refuse_resumable=not args.restart)
             if summary.cancelled:
                 sys.stdout.write(
                     f"Build {summary.run_id} cancelled: {summary.indexed} indexed, "
                     f"{summary.skipped} skipped, {summary.failed} failed "
                     f"in {summary.elapsed_seconds:.2f}s. The live index is "
-                    "unchanged; the staging collection and journal are kept.\n"
+                    "unchanged; the staging collection and journal are kept. "
+                    "Continue with `docgrep index --resume`.\n"
                 )
                 return 2
+            if summary.recovered:
+                sys.stdout.write(
+                    f"Run {summary.run_id} had published its index but not "
+                    f"committed its sources; finished it: {summary.indexed} "
+                    f"indexed, {summary.skipped} skipped, {summary.failed} failed.\n"
+                )
+                return 1 if summary.failed else 0
+            if summary.resumed_from is not None:
+                sys.stdout.write(
+                    f"Resumed run {summary.resumed_from} as run {summary.run_id}: "
+                    f"{summary.carried_over} sources carried over, "
+                    f"{summary.processed} processed ({summary.retried} retried), "
+                    f"{summary.removed} removed.\n"
+                )
             sys.stdout.write(
                 f"Build {summary.run_id}: {summary.indexed} indexed, "
                 f"{summary.skipped} skipped, {summary.failed} failed "

@@ -227,3 +227,14 @@ class ManifestRunRecord:
     resumed_from: str | None = None
     cancel_requested_at: str | None = None
     total_sources: int | None = None
+    carried_sources: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class StagingInfo:
+    """What a store can say about one collection that carries its staging name."""
+
+    name: str
+    dimension: int | None
+    passages: int
+    published: bool = False

@@ -3,17 +3,27 @@
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TypeVar
 
 from docgrep.domain.errors import (
     BuildFailed,
+    ConfigDrift,
+    CorpusDrift,
     DocgrepError,
+    NothingToResume,
+    ResumeAvailable,
+    StagingInconsistent,
     StoreUnavailable,
 )
-from docgrep.domain.models import FileType, ManifestRunRecord, Source
+from docgrep.domain.models import (
+    FileType,
+    ManifestRunRecord,
+    ManifestSourceRecord,
+    Source,
+)
 from docgrep.domain.progress import estimate_eta_seconds
 from docgrep.domain.protocols import (
     Chunker,
@@ -24,6 +34,12 @@ from docgrep.domain.protocols import (
     Manifest,
     PassageWriter,
     SparseEncoder,
+)
+from docgrep.domain.run_state import (
+    RESUMABLE_STATES,
+    VECTOR_CONFIG_KEYS,
+    config_drift,
+    run_state,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -50,6 +66,32 @@ class BuildSummary:
     elapsed_seconds: float
     failures: tuple[BuildFailure, ...]
     cancelled: bool = False
+    # Set when the build continued an earlier run: how many of the sources it
+    # covers were taken over, processed now (of which retried after an earlier
+    # failure) and dropped because they vanished from the corpus.
+    resumed_from: str | None = None
+    carried_over: int = 0
+    processed: int = 0
+    retried: int = 0
+    removed: int = 0
+    # Set when the run only finished the commit of an interrupted swap.
+    recovered: bool = False
+
+
+# Share of the sources indexed so far that may change or vanish before a
+# resume is refused as a different corpus.
+CORPUS_DRIFT_PERCENT = 5
+
+
+@dataclass(frozen=True, slots=True)
+class _Plan:
+    sources: tuple[Source, ...]
+    total: int
+    carried: int = 0
+    totals: Mapping[str, int] | None = None
+    failures: tuple[BuildFailure, ...] = ()
+    retried: int = 0
+    removed: int = 0
 
 
 class _Cancelled(Exception):
@@ -71,7 +113,9 @@ class _Progress:
         started: float,
         every_sources: int,
         every_seconds: float,
+        carried: int = 0,
     ) -> None:
+        self._carried = carried
         self._run_id = run_id
         self._total = total
         self._clock = clock
@@ -80,13 +124,15 @@ class _Progress:
         self._every_seconds = every_seconds
         self._last_logged_at = started
         self._logged_done: int | None = None
-        self.done = 0
+        self.done = carried
         self.passages = 0
 
     def advance(self, passages: int, failed: int) -> None:
         self.done += 1
         self.passages += passages
-        since = self.done - (self._logged_done or 0)
+        since = self.done - (
+            self._carried if self._logged_done is None else self._logged_done
+        )
         waited = self._clock() - self._last_logged_at
         if since >= self._every_sources or waited >= self._every_seconds:
             self._emit(failed)
@@ -100,7 +146,10 @@ class _Progress:
         now = self._clock()
         elapsed = now - self._started
         eta = estimate_eta_seconds(
-            done=self.done, total=self._total, elapsed_seconds=elapsed
+            done=self.done,
+            total=self._total,
+            elapsed_seconds=elapsed,
+            carried=self._carried,
         )
         _LOG.info(
             "index_progress",
@@ -301,20 +350,58 @@ class BuildIndex:
         )
         return "indexed", None, len(passages)
 
-    def run(self) -> BuildSummary:
-        """Run a full rebuild, marking completion only after all sources finish."""
+    @property
+    def run_config(self) -> dict[str, str | int | float]:
+        """The configuration recorded on a run: the given keys plus the model."""
+        return {
+            **self.config,
+            "embedding_model": self.embedder.model_name,
+            "embedding_dimension": self.embedder.dimension,
+        }
+
+    def _check_resumable_latest(self) -> ManifestRunRecord:
+        """The latest run if it can be resumed, called with the lock held."""
+        latest = self.manifest.latest_run()
+        if latest is None:
+            raise NothingToResume("There is no run to resume")
+        # Nobody else holds the lock, so a run still stored as running is dead.
+        state = run_state(latest, lock_held=False)
+        if state not in RESUMABLE_STATES:
+            raise NothingToResume(
+                "The latest run is not resumable",
+                details={"run_id": latest.run_id, "state": state},
+            )
+        return latest
+
+    def _refuse_if_resumable(self) -> None:
+        latest = self.manifest.latest_run()
+        if latest is None:
+            return
+        state = run_state(latest, lock_held=False)
+        if state in RESUMABLE_STATES:
+            raise ResumeAvailable(
+                "The latest run can be resumed; use --resume to continue it "
+                "or --restart to discard it and build from scratch",
+                details={"run_id": latest.run_id, "state": state},
+            )
+
+    def run(self, *, refuse_resumable: bool = False) -> BuildSummary:
+        """Run a full rebuild, marking completion only after all sources finish.
+
+        With ``refuse_resumable`` a latest run that could be resumed is not
+        discarded: the call raises ``ResumeAvailable`` instead.
+        """
         started = self.clock()
-        totals = {"indexed": 0, "skipped": 0, "failed": 0}
-        failures: list[BuildFailure] = []
         with self.lock.hold():
             self._finish_swapped_run()
-            run_id = self.manifest.start_run(self.config)
+            if refuse_resumable:
+                self._refuse_if_resumable()
+            run_id = self.manifest.start_run(self.run_config)
             _LOG.info(
                 "index_build_started", extra={"run_id": run_id, **self.log_context}
             )
-            swapped = False
-            cancelled = False
-            try:
+
+            def prepare(run_id: str) -> _Plan:
                 self._drop_orphaned_staging_collections()
                 sources = self.enumerator.enumerate()
                 self.manifest.set_total_sources(run_id, len(sources))
@@ -322,60 +409,279 @@ class BuildIndex:
                 staging = self.passage_writer.staging_name()
                 if staging is not None:
                     self.manifest.set_staging_collection(run_id, staging)
-                progress = _Progress(
-                    run_id=run_id,
-                    total=len(sources),
-                    clock=self.clock,
-                    started=started,
-                    every_sources=self.progress_every_sources,
-                    every_seconds=self.progress_every_seconds,
+                return _Plan(sources, len(sources))
+
+            return self._execute(run_id, started, prepare)
+
+    @staticmethod
+    def _totals(records: Sequence[ManifestSourceRecord]) -> dict[str, int]:
+        totals = {"indexed": 0, "skipped": 0, "failed": 0}
+        for record in records:
+            totals[record.status.split(":")[0]] += 1
+        return totals
+
+    def resume(self, *, retry_failed: bool = True) -> BuildSummary:
+        """Continue the latest aborted, cancelled or interrupted run.
+
+        The run is validated before anything is written: the vector-affecting
+        configuration must be unchanged, the staging collection must be intact,
+        and the corpus must not have drifted much. A swapped run is only
+        finished. Raises ``NothingToResume``, ``ConfigDrift``,
+        ``StagingInconsistent`` or ``CorpusDrift`` otherwise.
+        """
+        started = self.clock()
+        with self.lock.hold():
+            recovered = self._finish_swapped_run()
+            if recovered is not None:
+                return self._recovered_summary(recovered, started)
+            latest = self._check_resumable_latest()
+            runtime = self.run_config
+            drifted = config_drift(dict(latest.config), runtime)
+            if drifted:
+                raise ConfigDrift(
+                    "The configuration changed since the run; resuming would mix "
+                    "passages made with different settings. Use --restart",
+                    details={
+                        "run_id": latest.run_id,
+                        "fields": ", ".join(drifted),
+                        "checked": ", ".join(VECTOR_CONFIG_KEYS),
+                    },
                 )
-                for source in sources:
-                    self._check_cancel(run_id)
-                    outcome, failure, written = self._index_source(source, run_id)
-                    totals[outcome] += 1
-                    if failure is not None:
-                        failures.append(failure)
-                    progress.advance(written, totals["failed"])
-                progress.finish(totals["failed"])
+            journal = self.manifest.run_sources(latest.run_id)
+            self._check_staging(latest, journal)
+            sources = self.enumerator.enumerate()
+            carried, retried, removed = self._split_journal(
+                journal, sources, retry_failed
+            )
+            kept_paths = {record.source.path for record in carried}
+            plan_sources = tuple(s for s in sources if s.path not in kept_paths)
+            run_id = self.manifest.start_run(runtime, resumed_from=latest.run_id)
+            _LOG.info(
+                "index_build_resumed",
+                extra={
+                    "run_id": run_id,
+                    "resumed_from": latest.run_id,
+                    **self.log_context,
+                },
+            )
+
+            def prepare(run_id: str) -> _Plan:
+                assert latest.staging_collection is not None
+                name = latest.staging_collection
+                self.passage_writer.adopt_staging(name, self.embedder.dimension)
+                self.manifest.set_staging_collection(run_id, name)
+                # Anything staged for a source that is not carried over (changed,
+                # vanished, or half written when the run stopped) is removed;
+                # processed sources are written again from scratch.
+                keep = {r.source.source_id for r in carried if r.status == "indexed"}
+                stale = self.passage_writer.staged_source_ids() - keep
+                for source_id in sorted(stale):
+                    self.passage_writer.delete_source_points(source_id)
+                for other in self.passage_writer.staging_collections():
+                    if other != name:
+                        self.passage_writer.drop_collection(other)
+                        _LOG.info(
+                            "orphaned_staging_collection_dropped",
+                            extra={"collection": other},
+                        )
+                self.manifest.carry_over(latest.run_id, run_id, kept_paths)
+                self.manifest.set_total_sources(
+                    run_id, len(sources), carried=len(carried)
+                )
+                return _Plan(
+                    plan_sources,
+                    len(sources),
+                    carried=len(carried),
+                    totals=self._totals(carried),
+                    failures=tuple(
+                        BuildFailure(
+                            r.source.path, r.status.split(":", 1)[1], r.error or ""
+                        )
+                        for r in carried
+                        if r.status.startswith("failed:")
+                    ),
+                    retried=retried,
+                    removed=removed,
+                )
+
+            return self._execute(run_id, started, prepare, resumed_from=latest.run_id)
+
+    def _check_staging(
+        self, latest: ManifestRunRecord, journal: Sequence[ManifestSourceRecord]
+    ) -> None:
+        name = latest.staging_collection
+        details: dict[str, object] = {"run_id": latest.run_id}
+        if name is None:
+            raise StagingInconsistent(
+                "The run recorded no staging collection. Use --restart",
+                details=details,
+            )
+        details["collection"] = name
+        info = self.passage_writer.staging_info(name)
+        if info is None:
+            raise StagingInconsistent(
+                "The staging collection of the run no longer exists. Use --restart",
+                details=details,
+            )
+        if info.published:
+            raise StagingInconsistent(
+                "The recorded staging collection is the published index, so the "
+                "run is not resumable. Check the state with `docgrep status` and "
+                "start a fresh build with --restart",
+                details=details,
+            )
+        if info.dimension != self.embedder.dimension:
+            raise StagingInconsistent(
+                "The staging collection has a different vector dimension. "
+                "Use --restart",
+                details={
+                    **details,
+                    "expected": self.embedder.dimension,
+                    "found": info.dimension if info.dimension is not None else "none",
+                },
+            )
+        journaled = sum(r.passages or 0 for r in journal if r.status == "indexed")
+        if info.passages < journaled:
+            raise StagingInconsistent(
+                "The staging collection holds fewer passages than the run "
+                "recorded. Use --restart",
+                details={**details, "journaled": journaled, "found": info.passages},
+            )
+
+    def _split_journal(
+        self,
+        journal: Sequence[ManifestSourceRecord],
+        sources: Sequence[Source],
+        retry_failed: bool,
+    ) -> tuple[list[ManifestSourceRecord], int, int]:
+        """Decide which journal rows stay; returns them with retried and removed."""
+        current = {source.path: source for source in sources}
+        indexed = 0
+        changed = 0
+        carried: list[ManifestSourceRecord] = []
+        retried = 0
+        removed = 0
+        for record in journal:
+            now = current.get(record.source.path)
+            gone = now is None
+            differs = now is not None and now.content_hash != record.source.content_hash
+            if record.status == "indexed":
+                indexed += 1
+                changed += gone or differs
+            if gone:
+                removed += 1
+            elif differs:
+                continue
+            elif record.status.startswith("failed:") and retry_failed:
+                retried += 1
+            else:
+                carried.append(record)
+        if indexed and changed * 100 > CORPUS_DRIFT_PERCENT * indexed:
+            raise CorpusDrift(
+                "More than "
+                f"{CORPUS_DRIFT_PERCENT}% of the sources indexed so far changed "
+                "or vanished. Use --restart",
+                details={
+                    "indexed": indexed,
+                    "changed_or_missing": changed,
+                    "threshold_percent": CORPUS_DRIFT_PERCENT,
+                },
+            )
+        return carried, retried, removed
+
+    def _recovered_summary(
+        self, run: ManifestRunRecord, started: float
+    ) -> BuildSummary:
+        records = self.manifest.run_sources(run.run_id)
+        totals = self._totals(records)
+        failures = tuple(
+            BuildFailure(r.source.path, r.status.split(":", 1)[1], r.error or "")
+            for r in records
+            if r.status.startswith("failed:")
+        )
+        return BuildSummary(
+            run.run_id,
+            totals["indexed"],
+            totals["skipped"],
+            totals["failed"],
+            self.clock() - started,
+            failures,
+            recovered=True,
+        )
+
+    def _execute(
+        self,
+        run_id: str,
+        started: float,
+        prepare: Callable[[str], _Plan],
+        *,
+        resumed_from: str | None = None,
+    ) -> BuildSummary:
+        """Index the planned sources, then publish; the lock is already held."""
+        totals = {"indexed": 0, "skipped": 0, "failed": 0}
+        failures: list[BuildFailure] = []
+        plan = _Plan((), 0)
+        swapped = False
+        cancelled = False
+        try:
+            plan = prepare(run_id)
+            totals.update(plan.totals or {})
+            failures.extend(plan.failures)
+            progress = _Progress(
+                run_id=run_id,
+                total=plan.total,
+                clock=self.clock,
+                started=started,
+                every_sources=self.progress_every_sources,
+                every_seconds=self.progress_every_seconds,
+                carried=plan.carried,
+            )
+            for source in plan.sources:
                 self._check_cancel(run_id)
-                metadata = dict(self.config)
-                metadata.update(
-                    embedding_model=self.embedder.model_name,
-                    embedding_dimension=self.embedder.dimension,
-                    # Information only: vectors of either precision are compatible.
-                    embedding_dtype=self.embedder.dtype,
-                    docgrep_version=self.docgrep_version,
-                    completed_at=datetime.now(UTC).isoformat(),
-                )
-                self.passage_writer.write_completion_metadata(metadata)
-                # The alias now points at the new index; only then do the
-                # committed sources follow, so queries never see a description
-                # of an index that is not published yet. A process that dies
-                # in between leaves the run swapped, and the next start
-                # finishes it.
-                self.manifest.mark_swapped(run_id)
-                swapped = True
-                self.manifest.commit_run(run_id)
-                self.manifest.finish_run(run_id, "completed", totals)
-            except _Cancelled:
-                self.manifest.finish_run(run_id, "cancelled", totals)
-                cancelled = True
-            except Exception as error:
-                # Before the swap the staging collection and the journal stay,
-                # so the run can be resumed; the live index and the committed
-                # sources are untouched. After the swap the live index is
-                # complete and valid, and the run stays swapped for recovery.
-                if not swapped:
-                    self.manifest.finish_run(run_id, "aborted", totals)
-                if isinstance(error, DocgrepError):
-                    raise
-                raise BuildFailed(
-                    "Index build aborted", details={"reason": str(error)}
-                ) from error
-            finally:
-                self._cancel_event.clear()
-                self._cancel_persisted = False
+                outcome, failure, written = self._index_source(source, run_id)
+                totals[outcome] += 1
+                if failure is not None:
+                    failures.append(failure)
+                progress.advance(written, totals["failed"])
+            progress.finish(totals["failed"])
+            self._check_cancel(run_id)
+            metadata = dict(self.config)
+            metadata.update(
+                embedding_model=self.embedder.model_name,
+                embedding_dimension=self.embedder.dimension,
+                # Information only: vectors of either precision are compatible.
+                embedding_dtype=self.embedder.dtype,
+                docgrep_version=self.docgrep_version,
+                completed_at=datetime.now(UTC).isoformat(),
+            )
+            self.passage_writer.write_completion_metadata(metadata)
+            # The alias now points at the new index; only then do the
+            # committed sources follow, so queries never see a description
+            # of an index that is not published yet. A process that dies
+            # in between leaves the run swapped, and the next start
+            # finishes it.
+            self.manifest.mark_swapped(run_id)
+            swapped = True
+            self.manifest.commit_run(run_id)
+            self.manifest.finish_run(run_id, "completed", totals)
+        except _Cancelled:
+            self.manifest.finish_run(run_id, "cancelled", totals)
+            cancelled = True
+        except Exception as error:
+            # Before the swap the staging collection and the journal stay,
+            # so the run can be resumed; the live index and the committed
+            # sources are untouched. After the swap the live index is
+            # complete and valid, and the run stays swapped for recovery.
+            if not swapped:
+                self.manifest.finish_run(run_id, "aborted", totals)
+            if isinstance(error, DocgrepError):
+                raise
+            raise BuildFailed(
+                "Index build aborted", details={"reason": str(error)}
+            ) from error
+        finally:
+            self._cancel_event.clear()
+            self._cancel_persisted = False
         elapsed = self.clock() - started
         _LOG.info(
             "index_build_cancelled" if cancelled else "index_build_finished",
@@ -395,4 +701,9 @@ class BuildIndex:
             elapsed,
             tuple(failures),
             cancelled=cancelled,
+            resumed_from=resumed_from,
+            carried_over=plan.carried,
+            processed=len(plan.sources),
+            retried=plan.retried,
+            removed=plan.removed,
         )
