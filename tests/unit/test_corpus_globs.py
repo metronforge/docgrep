@@ -116,3 +116,28 @@ def test_exclude_takes_precedence_over_include_at_depth(corpus: Path) -> None:
         "notes/private/a.txt",
         "notes/public.md",
     ]
+
+
+def test_trailing_slash_excludes_the_whole_directory(corpus: Path) -> None:
+    result = _paths(corpus, exclude=("notes/private/",))
+
+    assert not [path for path in result if path.startswith("notes/private/")]
+    assert "notes/public.md" in result
+    assert "other/private/d.txt" in result
+    assert _paths(corpus, exclude=("notes/private/",)) == _paths(
+        corpus, exclude=("notes/private/**",)
+    )
+
+
+def test_trailing_slash_is_anchored_and_can_be_made_recursive(corpus: Path) -> None:
+    assert "other/private/d.txt" in _paths(corpus, exclude=("private/",))
+    assert "other/private/d.txt" not in _paths(corpus, exclude=("**/private/",))
+
+
+def test_trailing_slash_include_selects_only_that_directory(corpus: Path) -> None:
+    assert _paths(corpus, include=("notes/private/",)) == [
+        "notes/private/a.txt",
+        "notes/private/deep/b.txt",
+        "notes/private/deep/er/c.md",
+    ]
+    assert _paths(corpus, include=("v1/", "v2/")) == ["v1/file.txt", "v2/file.txt"]
