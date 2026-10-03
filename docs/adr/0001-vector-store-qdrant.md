@@ -1,6 +1,6 @@
 # ADR-0001: Vector store: Qdrant local mode with alias swap
 
-**Status:** Accepted
+**Status:** Accepted (storage mode superseded in part by ADR-0010)
 **Date:** 2026-05-10
 
 ## Context
