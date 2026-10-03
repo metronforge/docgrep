@@ -7,6 +7,7 @@ from typing import Protocol
 from docgrep import __version__
 from docgrep.adapters.chunking import TokenChunker, WhitespaceTokenizer
 from docgrep.adapters.corpus import enumerate_corpus
+from docgrep.adapters.filelock import FileIndexLock
 from docgrep.adapters.manifest import SQLiteManifest
 from docgrep.adapters.models.deterministic import (
     DeterministicEmbedder,
@@ -112,7 +113,7 @@ def create_container(settings: Settings) -> Services:
             max_query_len=settings.max_query_len,
         ),
         build=BuildIndex(
-            data_dir=settings.data_dir,
+            lock=FileIndexLock(settings.data_dir / "index.lock"),
             enumerator=_CorpusEnumerator(settings),
             parsers=parsers,
             chunker=TokenChunker(
