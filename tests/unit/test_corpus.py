@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,8 @@ def test_symlink_loop_and_file_symlink_are_ignored(tmp_path: Path) -> None:
 def test_invalid_corpus_root_raises_structured_error(
     tmp_path: Path, root_kind: str
 ) -> None:
+    if root_kind == "unreadable" and os.geteuid() == 0:
+        pytest.skip("permission bits do not restrict the superuser")
     root = tmp_path / "corpus"
     if root_kind == "file":
         root.write_text("not a directory", encoding="utf-8")
@@ -93,8 +96,12 @@ def test_invalid_corpus_root_raises_structured_error(
         root.mkdir()
         root.chmod(0o000)
 
-    with pytest.raises(ValidationError) as raised:
-        enumerate_corpus(root)
+    try:
+        with pytest.raises(ValidationError) as raised:
+            enumerate_corpus(root)
+    finally:
+        if root_kind == "unreadable":
+            root.chmod(0o755)
 
     assert raised.value.category == "validation_error"
     assert raised.value.details["path"] == str(root)
