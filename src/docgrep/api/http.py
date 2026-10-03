@@ -1,10 +1,12 @@
 """FastAPI transport for local search and full index builds."""
 
+from collections.abc import Awaitable, Callable
 from threading import Lock
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from docgrep import __version__
@@ -154,6 +156,37 @@ def _error_status(error: DocgrepError) -> int:
     return 500
 
 
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _error_response(
+    status: int, category: str, message: str, details: dict[str, object]
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"category": category, "message": message, "details": details},
+    )
+
+
+def _header_hostname(value: str) -> str | None:
+    """Return the lower-cased host name of a Host header value, without port."""
+    host = value.strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end > 0 else None
+    if host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    return host or None
+
+
+def _origin_hostname(value: str) -> str | None:
+    try:
+        return urlsplit(value).hostname
+    except ValueError:
+        return None
+
+
 def create_app(
     settings: Settings | None = None, *, services: Services | None = None
 ) -> FastAPI:
@@ -171,15 +204,35 @@ def create_app(
                     initialized = create_container(effective)
         return initialized
 
+    allowed = frozenset(
+        name.lower()
+        for name in (*_LOCAL_HOSTS, effective.host, *effective.allowed_hosts)
+    )
+
+    @app.middleware("http")
+    async def guard_local_access(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        host = _header_hostname(request.headers.get("host", ""))
+        if host not in allowed:
+            return _error_response(
+                403, "host_not_allowed", "Host header is not allowed", {"host": host}
+            )
+        origin = request.headers.get("origin")
+        if origin is not None and request.method not in _SAFE_METHODS:
+            if _origin_hostname(origin) not in allowed:
+                return _error_response(
+                    403,
+                    "origin_not_allowed",
+                    "Origin is not allowed",
+                    {"origin": origin},
+                )
+        return await call_next(request)
+
     @app.exception_handler(DocgrepError)
     def domain_error(_request: Request, error: DocgrepError) -> JSONResponse:
-        return JSONResponse(
-            status_code=_error_status(error),
-            content={
-                "category": error.category,
-                "message": str(error),
-                "details": error.details,
-            },
+        return _error_response(
+            _error_status(error), error.category, str(error), error.details
         )
 
     @app.exception_handler(RequestValidationError)
@@ -188,13 +241,11 @@ def create_app(
             {"location": list(item["loc"]), "message": item["msg"]}
             for item in error.errors()
         ]
-        return JSONResponse(
-            status_code=400,
-            content={
-                "category": "validation_error",
-                "message": "Invalid request body",
-                "details": {"errors": problems},
-            },
+        return _error_response(
+            400,
+            "validation_error",
+            "Invalid request body",
+            {"errors": problems},
         )
 
     @app.get("/health")

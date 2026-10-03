@@ -53,3 +53,13 @@ def test_settings_reject_inconsistent_limits(
 ) -> None:
     with pytest.raises(ValidationError, match=field):
         Settings(_env_file=None, **overrides)
+
+
+def test_allowed_hosts_are_read_as_a_comma_separated_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DOCGREP_ALLOWED_HOSTS", raising=False)
+    assert Settings().allowed_hosts == ()
+
+    monkeypatch.setenv("DOCGREP_ALLOWED_HOSTS", " docgrep.lan, box.internal ,,")
+    assert Settings().allowed_hosts == ("docgrep.lan", "box.internal")

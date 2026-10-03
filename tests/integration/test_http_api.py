@@ -39,7 +39,7 @@ def test_build_and_search_through_http(tmp_path: Path) -> None:
     (settings.corpus_root / "note.txt").write_text(
         "A rare blue comet crosses the sky.", encoding="utf-8"
     )
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings), base_url="http://127.0.0.1") as client:
         assert client.get("/health").json() == {"status": "ok"}
         info = client.get("/info").json()
         assert info["backend"] == "fake"
@@ -103,7 +103,9 @@ def test_domain_errors_have_structured_http_mapping(
     tmp_path: Path, error: Exception, status: int
 ) -> None:
     services = Services(search=FailingSearch(error), build=FailingBuild(error))
-    with TestClient(create_app(_settings(tmp_path), services=services)) as client:
+    with TestClient(
+        create_app(_settings(tmp_path), services=services), base_url="http://127.0.0.1"
+    ) as client:
         for path, body in (("/search", {"query": "valid"}), ("/index/build", {})):
             response = client.post(path, json=body)
             assert response.status_code == status
@@ -115,7 +117,9 @@ def test_domain_errors_have_structured_http_mapping(
 
 
 def test_invalid_json_body_is_a_structured_400(tmp_path: Path) -> None:
-    with TestClient(create_app(_settings(tmp_path))) as client:
+    with TestClient(
+        create_app(_settings(tmp_path)), base_url="http://127.0.0.1"
+    ) as client:
         response = client.post("/search", json={"top_n": "wrong"})
     assert response.status_code == 400
     assert response.json()["category"] == "validation_error"
