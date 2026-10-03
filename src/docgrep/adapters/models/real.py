@@ -74,7 +74,13 @@ class ModelTokenizer:
         self._model_name = model_name
 
     def token_spans(self, text: str) -> tuple[tuple[int, int], ...]:
-        """Return source-character spans, excluding empty special tokens."""
+        """Return ordered, disjoint, non-empty source-character spans.
+
+        Empty spans (special tokens) are dropped. Tokens that cover the same
+        characters, such as a lone word-boundary piece followed by the word
+        piece that starts at the same offset, or the byte-fallback pieces of
+        one emoji, are merged into one token spanning their union.
+        """
         try:
             offsets = self._tokenizer(
                 text, add_special_tokens=False, return_offsets_mapping=True
@@ -91,8 +97,13 @@ class ModelTokenizer:
                 ):
                     raise ValueError("tokenizer returned invalid offsets")
                 start, end = offset
-                if start < end:
-                    spans.append((start, end))
+                if start >= end:
+                    continue
+                merged = (start, end)
+                while spans and merged[0] < spans[-1][1]:
+                    previous = spans.pop()
+                    merged = (min(previous[0], merged[0]), max(previous[1], merged[1]))
+                spans.append(merged)
             return tuple(spans)
         except Exception as error:
             raise _unavailable(self._model_name, error) from error
