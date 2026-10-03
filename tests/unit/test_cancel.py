@@ -319,7 +319,10 @@ class _FakeBuild:
         self.summary = summary
         self.cancel_requests = 0
 
-    def run(self) -> BuildSummary:
+    def run(self, *, refuse_resumable: bool = False) -> BuildSummary:
+        return self.summary
+
+    def resume(self, *, retry_failed: bool = True) -> BuildSummary:
         return self.summary
 
     def request_cancel(self) -> None:

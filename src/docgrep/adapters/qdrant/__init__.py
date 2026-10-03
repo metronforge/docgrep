@@ -14,8 +14,19 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from qdrant_client import QdrantClient, models
 
-from docgrep.domain.errors import StoreUnavailable, ValidationError
-from docgrep.domain.models import FileType, Passage, RetrievalCandidate, Source
+from docgrep.domain.errors import (
+    DocgrepError,
+    StagingInconsistent,
+    StoreUnavailable,
+    ValidationError,
+)
+from docgrep.domain.models import (
+    FileType,
+    Passage,
+    RetrievalCandidate,
+    Source,
+    StagingInfo,
+)
 
 _LOG = logging.getLogger(__name__)
 DEFAULT_ALIAS = "docgrep"
@@ -130,7 +141,7 @@ def _domain_errors[**P, T](operation: Callable[P, T]) -> Callable[P, T]:
     def guarded(*args: P.args, **kwargs: P.kwargs) -> T:
         try:
             return operation(*args, **kwargs)
-        except StoreUnavailable:
+        except DocgrepError:
             raise
         except Exception as error:
             raise StoreUnavailable(
@@ -376,6 +387,75 @@ class QdrantPassageStore:
         if name == self._staging:
             self._staging = None
             self._dimension = None
+
+    @_domain_errors
+    def staging_info(self, name: str) -> StagingInfo | None:
+        """Facts about one collection with the staging name pattern, if it exists."""
+        if not self._staging_pattern.fullmatch(name):
+            return None
+        if name not in {c.name for c in self._client.get_collections().collections}:
+            return None
+        vectors = self._client.get_collection(name).config.params.vectors
+        dense = vectors.get("dense") if isinstance(vectors, dict) else None
+        passages = self._client.count(
+            name, count_filter=_PASSAGE_FILTER, exact=True
+        ).count
+        return StagingInfo(
+            name,
+            None if dense is None else dense.size,
+            passages,
+            published=name == self._active_collection(),
+        )
+
+    @_domain_errors
+    def adopt_staging(self, name: str, dimension: int) -> None:
+        info = self.staging_info(name)
+        if info is None:
+            raise StagingInconsistent(
+                "The staging collection no longer exists",
+                details={"collection": name},
+            )
+        if info.published:
+            raise StagingInconsistent(
+                "The collection is the published index, not a staging collection",
+                details={"collection": name},
+            )
+        if info.dimension != dimension:
+            raise StagingInconsistent(
+                "The staging collection has a different vector dimension",
+                details={
+                    "collection": name,
+                    "expected": dimension,
+                    "found": info.dimension if info.dimension is not None else "none",
+                },
+            )
+        self._staging = name
+        self._dimension = dimension
+
+    @_domain_errors
+    def staged_source_ids(self) -> frozenset[str]:
+        """Source ids with passages in the collection being built."""
+        collection = self._staging or self._active_collection()
+        if collection is None:
+            return frozenset()
+        found: set[str] = set()
+        offset: models.ExtendedPointId | None = None
+        while True:
+            points, offset = self._client.scroll(
+                collection,
+                scroll_filter=_PASSAGE_FILTER,
+                limit=1000,
+                offset=offset,
+                with_payload=["source_id"],
+                with_vectors=False,
+            )
+            found.update(
+                str(point.payload["source_id"])
+                for point in points
+                if point.payload and "source_id" in point.payload
+            )
+            if offset is None:
+                return frozenset(found)
 
     @_domain_errors
     def delete_source_points(self, source_id: str) -> int:

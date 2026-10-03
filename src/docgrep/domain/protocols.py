@@ -1,6 +1,6 @@
 """Ports implemented by adapters at the domain boundary."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import AbstractContextManager
 from typing import Literal, Protocol
 
@@ -13,6 +13,7 @@ from docgrep.domain.models import (
     RetrievalCandidate,
     ScannedFile,
     Source,
+    StagingInfo,
 )
 
 
@@ -114,6 +115,23 @@ class PassageWriter(Protocol):
         """Remove one listed staging collection; refuse any other name."""
         ...
 
+    def staging_info(self, name: str) -> StagingInfo | None:
+        """Facts about an existing collection with this store's staging name
+        pattern (flagged when it is the published one), or None when absent."""
+        ...
+
+    def adopt_staging(self, name: str, dimension: int) -> None:
+        """Continue writing into an existing unpublished staging collection.
+
+        Raises ``StagingInconsistent`` when it is missing, published, or its
+        vector dimension differs.
+        """
+        ...
+
+    def staged_source_ids(self) -> frozenset[str]:
+        """Source ids that have passages in the collection being built."""
+        ...
+
     def delete_source_points(self, source_id: str) -> int:
         """Delete every passage of a source from the collection being built, or
         from the published collection when none is open; return how many."""
@@ -188,7 +206,14 @@ class ManifestReader(Protocol):
 class ManifestWriter(Protocol):
     """Record an indexing run and per-source outcomes durably at each call."""
 
-    def start_run(self, config: Mapping[str, str | int | float]) -> str: ...
+    def start_run(
+        self,
+        config: Mapping[str, str | int | float],
+        *,
+        resumed_from: str | None = None,
+    ) -> str:
+        """Open a run; ``resumed_from`` names the run it continues."""
+        ...
 
     def record_source(
         self,
@@ -211,8 +236,15 @@ class ManifestWriter(Protocol):
         """Remember which collection a run is writing into."""
         ...
 
-    def set_total_sources(self, run_id: str, total: int) -> None:
-        """Remember how many sources the run plans to cover."""
+    def set_total_sources(self, run_id: str, total: int, *, carried: int = 0) -> None:
+        """Remember how many sources the run plans to cover and how many of
+        them it took over, already done, from the run it resumes."""
+        ...
+
+    def carry_over(
+        self, from_run_id: str, to_run_id: str, paths: Collection[str]
+    ) -> None:
+        """Copy the journal rows of the given paths from one run into another."""
         ...
 
     def request_cancel(self, run_id: str) -> str:

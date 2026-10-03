@@ -47,7 +47,9 @@ class SearchOperation(Protocol):
 class BuildOperation(Protocol):
     """Run one full index build."""
 
-    def run(self) -> BuildSummary: ...
+    def run(self, *, refuse_resumable: bool = False) -> BuildSummary: ...
+
+    def resume(self, *, retry_failed: bool = True) -> BuildSummary: ...
 
     def request_cancel(self) -> None: ...
 
@@ -182,6 +184,12 @@ def create_container(settings: Settings) -> Services:
     config: Mapping[str, str | int | float] = {
         "chunk_size": settings.chunk_size,
         "chunk_overlap": settings.chunk_overlap,
+        # Together with the embedding model and its dimension, which the build
+        # adds, these are the keys a resume compares (VECTOR_CONFIG_KEYS).
+        "tokenizer": "whitespace"
+        if settings.backend == "fake"
+        else settings.embedding_model,
+        "normalize_embeddings": 1,
     }
     return Services(
         search=FindPassages(

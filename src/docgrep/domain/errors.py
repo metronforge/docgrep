@@ -68,3 +68,27 @@ class BuildFailed(DocgrepError):
     """An unexpected indexing failure aborted the current build."""
 
     category = "build_failed"
+
+
+class ResumeAvailable(DocgrepError):
+    """The latest run can be resumed, so a plain build would discard its work."""
+
+    category = "resume_available"
+
+
+class NothingToResume(DocgrepError):
+    """There is no run that can be resumed."""
+
+    category = "nothing_to_resume"
+
+
+class StagingInconsistent(DocgrepError):
+    """The staging collection of a run cannot be continued safely."""
+
+    category = "staging_inconsistent"
+
+
+class CorpusDrift(DocgrepError):
+    """The corpus changed too much since the run for a resume to make sense."""
+
+    category = "corpus_drift"

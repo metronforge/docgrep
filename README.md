@@ -57,6 +57,26 @@ Cancelling is cooperative. The first Ctrl-C (or SIGTERM) during `docgrep index` 
 
 `docgrep cancel` does the same from another shell or for a build started elsewhere, such as through `docgrep serve`. It takes no lock and writes only the cancel request on the latest run, so it also works while another process owns the local Qdrant store. It says that the operation is stopping and exits with 0; a second call reports the time of the first request. If the latest run is `running` but nothing holds the lock, it reports the run as interrupted (exit 0) and changes nothing. With nothing running it says so and exits with 1. There is no force option.
 
+### Resuming a build
+
+A build that was cancelled, aborted by an error before the index was published, or killed (its run is still `running` but nothing holds the lock) can be continued:
+
+```sh
+uv run docgrep index --resume                      # continue the latest run
+uv run docgrep index --resume --no-retry-failed    # keep sources that failed instead of retrying them
+uv run docgrep index --restart                     # discard it and build from scratch
+```
+
+A plain `docgrep index` refuses while the latest run is resumable (`resume_available`, exit status 1) and names both options, so unfinished work is never thrown away by accident; `--restart` removes the retained staging collection. With a completed or absent latest run it behaves as before, and a run that had published its index but not yet committed its sources is finished first. `--resume` and `--restart` exclude each other. `POST /index/build` is unchanged and always starts from scratch.
+
+Only the latest run can be resumed, and resuming a resumed run works. The resume creates a new run that records the one it continues, adopts the retained staging collection, carries over the journal of everything still valid, and processes the rest: sources the old run did not finish, sources that failed (unless `--no-retry-failed`) and sources whose content changed. Passage ids are deterministic, so a source that was half written is simply written again. The summary reports the run it resumed, and how many sources were carried over, processed, retried and removed. Resuming a run that is already completed reports `nothing_to_resume` (exit 1); a run that had only the commit left is finished and reported.
+
+A resume is refused, before anything is written, when it cannot be a coherent continuation:
+
+- `config_drift`: the keys that decide what vectors and passages contain differ from the run's recorded values. These are `embedding_model`, `embedding_dimension`, `chunk_size`, `chunk_overlap`, `tokenizer` and `normalize_embeddings`. Operational settings (device, dtypes, batch sizes, log level, host, port) may differ.
+- `staging_inconsistent`: the retained staging collection is missing, has another vector dimension, holds fewer passages than the run recorded as indexed, or is the published index itself. Use `--restart` (or check `docgrep status` first in the last case).
+- `corpus_drift`: more than 5% of the sources the run had indexed changed or vanished. Use `--restart`. Below that threshold, changed and vanished sources have their staged passages removed, and changed ones are processed again.
+
 ## Dry run
 
 `docgrep dry-run` previews what a build would do with the configured corpus. It reads directory entries only: it takes no index lock, writes no manifest, does not open Qdrant, loads no model and creates no file, and it uses the configured corpus root, include and exclude patterns, so it predicts what `docgrep index` would enumerate.

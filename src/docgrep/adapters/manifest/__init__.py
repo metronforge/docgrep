@@ -2,7 +2,7 @@
 
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +23,7 @@ _RUN_COLUMNS = (
     ("resumed_from", "TEXT"),
     ("cancel_requested_at", "TEXT"),
     ("total_sources", "INTEGER"),
+    ("carried_sources", "INTEGER"),
 )
 
 _SOURCE_COLUMNS = (
@@ -119,13 +120,18 @@ class SQLiteManifest:
             if connection is not None:
                 connection.close()
 
-    def start_run(self, config: Mapping[str, str | int | float]) -> str:
+    def start_run(
+        self,
+        config: Mapping[str, str | int | float],
+        *,
+        resumed_from: str | None = None,
+    ) -> str:
         snapshot = json.dumps(dict(config), sort_keys=True)
         with self._connection() as connection:
             cursor = connection.execute(
-                "INSERT INTO runs (kind, status, started_at, config_snapshot, totals) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("build", "running", _now(), snapshot, "{}"),
+                "INSERT INTO runs (kind, status, started_at, config_snapshot, totals,"
+                " resumed_from) VALUES (?, ?, ?, ?, ?, ?)",
+                ("build", "running", _now(), snapshot, "{}", resumed_from),
             )
             assert cursor.lastrowid is not None
             return str(cursor.lastrowid)
@@ -202,13 +208,30 @@ class SQLiteManifest:
             if cursor.rowcount != 1:
                 raise ValueError("unknown run_id")
 
-    def set_total_sources(self, run_id: str, total: int) -> None:
+    def set_total_sources(self, run_id: str, total: int, *, carried: int = 0) -> None:
         with self._connection() as connection:
             cursor = connection.execute(
-                "UPDATE runs SET total_sources=? WHERE id=?", (total, run_id)
+                "UPDATE runs SET total_sources=?, carried_sources=? WHERE id=?",
+                (total, carried, run_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("unknown run_id")
+
+    def carry_over(
+        self, from_run_id: str, to_run_id: str, paths: Collection[str]
+    ) -> None:
+        wanted = sorted(paths)
+        with self._connection() as connection:
+            for start in range(0, len(wanted), 500):
+                group = wanted[start : start + 500]
+                marks = ", ".join("?" for _ in group)
+                connection.execute(
+                    f"INSERT OR REPLACE INTO run_sources "
+                    f"(run_id, {_SOURCE_COLUMNS}, passages) "
+                    f"SELECT ?, {_SOURCE_COLUMNS}, passages FROM run_sources "
+                    f"WHERE run_id=? AND path IN ({marks})",
+                    (to_run_id, from_run_id, *group),
+                )
 
     def request_cancel(self, run_id: str) -> str:
         with self._connection() as connection:
@@ -332,4 +355,5 @@ class SQLiteManifest:
             resumed_from=cast(str | None, row["resumed_from"]),
             cancel_requested_at=cast(str | None, row["cancel_requested_at"]),
             total_sources=cast(int | None, row["total_sources"]),
+            carried_sources=cast(int | None, row["carried_sources"]) or 0,
         )
