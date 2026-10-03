@@ -200,7 +200,25 @@ class FindPassages:
             )
             for item, score in zip(valid, scores, strict=True)
         )
-        ordered = tuple(sorted(ranked, key=ranked_passage_key))
+        if rerank_skipped:
+            # Without a reranker the first-stage order is the best available.
+            stage1 = {
+                item.passage.passage_id: item.stage1_rank
+                for item in valid
+                if item.stage1_rank is not None
+            }
+            ordered = tuple(
+                sorted(
+                    ranked,
+                    key=lambda item: (
+                        item.passage.passage_id not in stage1,
+                        stage1.get(item.passage.passage_id, 0),
+                        *ranked_passage_key(item),
+                    ),
+                )
+            )
+        else:
+            ordered = tuple(sorted(ranked, key=ranked_passage_key))
         return result(
             ordered[:limit],
             len(valid),

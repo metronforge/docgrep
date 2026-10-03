@@ -1,9 +1,11 @@
 """Embedded Qdrant passage storage."""
 
 import logging
+import math
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -40,6 +42,22 @@ def _without_local_index_warning() -> Iterator[None]:
             category=UserWarning,
         )
         yield
+
+
+def _stored_dense(vector: object) -> list[float]:
+    if isinstance(vector, dict) and isinstance(vector.get("dense"), list):
+        return [float(value) for value in vector["dense"]]
+    raise TypeError("hit carries no dense vector")
+
+
+def _cosine(
+    query: Sequence[float], query_norm: float, stored: Sequence[float]
+) -> float:
+    stored_norm = math.sqrt(sum(value * value for value in stored))
+    if not query_norm or not stored_norm:
+        return 0.0
+    dot = sum(left * right for left, right in zip(stored, query, strict=True))
+    return dot / (stored_norm * query_norm)
 
 
 def _domain_errors[**P, T](operation: Callable[P, T]) -> Callable[P, T]:
@@ -264,16 +282,10 @@ class QdrantPassageStore:
             query_filter=_PASSAGE_FILTER,
             limit=top_k,
             with_payload=True,
+            with_vectors=["dense"],
         )
-        dense_hits = self._client.query_points(
-            _ALIAS,
-            query=list(dense_vector),
-            using="dense",
-            query_filter=_PASSAGE_FILTER,
-            limit=top_k,
-            with_payload=False,
-        )
-        dense_scores = {str(hit.id): hit.score for hit in dense_hits.points}
+        query_vector = list(dense_vector)
+        query_norm = math.sqrt(sum(value * value for value in query_vector))
         scored: list[tuple[float, RetrievalCandidate]] = []
         for hit in fused.points:
             try:
@@ -300,6 +312,9 @@ class QdrantPassageStore:
                     page_number=payload.get("page_number"),
                     heading_path=tuple(payload["heading_path"]),
                 )
+                dense_score = _cosine(
+                    query_vector, query_norm, _stored_dense(hit.vector)
+                )
             except (KeyError, TypeError, ValueError) as error:
                 _LOG.warning(
                     "invalid_passage_payload",
@@ -309,9 +324,7 @@ class QdrantPassageStore:
             scored.append(
                 (
                     hit.score,
-                    RetrievalCandidate(
-                        passage, source, dense_scores.get(str(hit.id), 0.0)
-                    ),
+                    RetrievalCandidate(passage, source, dense_score),
                 )
             )
         scored.sort(
@@ -321,4 +334,7 @@ class QdrantPassageStore:
                 item[1].passage.passage_id,
             )
         )
-        return tuple(candidate for _, candidate in scored)
+        return tuple(
+            replace(candidate, stage1_rank=rank)
+            for rank, (_, candidate) in enumerate(scored)
+        )

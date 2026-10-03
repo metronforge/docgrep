@@ -99,7 +99,12 @@ class Reranker(Protocol):
 
 
 class PassageRetriever(Protocol):
-    """Read hybrid recall hits and the index completion marker without mutation."""
+    """Read hybrid recall hits and the index completion marker without mutation.
+
+    ``retrieve`` returns candidates in first-stage order, best first. Each
+    candidate carries its true dense similarity, including hits that only the
+    sparse query found, and may carry its position as ``stage1_rank``.
+    """
 
     def retrieve(
         self,

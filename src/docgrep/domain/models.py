@@ -161,11 +161,20 @@ class ParsedDocument:
 
 @dataclass(frozen=True, slots=True)
 class RetrievalCandidate:
-    """An unnormalized first-stage hit with its dense similarity."""
+    """An unnormalized first-stage hit with its dense similarity.
+
+    ``stage1_rank`` is the zero-based position of the hit in the first-stage
+    ordering when the retriever supplies one.
+    """
 
     passage: Passage
     source: Source
     dense_score: float
+    stage1_rank: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.stage1_rank is not None and self.stage1_rank < 0:
+            raise ValueError("stage1_rank must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
