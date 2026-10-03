@@ -53,7 +53,10 @@ mypy_path = "src"
 testpaths = ["tests"]
 pythonpath = ["tests"]
 addopts = ["-m", "not gpu"]
-markers = ["gpu: requires real models or GPU hardware"]
+markers = [
+    "gpu: requires real models or GPU hardware",
+    "qdrant_server: needs a Qdrant server at DOCGREP_TEST_QDRANT_URL",
+]
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]

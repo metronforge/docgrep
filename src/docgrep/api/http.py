@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from docgrep import __version__
+from docgrep.adapters.qdrant import local_passage_count, warn_if_local_mode_is_large
 from docgrep.api.container import Services, create_container
 from docgrep.api.log_config import (
     configure_logging,
@@ -206,6 +207,10 @@ def create_app(
         nonlocal initialized
         log_server_start(effective)
         warn_if_not_loopback(effective.host)
+        if not effective.qdrant_url:
+            count = local_passage_count(effective.data_dir / "qdrant")
+            if count is not None:
+                warn_if_local_mode_is_large(count)
         yield
         # Release a container created on demand so its models can be freed even
         # while the framework still caches the endpoint functions.

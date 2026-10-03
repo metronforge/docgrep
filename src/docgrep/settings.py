@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     device: Literal["cuda", "cpu", "auto"] = "auto"
     backend: Literal["real", "fake"] = "real"
+    # URL of a Qdrant server; without it the index lives in local mode under
+    # the data directory.
+    qdrant_url: str | None = None
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     # Extra host names accepted in the Host and Origin headers, as a

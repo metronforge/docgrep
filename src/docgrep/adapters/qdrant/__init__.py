@@ -1,22 +1,28 @@
-"""Embedded Qdrant passage storage."""
+"""Qdrant passage storage in local mode or against a server."""
 
 import logging
 import math
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from qdrant_client import QdrantClient, models
 
-from docgrep.domain.errors import StoreUnavailable
+from docgrep.domain.errors import StoreUnavailable, ValidationError
 from docgrep.domain.models import FileType, Passage, RetrievalCandidate, Source
 
 _LOG = logging.getLogger(__name__)
 _ALIAS = "docgrep"
+LOCAL_POINT_LIMIT = 20_000
+_LOCAL_MODE_ADVICE = (
+    "local mode is intended for tests and small corpora; "
+    "set DOCGREP_QDRANT_URL for larger corpora"
+)
 _MARKER_ID = str(uuid5(NAMESPACE_URL, "docgrep:completion"))
 _PASSAGE_FILTER = models.Filter(
     must=[
@@ -42,6 +48,53 @@ def _without_local_index_warning() -> Iterator[None]:
             category=UserWarning,
         )
         yield
+
+
+def warn_if_local_mode_is_large(passages: int, limit: int = LOCAL_POINT_LIMIT) -> None:
+    """Log a warning when a local-mode collection outgrows what it is meant for."""
+    if passages > limit:
+        _LOG.warning(_LOCAL_MODE_ADVICE, extra={"passages": passages, "limit": limit})
+
+
+def _server_address(url: str) -> str:
+    """Validate an http(s) server URL and return it without credentials."""
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError:
+        parts = None
+        port = None
+    if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValidationError(
+            "qdrant_url must be an http or https URL with a host name",
+            details={"setting": "qdrant_url"},
+        )
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    return (
+        f"{parts.scheme}://{host}"
+        + (f":{port}" if port else "")
+        + parts.path.rstrip("/")
+    )
+
+
+def local_passage_count(path: Path) -> int | None:
+    """Count the passages of an existing local store, or None when unavailable.
+
+    The store is opened only for the count and closed again, so it does not
+    keep the single-process lock of local mode.
+    """
+    if not path.is_dir():
+        return None
+    try:
+        store = QdrantPassageStore(path)
+    except StoreUnavailable:
+        return None
+    try:
+        return store.count_passages()
+    except StoreUnavailable:
+        return None
+    finally:
+        store.close()
 
 
 def _stored_dense(vector: object) -> list[float]:
@@ -79,17 +132,42 @@ def _domain_errors[**P, T](operation: Callable[P, T]) -> Callable[P, T]:
 class QdrantPassageStore:
     """Build in a staging collection and publish it through one read alias."""
 
-    def __init__(self, path: Path) -> None:
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-            self._client = QdrantClient(path=str(path))
-        except Exception as error:
-            raise StoreUnavailable(
-                "Cannot open Qdrant storage",
-                details={"path": str(path), "reason": str(error)},
-            ) from error
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        url: str | None = None,
+        local_point_limit: int = LOCAL_POINT_LIMIT,
+    ) -> None:
+        if (path is None) == (url is None):
+            raise ValueError("exactly one of path and url is required")
+        self._local = url is None
+        self._local_point_limit = local_point_limit
+        if url is not None:
+            address = _server_address(url)
+            try:
+                self._client = QdrantClient(url=address)
+                self._client.get_collections()
+            except Exception as error:
+                raise StoreUnavailable(
+                    "Cannot reach the Qdrant server",
+                    details={"url": address, "reason": str(error)},
+                ) from error
+        elif path is not None:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                self._client = QdrantClient(path=str(path))
+            except Exception as error:
+                raise StoreUnavailable(
+                    "Cannot open Qdrant storage",
+                    details={"path": str(path), "reason": str(error)},
+                ) from error
         self._staging: str | None = None
         self._dimension: int | None = None
+
+    def close(self) -> None:
+        """Release the connection or the local storage lock."""
+        self._client.close()
 
     def _active_collection(self) -> str | None:
         for alias in self._client.get_aliases().aliases:
@@ -115,8 +193,12 @@ class QdrantPassageStore:
                 "sparse": models.SparseVectorParams(modifier=models.Modifier.IDF)
             },
         )
-        with _without_local_index_warning():
+        quiet: AbstractContextManager[None] = (
+            _without_local_index_warning() if self._local else nullcontext()
+        )
+        with quiet:
             for field, schema in (
+                ("record_type", models.PayloadSchemaType.KEYWORD),
                 ("source_id", models.PayloadSchemaType.KEYWORD),
                 ("author", models.PayloadSchemaType.KEYWORD),
                 ("year", models.PayloadSchemaType.INTEGER),
@@ -213,6 +295,8 @@ class QdrantPassageStore:
             self._client.delete_collection(previous)
         self._staging = None
         self._dimension = None
+        if self._local:
+            warn_if_local_mode_is_large(self.count_passages(), self._local_point_limit)
 
     @_domain_errors
     def clear_completion_metadata(self) -> None:
