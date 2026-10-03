@@ -13,6 +13,7 @@ from docgrep.domain.errors import (
     StoreUnavailable,
 )
 from docgrep.domain.models import FileType, Source
+from docgrep.domain.progress import estimate_eta_seconds
 from docgrep.domain.protocols import (
     Chunker,
     CorpusEnumerator,
@@ -49,6 +50,71 @@ class BuildSummary:
     failures: tuple[BuildFailure, ...]
 
 
+class _Progress:
+    """Emit ``index_progress`` records on a count and a time cadence.
+
+    Only counters and timings are logged, never paths, titles or text.
+    """
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        total: int,
+        clock: Callable[[], float],
+        started: float,
+        every_sources: int,
+        every_seconds: float,
+    ) -> None:
+        self._run_id = run_id
+        self._total = total
+        self._clock = clock
+        self._started = started
+        self._every_sources = every_sources
+        self._every_seconds = every_seconds
+        self._last_logged_at = started
+        self._logged_done: int | None = None
+        self.done = 0
+        self.passages = 0
+
+    def advance(self, passages: int, failed: int) -> None:
+        self.done += 1
+        self.passages += passages
+        since = self.done - (self._logged_done or 0)
+        waited = self._clock() - self._last_logged_at
+        if since >= self._every_sources or waited >= self._every_seconds:
+            self._emit(failed)
+
+    def finish(self, failed: int) -> None:
+        """Log once at the end of the loop, unless the last record says the same."""
+        if self._logged_done != self.done:
+            self._emit(failed)
+
+    def _emit(self, failed: int) -> None:
+        now = self._clock()
+        elapsed = now - self._started
+        eta = estimate_eta_seconds(
+            done=self.done, total=self._total, elapsed_seconds=elapsed
+        )
+        _LOG.info(
+            "index_progress",
+            extra={
+                "run_id": self._run_id,
+                "sources_done": self.done,
+                "sources_total": self._total,
+                "passages_written": self.passages,
+                "elapsed_seconds": round(elapsed, 1),
+                "passages_per_second": (
+                    round(self.passages / elapsed, 2) if elapsed > 0 else 0.0
+                ),
+                "eta_seconds": None if eta is None else round(eta),
+                "failed": failed,
+            },
+        )
+        self._last_logged_at = now
+        self._logged_done = self.done
+
+
 class BuildIndex:
     """Rebuild a collection with an exclusive lock and durable source outcomes."""
 
@@ -68,12 +134,19 @@ class BuildIndex:
         batch_size: int = 32,
         upsert_batch_size: int = 256,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        progress_every_sources: int = 25,
+        progress_every_seconds: float = 60.0,
         log_context: Mapping[str, str | int | float] | None = None,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if upsert_batch_size <= 0:
             raise ValueError("upsert_batch_size must be positive")
+        if progress_every_sources <= 0:
+            raise ValueError("progress_every_sources must be positive")
+        if progress_every_seconds <= 0:
+            raise ValueError("progress_every_seconds must be positive")
         self.lock = lock
         self.enumerator = enumerator
         self.parsers = parsers
@@ -87,6 +160,9 @@ class BuildIndex:
         self.batch_size = batch_size
         self.upsert_batch_size = upsert_batch_size
         self.sleep = sleep
+        self.clock = clock
+        self.progress_every_sources = progress_every_sources
+        self.progress_every_seconds = progress_every_seconds
         self.log_context = dict(log_context or {})
 
     def _retry(self, operation: Callable[[], _T]) -> _T:
@@ -118,21 +194,25 @@ class BuildIndex:
 
     def _index_source(
         self, source: Source, run_id: str
-    ) -> tuple[str, BuildFailure | None]:
+    ) -> tuple[str, BuildFailure | None, int]:
         parser = self.parsers.get(source.file_type)
         if parser is None:
             self.manifest.record_source(source, "skipped:unsupported", run_id=run_id)
-            return "skipped", None
+            return "skipped", None, 0
         try:
             document = parser.parse(source)
             if document.requires_ocr:
                 self.manifest.record_source(
                     document.source, "skipped:requires_ocr", run_id=run_id
                 )
-                return "skipped", None
+                return "skipped", None, 0
             passages = self.chunker.chunk(document)
         except Exception as error:
-            return "failed", self._record_failure(source, "parse_error", error, run_id)
+            return (
+                "failed",
+                self._record_failure(source, "parse_error", error, run_id),
+                0,
+            )
 
         all_vectors: list[tuple[float, ...]] = []
         for start in range(0, len(passages), self.batch_size):
@@ -144,8 +224,12 @@ class BuildIndex:
                 if len(vectors) != len(batch):
                     raise ValueError("embedder returned wrong vector count")
             except Exception as error:
-                return "failed", self._record_failure(
-                    document.source, "embedding_error", error, run_id
+                return (
+                    "failed",
+                    self._record_failure(
+                        document.source, "embedding_error", error, run_id
+                    ),
+                    0,
                 )
             all_vectors.extend(vectors)
         items = [
@@ -168,11 +252,11 @@ class BuildIndex:
             run_id=run_id,
             passages=len(passages),
         )
-        return "indexed", None
+        return "indexed", None, len(passages)
 
     def run(self) -> BuildSummary:
         """Run a full rebuild, marking completion only after all sources finish."""
-        started = time.monotonic()
+        started = self.clock()
         totals = {"indexed": 0, "skipped": 0, "failed": 0}
         failures: list[BuildFailure] = []
         with self.lock.hold():
@@ -189,11 +273,21 @@ class BuildIndex:
                 staging = self.passage_writer.staging_name()
                 if staging is not None:
                     self.manifest.set_staging_collection(run_id, staging)
+                progress = _Progress(
+                    run_id=run_id,
+                    total=len(sources),
+                    clock=self.clock,
+                    started=started,
+                    every_sources=self.progress_every_sources,
+                    every_seconds=self.progress_every_seconds,
+                )
                 for source in sources:
-                    outcome, failure = self._index_source(source, run_id)
+                    outcome, failure, written = self._index_source(source, run_id)
                     totals[outcome] += 1
                     if failure is not None:
                         failures.append(failure)
+                    progress.advance(written, totals["failed"])
+                progress.finish(totals["failed"])
                 metadata = dict(self.config)
                 metadata.update(
                     embedding_model=self.embedder.model_name,
@@ -218,7 +312,7 @@ class BuildIndex:
                 raise BuildFailed(
                     "Index build aborted", details={"reason": str(error)}
                 ) from error
-        elapsed = time.monotonic() - started
+        elapsed = self.clock() - started
         _LOG.info(
             "index_build_finished",
             extra={

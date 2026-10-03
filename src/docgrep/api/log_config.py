@@ -31,6 +31,8 @@ class KeyValueFormatter(logging.Formatter):
 
 
 def _render(value: object) -> str:
+    if value is None:
+        return "null"
     text = str(value)
     if text and not any(char.isspace() or char in '"=' for char in text):
         return text
