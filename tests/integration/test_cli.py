@@ -26,7 +26,7 @@ def _run_cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
         DOCGREP_CHUNK_OVERLAP="2",
     )
     return subprocess.run(
-        [str(Path(sys.executable).with_name("docgrep")), *args],
+        [sys.executable, "-m", "docgrep.api.cli", *args],
         capture_output=True,
         text=True,
         env=environment,
