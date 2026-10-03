@@ -41,7 +41,7 @@ Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOC
 
 ## Exit codes
 
-`docgrep` exits with 0 on success and 1 on failure. `docgrep index` also exits with 1 when the build completed but one or more sources failed; the summary and the failed sources are still printed on standard output. Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
+`docgrep` exits with 0 on success and 1 on failure. `docgrep index` also exits with 1 when the build completed but one or more sources failed; the summary and the failed sources are still printed on standard output. It exits with 2 when the build was cancelled (see [Long builds](#long-builds)). Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
 
 ## Logging
 
@@ -50,6 +50,12 @@ Diagnostics go to standard error as one line per record: a UTC timestamp, the le
 ## Long builds
 
 While `docgrep index` runs it logs an `index_progress` record at INFO level every 25 sources or every 60 seconds, whichever comes first, and once more when the loop over the sources ends. The fields are `run_id`, `sources_done`, `sources_total`, `passages_written`, `elapsed_seconds`, `passages_per_second`, `eta_seconds` and `failed`. `eta_seconds` is `null` until at least one source is done; afterwards it extrapolates the pace so far over the remaining sources. The records carry counters and timings only, never paths, titles or text.
+
+### Cancelling a build
+
+Cancelling is cooperative. The first Ctrl-C (or SIGTERM) during `docgrep index` asks the build to stop: it finishes the batch it is embedding, does not record the source it stopped in the middle of, marks the run `cancelled`, keeps the unpublished staging collection and the per-source journal, releases the index lock and exits with status 2. The live index and the committed sources are not touched, so search keeps working throughout. A second Ctrl-C stops the process immediately; the run then stays `running` and, because nothing holds the lock any more, is reported as interrupted.
+
+`docgrep cancel` does the same from another shell or for a build started elsewhere, such as through `docgrep serve`. It takes no lock and writes only the cancel request on the latest run, so it also works while another process owns the local Qdrant store. It says that the operation is stopping and exits with 0; a second call reports the time of the first request. If the latest run is `running` but nothing holds the lock, it reports the run as interrupted (exit 0) and changes nothing. With nothing running it says so and exits with 1. There is no force option.
 
 ## Dry run
 

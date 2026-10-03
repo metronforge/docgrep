@@ -2,17 +2,25 @@
 
 import argparse
 import json
+import signal
 import sys
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from pydantic import ValidationError as SettingsValidationError
 
-from docgrep.api.container import Services, create_container, create_dry_run
+from docgrep.api.container import (
+    Services,
+    create_cancel,
+    create_container,
+    create_dry_run,
+)
 from docgrep.api.http import SearchResponse, create_app
 from docgrep.api.log_config import configure_logging
+from docgrep.api.signals import Register, graceful_cancel
 from docgrep.domain.errors import DocgrepError
 from docgrep.settings import Settings
+from docgrep.usecases.cancel_index import CancelIndex, CancelResult
 from docgrep.usecases.dry_run import DEFAULT_LIMIT, DryRun
 
 
@@ -34,6 +42,9 @@ def _parser() -> argparse.ArgumentParser:
     dry.add_argument("--offset", type=int, default=0)
     dry.add_argument("--sample", type=int, default=None)
     dry.add_argument("--seed", type=int, default=0)
+    commands.add_parser(
+        "cancel", help="Ask a running index build to stop after its current batch"
+    )
     commands.add_parser("serve", help="Start the local HTTP API")
     return parser
 
@@ -114,6 +125,34 @@ def _format_dry_run(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _format_cancel(result: CancelResult) -> tuple[str, int]:
+    """Describe what a cancel request found, with the exit status to use."""
+    if result.outcome == "requested":
+        return (
+            f"Cancel requested for run {result.run_id}: the operation is "
+            "stopping after its current batch.\n",
+            0,
+        )
+    if result.outcome == "already_requested":
+        return (
+            f"Cancel was already requested for run {result.run_id} at "
+            f"{result.requested_at}: the operation is stopping.\n",
+            0,
+        )
+    if result.outcome == "interrupted":
+        return (
+            f"Run {result.run_id} was interrupted: its process is gone and "
+            "nothing holds the index lock. Its staging collection and journal "
+            "are retained, so it can be resumed.\n",
+            0,
+        )
+    return "Nothing is running.\n", 1
+
+
+def _warn_user(message: str) -> None:
+    sys.stderr.write(message + "\n")
+
+
 def _describe(error: DocgrepError) -> str:
     text = f"{error.category}: {error}"
     reason = error.details.get("reason")
@@ -125,11 +164,14 @@ def main(
     *,
     container_factory: Callable[[Settings], Services] = create_container,
     dry_run_factory: Callable[[Settings], DryRun] = create_dry_run,
+    cancel_factory: Callable[[Settings], CancelIndex] = create_cancel,
+    register_signal: Register = signal.signal,
 ) -> int:
     """Run one CLI command and return a process exit status.
 
     The status is 0 on success and 1 when the command fails, including an index
-    build that finished with failed sources.
+    build that finished with failed sources. A build stopped by a cancel request
+    exits with 2.
     """
     args = _parser().parse_args(argv)
     try:
@@ -155,9 +197,27 @@ def main(
                 sys.stdout.write(_format_dry_run(report.as_dict(with_files=False)))
             return 0
 
+        if args.command == "cancel":
+            text, status = _format_cancel(cancel_factory(settings).run())
+            sys.stdout.write(text)
+            return status
+
         services = container_factory(settings)
         if args.command == "index":
-            summary = services.build.run()
+            with graceful_cancel(
+                lambda: services.build.request_cancel(),
+                _warn_user,
+                register=register_signal,
+            ):
+                summary = services.build.run()
+            if summary.cancelled:
+                sys.stdout.write(
+                    f"Build {summary.run_id} cancelled: {summary.indexed} indexed, "
+                    f"{summary.skipped} skipped, {summary.failed} failed "
+                    f"in {summary.elapsed_seconds:.2f}s. The live index is "
+                    "unchanged; the staging collection and journal are kept.\n"
+                )
+                return 2
             sys.stdout.write(
                 f"Build {summary.run_id}: {summary.indexed} indexed, "
                 f"{summary.skipped} skipped, {summary.failed} failed "

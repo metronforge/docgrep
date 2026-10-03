@@ -33,6 +33,7 @@ from docgrep.domain.protocols import (
 )
 from docgrep.settings import Settings
 from docgrep.usecases.build_index import BuildIndex, BuildSummary
+from docgrep.usecases.cancel_index import CancelIndex
 from docgrep.usecases.dry_run import DryRun
 from docgrep.usecases.find_passages import FindPassages
 
@@ -47,6 +48,8 @@ class BuildOperation(Protocol):
     """Run one full index build."""
 
     def run(self) -> BuildSummary: ...
+
+    def request_cancel(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +128,24 @@ def create_dry_run(settings: Settings) -> DryRun:
         scanner=_CorpusEnumerator(settings),
         parsers=_parsers(settings),
         chunker=TokenChunker(tokenizer, settings.chunk_size, settings.chunk_overlap),
+    )
+
+
+def create_cancel(settings: Settings) -> CancelIndex:
+    """Wire the cancel request.
+
+    It needs only the lock and the manifest, so it works while another process
+    owns the local Qdrant store. A data directory without a manifest has never
+    seen a build, and nothing is created for it.
+    """
+    configure_logging(settings.log_level)
+    manifest = (
+        SQLiteManifest(settings.data_dir)
+        if (settings.data_dir / "manifest.sqlite3").exists()
+        else None
+    )
+    return CancelIndex(
+        lock=FileIndexLock(settings.data_dir / "index.lock"), manifest=manifest
     )
 
 
