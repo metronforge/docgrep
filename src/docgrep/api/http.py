@@ -208,7 +208,9 @@ def create_app(
         log_server_start(effective)
         warn_if_not_loopback(effective.host)
         if not effective.qdrant_url:
-            count = local_passage_count(effective.data_dir / "qdrant")
+            count = local_passage_count(
+                effective.data_dir / "qdrant", effective.qdrant_alias
+            )
             if count is not None:
                 warn_if_local_mode_is_large(count)
         yield
