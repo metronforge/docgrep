@@ -2,11 +2,11 @@
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from pydantic import ValidationError as SettingsValidationError
 
-from docgrep.api.container import create_container
+from docgrep.api.container import Services, create_container
 from docgrep.api.http import SearchResponse, create_app
 from docgrep.domain.errors import DocgrepError
 from docgrep.settings import Settings
@@ -24,8 +24,22 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run one CLI command and return a process exit status."""
+def _describe(error: DocgrepError) -> str:
+    text = f"{error.category}: {error}"
+    reason = error.details.get("reason")
+    return f"{text} (reason: {reason})" if reason else text
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    container_factory: Callable[[Settings], Services] = create_container,
+) -> int:
+    """Run one CLI command and return a process exit status.
+
+    The status is 0 on success and 1 when the command fails, including an index
+    build that finished with failed sources.
+    """
     args = _parser().parse_args(argv)
     try:
         settings = Settings()
@@ -35,7 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
             return 0
 
-        services = create_container(settings)
+        services = container_factory(settings)
         if args.command == "index":
             summary = services.build.run()
             sys.stdout.write(
@@ -47,7 +61,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sys.stdout.write(
                     f"  {failure.path}: {failure.reason}: {failure.message}\n"
                 )
-            return 0
+            return 1 if summary.failed else 0
 
         result = services.search.run(args.query, top_n=args.top_n)
         response = SearchResponse.from_domain(result)
@@ -66,10 +80,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sys.stdout.write(item.passage.text + "\n\n")
         return 0
     except DocgrepError as error:
-        sys.stderr.write(f"{error.category}: {error}\n")
+        sys.stderr.write(_describe(error) + "\n")
         return 1
     except SettingsValidationError as error:
         sys.stderr.write(f"invalid_settings: {error}\n")
+        return 1
+    except OSError as error:
+        sys.stderr.write(f"io_error: {error}\n")
         return 1
 
 
