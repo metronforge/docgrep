@@ -10,7 +10,11 @@ The lockfile resolved the default PyPI torch, which on Linux is a CUDA 13.0 buil
 
 ## Decision
 
-Torch is selected through mutually exclusive extras: `cpu`, `cu128` and `cu130`. Each maps to the matching PyTorch index through `tool.uv.sources` and explicit `tool.uv.index` entries, and the extras are declared conflicting in `tool.uv.conflicts`. CI and the CPU image use `cpu`. GPU users install one CUDA extra. The Docker build argument `ACCEL` maps to these extras. GPU tests stay deselected in CI.
+Torch is selected through mutually exclusive extras: `cpu` and `cu130`. Each maps to the matching PyTorch index through `tool.uv.sources` and explicit `tool.uv.index` entries, and the extras are declared conflicting in `tool.uv.conflicts`. CI and the CPU image use `cpu`. GPU users install one CUDA extra. The Docker build argument `ACCEL` maps to these extras. GPU tests stay deselected in CI.
+
+A `cu128` extra, which would serve drivers limited to CUDA 12.x, was dropped: the PyTorch cu128 index offers torch only up to 2.11, while the project needs 2.14 or newer. It can be added when that changes.
+
+The environment is chosen by an explicit `uv sync --extra <extra>`; commands then run without re-syncing, and `scripts/check.sh` runs with `UV_NO_SYNC=1`. A plain `uv run` re-resolves without extras and replaces torch with the PyPI build. This is documented, not prevented.
 
 ## Consequences
 
