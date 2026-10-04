@@ -60,6 +60,29 @@ def test_the_sample_counts_the_generated_garbled_pages(corpus: Path) -> None:
         "garbled_text_layer_files": ["c-broken.pdf", "d-half.pdf"],
         "garbled_text_layer_fraction": 0.5,
         "soft_hyphens_removed_per_file": 0.75,
+        "pages_by_rule": {
+            "r1_broken_characters": 4,
+            "r2_long_tokens": 2,
+            "r3_low_alnum": 0,
+        },
+        "flagged_files": [
+            {
+                "path": path,
+                "pages_dropped": len(dropped),
+                "pages_by_rule": {
+                    "r1_broken_characters": len(dropped),
+                    "r2_long_tokens": long_tokens,
+                    "r3_low_alnum": 0,
+                },
+                "dropped_pages": dropped,
+            }
+            # The broken pages of seeds 3 and 6 also form long tokens.
+            for path, dropped, long_tokens in (
+                ("b-partly.pdf", [2], 1),
+                ("c-broken.pdf", [1, 2], 1),
+                ("d-half.pdf", [1], 0),
+            )
+        ],
     }
     assert pdf["estimate"]["by_file_count"]["garbled_text_layer_files"] == 2.0
     txt = _types(report)["txt"]["text_quality"]

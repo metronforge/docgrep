@@ -41,6 +41,39 @@ def _stats(sizes: Sequence[int]) -> dict[str, int]:
     }
 
 
+# At most this many dropped page numbers are listed per flagged file.
+MAX_LISTED_PAGES = 20
+
+
+@dataclass(frozen=True, slots=True)
+class FlaggedFile:
+    """A sampled file on which a page rule fired; counts and page numbers only.
+
+    ``rule_pages`` counts the pages on which R1, R2 and R3 fired;
+    ``dropped_pages`` are the pages dropped for broken characters (R1).
+    """
+
+    path: str
+    rule_pages: tuple[int, int, int]
+    dropped_pages: tuple[int, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "pages_dropped": len(self.dropped_pages),
+            "pages_by_rule": _by_rule(self.rule_pages),
+            "dropped_pages": list(self.dropped_pages[:MAX_LISTED_PAGES]),
+        }
+
+
+def _by_rule(counts: Sequence[int]) -> dict[str, int]:
+    return {
+        "r1_broken_characters": counts[0],
+        "r2_long_tokens": counts[1],
+        "r3_low_alnum": counts[2],
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class SampleTypeReport:
     """Measured numbers for the sampled files of one file type."""
@@ -61,6 +94,10 @@ class SampleTypeReport:
     pages_garbled: int = 0
     garbled_files: tuple[str, ...] = ()
     soft_hyphens_removed: int = 0
+    # Pages on which R1, R2 and R3 fired, weak signals that drop nothing
+    # included, and the sampled files on which any of them fired.
+    rule_pages: tuple[int, int, int] = (0, 0, 0)
+    flagged_files: tuple[FlaggedFile, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         ok = self.parsed
@@ -124,6 +161,10 @@ def _text_quality(reports: Sequence[SampleTypeReport]) -> dict[str, Any]:
         if parsed
         else None,
         "soft_hyphens_removed_per_file": round(hyphens / parsed, 2) if parsed else None,
+        "pages_by_rule": _by_rule(
+            [sum(r.rule_pages[rule] for r in reports) for rule in range(3)]
+        ),
+        "flagged_files": [f.as_dict() for r in reports for f in r.flagged_files],
     }
 
 
@@ -360,6 +401,8 @@ class DryRun:
         parsed = failed = ocr = passages = sampled_bytes = 0
         pages = garbled_pages = hyphens = 0
         garbled_files: list[str] = []
+        rule_pages = [0, 0, 0]
+        flagged: list[FlaggedFile] = []
         seconds = 0.0
         for item in chosen:
             source = Source(item.path, item.path, file_type, size=item.size)
@@ -384,6 +427,17 @@ class DryRun:
                 hyphens += quality.soft_hyphens_removed
                 if quality.skip_reason == GARBLED_TEXT_LAYER:
                     garbled_files.append(item.path)
+                counts = (
+                    quality.pages_rule_broken,
+                    quality.pages_rule_long_tokens,
+                    quality.pages_rule_low_alnum,
+                )
+                for rule, count in enumerate(counts):
+                    rule_pages[rule] += count
+                if any(counts):
+                    flagged.append(
+                        FlaggedFile(item.path, counts, quality.dropped_pages)
+                    )
         return SampleTypeReport(
             file_type=file_type.value,
             sampled=tuple(item.path for item in chosen),
@@ -399,6 +453,8 @@ class DryRun:
             pages_garbled=garbled_pages,
             garbled_files=tuple(garbled_files),
             soft_hyphens_removed=hyphens,
+            rule_pages=(rule_pages[0], rule_pages[1], rule_pages[2]),
+            flagged_files=tuple(flagged),
         )
 
     def run(
