@@ -4,7 +4,7 @@ import logging
 import math
 import re
 import warnings
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
 from functools import wraps
@@ -27,6 +27,7 @@ from docgrep.domain.models import (
     Source,
     StagingInfo,
 )
+from docgrep.domain.run_state import VECTOR_CONFIG_KEYS
 
 _LOG = logging.getLogger(__name__)
 DEFAULT_ALIAS = "docgrep"
@@ -44,6 +45,23 @@ _PASSAGE_FILTER = models.Filter(
         )
     ]
 )
+
+
+def _source_filter(source_id: str) -> models.Filter:
+    return models.Filter(
+        must=[
+            models.FieldCondition(
+                key="record_type", match=models.MatchValue(value="passage")
+            ),
+            models.FieldCondition(
+                key="source_id", match=models.MatchValue(value=source_id)
+            ),
+        ]
+    )
+
+
+def _point_id(passage_id: str) -> str:
+    return str(uuid5(NAMESPACE_URL, passage_id))
 
 
 @contextmanager
@@ -196,6 +214,7 @@ class QdrantPassageStore:
                 ) from error
         self._staging: str | None = None
         self._dimension: int | None = None
+        self._live_dimension: tuple[str, int] | None = None
 
     def close(self) -> None:
         """Release the connection or the local storage lock."""
@@ -247,8 +266,11 @@ class QdrantPassageStore:
         source: Source,
         dense_vector: Sequence[float],
         sparse_vector: Mapping[int, float],
+        *,
+        dimension: int | None = None,
     ) -> models.PointStruct:
-        if len(dense_vector) != self._dimension:
+        expected = self._dimension if dimension is None else dimension
+        if len(dense_vector) != expected:
             raise ValueError("Dense vector dimension does not match collection")
         indices = sorted(sparse_vector)
         payload = {
@@ -272,7 +294,7 @@ class QdrantPassageStore:
             "parser_version": source.parser_version,
         }
         return models.PointStruct(
-            id=str(uuid5(NAMESPACE_URL, passage.passage_id)),
+            id=_point_id(passage.passage_id),
             vector={
                 "dense": list(dense_vector),
                 "sparse": models.SparseVector(
@@ -473,24 +495,129 @@ class QdrantPassageStore:
         collection = self._staging or self._active_collection()
         if collection is None:
             return 0
-        source_filter = models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="record_type", match=models.MatchValue(value="passage")
-                ),
-                models.FieldCondition(
-                    key="source_id", match=models.MatchValue(value=source_id)
-                ),
-            ]
-        )
+        return self._delete_source(collection, source_id)
+
+    def _delete_source(self, collection: str, source_id: str) -> int:
+        source_filter = _source_filter(source_id)
         found = self._client.count(
             collection, count_filter=source_filter, exact=True
         ).count
         if found:
             self._client.delete(
-                collection, points_selector=models.FilterSelector(filter=source_filter)
+                collection,
+                points_selector=models.FilterSelector(filter=source_filter),
+                wait=True,
             )
         return found
+
+    def _live(self) -> tuple[str, int]:
+        """The published collection and its dense vector dimension."""
+        collection = self._active_collection()
+        if collection is None:
+            raise StoreUnavailable("No index is published")
+        if self._live_dimension is None or self._live_dimension[0] != collection:
+            vectors = self._client.get_collection(collection).config.params.vectors
+            dense = vectors.get("dense") if isinstance(vectors, dict) else None
+            if dense is None:
+                raise StoreUnavailable(
+                    "The published index has no dense vectors",
+                    details={"collection": collection},
+                )
+            self._live_dimension = (collection, dense.size)
+        return self._live_dimension
+
+    @_domain_errors
+    def upsert_live_batch(
+        self,
+        items: Sequence[tuple[Passage, Source, Sequence[float], Mapping[int, float]]],
+    ) -> None:
+        """Write passages into the published collection and wait until stored.
+
+        Every item is validated and converted first, so a bad item writes nothing.
+        """
+        if not items:
+            return
+        collection, dimension = self._live()
+        points = [self._point(*item, dimension=dimension) for item in items]
+        self._client.upsert(collection_name=collection, points=points, wait=True)
+
+    @_domain_errors
+    def delete_live_source_points(self, source_id: str) -> int:
+        """Delete every passage of a source from the published collection."""
+        collection, _ = self._live()
+        return self._delete_source(collection, source_id)
+
+    @_domain_errors
+    def delete_live_source_points_except(
+        self, source_id: str, keep: Collection[str]
+    ) -> int:
+        """Delete the published passages of a source that are not in ``keep``."""
+        collection, _ = self._live()
+        kept = {_point_id(passage_id) for passage_id in keep}
+        doomed: list[models.ExtendedPointId] = []
+        offset: models.ExtendedPointId | None = None
+        while True:
+            points, offset = self._client.scroll(
+                collection,
+                scroll_filter=_source_filter(source_id),
+                limit=1000,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            doomed.extend(point.id for point in points if str(point.id) not in kept)
+            if offset is None:
+                break
+        for start in range(0, len(doomed), 1000):
+            self._client.delete(
+                collection,
+                points_selector=models.PointIdsList(
+                    points=doomed[start : start + 1000]
+                ),
+                wait=True,
+            )
+        return len(doomed)
+
+    @_domain_errors
+    def refresh_live_source(self, source_id: str, *, size: int, mtime: float) -> None:
+        """Set size and mtime on the published passages of a source."""
+        collection, _ = self._live()
+        self._client.set_payload(
+            collection,
+            payload={"size": size, "mtime": mtime},
+            points=models.FilterSelector(filter=_source_filter(source_id)),
+            wait=True,
+        )
+
+    @_domain_errors
+    def merge_completion_metadata(
+        self, updates: Mapping[str, str | int | float]
+    ) -> None:
+        """Add or replace completion marker keys of the published collection."""
+        refused = sorted(set(updates) & set(VECTOR_CONFIG_KEYS))
+        if refused:
+            raise ValidationError(
+                "Only a full build may set these index metadata keys",
+                details={"keys": ", ".join(refused)},
+            )
+        collection, _ = self._live()
+        records = self._client.retrieve(collection, [_MARKER_ID], with_payload=True)
+        metadata = (
+            records[0].payload.get("metadata")
+            if records and records[0].payload
+            else None
+        )
+        if not isinstance(metadata, dict):
+            raise StoreUnavailable(
+                "The published index has no completion marker",
+                details={"collection": collection},
+            )
+        self._client.set_payload(
+            collection,
+            payload={"metadata": {**metadata, **dict(updates)}},
+            points=[_MARKER_ID],
+            wait=True,
+        )
 
     @_domain_errors
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None:

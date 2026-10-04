@@ -136,13 +136,16 @@ class SQLiteManifest:
         config: Mapping[str, str | int | float],
         *,
         resumed_from: str | None = None,
+        kind: str = "build",
     ) -> str:
+        if kind not in ("build", "update"):
+            raise ValueError("invalid run kind")
         snapshot = json.dumps(dict(config), sort_keys=True)
         with self._connection() as connection:
             cursor = connection.execute(
                 "INSERT INTO runs (kind, status, started_at, config_snapshot, totals,"
                 " resumed_from) VALUES (?, ?, ?, ?, ?, ?)",
-                ("build", "running", _now(), snapshot, "{}", resumed_from),
+                (kind, "running", _now(), snapshot, "{}", resumed_from),
             )
             assert cursor.lastrowid is not None
             return str(cursor.lastrowid)
@@ -157,8 +160,12 @@ class SQLiteManifest:
         run_id: str | None = None,
         passages: int = 0,
     ) -> None:
-        if status != "indexed" and not status.startswith(("skipped:", "failed:")):
+        if status not in ("indexed", "removed") and not status.startswith(
+            ("skipped:", "failed:")
+        ):
             raise ValueError("invalid source status")
+        if status == "removed" and run_id is None:
+            raise ValueError("a removal is journaled; use remove_source")
         indexed_at = (source.indexed_at or _now()) if status == "indexed" else None
         values = (
             source.path,
@@ -210,6 +217,10 @@ class SQLiteManifest:
                 """,
                 values,
             )
+
+    def remove_source(self, path: str) -> None:
+        with self._connection() as connection:
+            connection.execute("DELETE FROM sources WHERE path=?", (path,))
 
     def set_staging_collection(self, run_id: str, name: str) -> None:
         with self._connection() as connection:
@@ -350,13 +361,26 @@ class SQLiteManifest:
             ).fetchall()
         return tuple(self._record(row, cast(int, row["passages"])) for row in rows)
 
+    def committed_sources(self) -> tuple[ManifestSourceRecord, ...]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM sources ORDER BY path").fetchall()
+        return tuple(self._record(row) for row in rows)
+
     def latest_run(self) -> ManifestRunRecord | None:
         with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM runs ORDER BY id DESC LIMIT 1"
             ).fetchone()
-        if row is None:
-            return None
+        return None if row is None else self._run(row)
+
+    def latest_run_of_kind(self, kind: str) -> ManifestRunRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM runs WHERE kind=? ORDER BY id DESC LIMIT 1", (kind,)
+            ).fetchone()
+        return None if row is None else self._run(row)
+
+    def _run(self, row: sqlite3.Row) -> ManifestRunRecord:
         config = cast(dict[str, str | int | float], json.loads(row["config_snapshot"]))
         totals = cast(dict[str, int], json.loads(row["totals"]))
         return ManifestRunRecord(

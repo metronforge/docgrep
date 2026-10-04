@@ -6,7 +6,7 @@ from typing import Protocol
 
 from docgrep import __version__
 from docgrep.adapters.chunking import TokenChunker, WhitespaceTokenizer
-from docgrep.adapters.corpus import enumerate_corpus, scan_corpus
+from docgrep.adapters.corpus import describe_source, enumerate_corpus, scan_corpus
 from docgrep.adapters.filelock import FileIndexLock
 from docgrep.adapters.manifest import SQLiteManifest
 from docgrep.adapters.models.deterministic import (
@@ -40,6 +40,7 @@ from docgrep.usecases.cancel_index import CancelIndex
 from docgrep.usecases.dry_run import DryRun
 from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
+from docgrep.usecases.update_index import UpdateIndex, UpdateSummary
 
 
 class SearchOperation(Protocol):
@@ -58,12 +59,21 @@ class BuildOperation(Protocol):
     def request_cancel(self) -> None: ...
 
 
+class UpdateOperation(Protocol):
+    """Run one incremental update of the published index."""
+
+    def run(self, *, retry_failed: bool = True) -> UpdateSummary: ...
+
+    def request_cancel(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Services:
     """Operations exposed to HTTP and CLI transports."""
 
     search: SearchOperation
     build: BuildOperation
+    update: UpdateOperation | None = None
 
 
 class _CorpusEnumerator:
@@ -85,6 +95,9 @@ class _CorpusEnumerator:
             self._settings.exclude_globs,
             self._settings.data_dir,
         )
+
+    def describe(self, path: str) -> Source:
+        return describe_source(self._settings.corpus_root, path)
 
 
 class _LazyTokenizerOnly:
@@ -253,6 +266,12 @@ def create_container(
     manifest = SQLiteManifest(settings.data_dir)
     parsers = _parsers(settings)
     config = _vector_config(settings)
+    lock = FileIndexLock(settings.data_dir / "index.lock")
+    chunker = TokenChunker(tokenizer, settings.chunk_size, settings.chunk_overlap)
+    log_context: dict[str, str | int | float] = {
+        "corpus_root": settings.corpus_root.resolve().name,
+        "backend": settings.backend,
+    }
     return Services(
         search=FindPassages(
             embedder=embedder,
@@ -265,12 +284,10 @@ def create_container(
             max_query_len=settings.max_query_len,
         ),
         build=BuildIndex(
-            lock=FileIndexLock(settings.data_dir / "index.lock"),
+            lock=lock,
             enumerator=_CorpusEnumerator(settings),
             parsers=parsers,
-            chunker=TokenChunker(
-                tokenizer, settings.chunk_size, settings.chunk_overlap
-            ),
+            chunker=chunker,
             embedder=embedder,
             sparse_encoder=sparse,
             passage_writer=store,
@@ -279,9 +296,19 @@ def create_container(
             docgrep_version=__version__,
             upsert_batch_size=settings.upsert_batch_size,
             refuse_resumable_by_default=refuse_resumable_by_default,
-            log_context={
-                "corpus_root": settings.corpus_root.resolve().name,
-                "backend": settings.backend,
-            },
+            log_context=log_context,
+        ),
+        update=UpdateIndex(
+            lock=lock,
+            corpus=_CorpusEnumerator(settings),
+            parsers=parsers,
+            chunker=chunker,
+            embedder=embedder,
+            sparse_encoder=sparse,
+            index=store,
+            manifest=manifest,
+            config=config,
+            upsert_batch_size=settings.upsert_batch_size,
+            log_context=log_context,
         ),
     )
