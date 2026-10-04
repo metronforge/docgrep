@@ -1,6 +1,17 @@
 # docgrep
 
-docgrep searches a local document corpus and returns ranked, verbatim passages with source locations. The current slice indexes TXT, Markdown, and text-bearing PDF files. Image-only PDFs are recorded as needing OCR; other file types are skipped.
+docgrep searches a local document corpus and returns ranked, verbatim passages with source locations. The current slice indexes TXT, Markdown, text-bearing PDF and EPUB files. Image-only PDFs and EPUBs without text are recorded as needing OCR; other file types are skipped.
+
+## Supported formats
+
+| Format | Extensions | Location in results | Metadata | Notes |
+|---|---|---|---|---|
+| Plain text | `.txt` | none | none | UTF-8, else a confidently detected legacy encoding |
+| Markdown | `.md`, `.markdown` | heading path | `title`, `author`, `year` from YAML frontmatter | wikilinks are recorded |
+| PDF | `.pdf` | page number | title, author and creation year from the PDF metadata | pages without text are skipped; a PDF without any text is recorded as needing OCR |
+| EPUB (2 and 3) | `.epub` | heading path (`h1` to `h6`, continued across chapters) | title, creators and year from the package metadata | text in spine (reading) order, navigation document and NCX skipped; DRM-encrypted books fail with `parse_error` (font obfuscation is accepted); a book without text is recorded as needing OCR |
+
+DOCX and DjVu files are recognised but not parsed yet; they are recorded as skipped (unsupported).
 
 ## Install
 
@@ -114,7 +125,7 @@ uv run docgrep dry-run --json              # machine-readable report with a file
 uv run docgrep dry-run --path-prefix books/ --sample 20 --seed 1
 ```
 
-The report gives the total number of files, and for each file type the count and the total, average and largest size. Types that docgrep recognises but cannot parse yet (for example EPUB, DOCX and DjVu) are listed separately as recognised without a parser, files with other extensions as unsupported with the 20 most common extensions, and excluded files with the pattern that excluded them (`not_matched_by_includes` when no include pattern matched).
+The report gives the total number of files, and for each file type the count and the total, average and largest size. Types that docgrep recognises but cannot parse yet (for example DOCX and DjVu) are listed separately as recognised without a parser, files with other extensions as unsupported with the 20 most common extensions, and excluded files with the pattern that excluded them (`not_matched_by_includes` when no include pattern matched).
 
 - `--path-prefix` restricts every figure to paths starting with the given relative prefix.
 - `--limit` (1 to 500, default 100) and `--offset` page the file list, which is part of the JSON output only.

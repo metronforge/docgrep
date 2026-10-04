@@ -12,6 +12,7 @@ import pytest
 from docgrep.api.cli import main
 from docgrep.api.container import create_dry_run
 from docgrep.settings import Settings
+from epub_support import epub_bytes, write_epub, xhtml
 
 SECRET = "zebra-secret-phrase"
 README = Path(__file__).resolve().parents[2] / "README.md"
@@ -22,7 +23,7 @@ def _corpus(root: Path) -> None:
         "a.txt": f"{SECRET} alpha beta gamma delta " * 20,
         "notes/b.md": f"# Title\n\n{SECRET} some markdown body text here " * 10,
         "notes/private/c.txt": f"{SECRET} private words",
-        "books/old.epub": "epub bytes",
+        "books/old.docx": "docx bytes",
         "books/data.bin": "binary",
         "README": "plain",
     }.items():
@@ -161,8 +162,8 @@ def test_the_report_matches_the_tree(setup: tuple[Path, Path]) -> None:
         {"pattern": "notes/private/", "files": 1}
     ]
     types = {t["type"]: t for t in report["types"]}
-    assert set(types) == {"txt", "markdown", "epub"}
-    assert types["epub"]["status"] == "recognised_without_parser"
+    assert set(types) == {"txt", "markdown", "docx"}
+    assert types["docx"]["status"] == "recognised_without_parser"
     assert report["unsupported"]["extensions"] == [
         {"extension": "(none)", "files": 1},
         {"extension": ".bin", "files": 1},
@@ -180,7 +181,7 @@ def test_the_text_report_is_readable_and_has_no_file_list_or_content(
     assert "recognised_without_parser" in out and "notes/private/: 1" in out
     assert "estimate" in out and "extrapolated" in out
     assert SECRET not in out
-    assert "a.txt" not in out and "books/old.epub" not in out
+    assert "a.txt" not in out and "books/old.docx" not in out
 
 
 def test_the_json_report_never_contains_file_content(setup: tuple[Path, Path]) -> None:
@@ -334,3 +335,27 @@ def test_the_command_wires_only_a_scanner_parsers_and_a_chunker(
     assert sorted(vars(dry_run)) == ["chunker", "parsers", "scanner"]
     assert not (tmp_path / "d").exists()
     assert os.listdir(tmp_path) == []
+
+
+def test_epub_is_listed_as_supported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = tmp_path / "corpus"
+    write_epub(
+        corpus / "books/novel.epub",
+        epub_bytes([("one.xhtml", xhtml("<h1>Start</h1><p>Some book words.</p>"))]),
+    )
+    _env(monkeypatch, corpus, tmp_path / "data")
+
+    code, out, _ = _run("--json", "--sample", "1")
+
+    assert code == 0
+    report = json.loads(out)
+    types = {t["type"]: t for t in report["types"]}
+    assert types["epub"]["status"] == "supported"
+    assert report["would_be_indexed"]["files"] == 1
+    assert report["recognised_without_parser"]["files"] == 0
+    assert [f["status"] for f in report["files"]["items"]] == ["indexed"]
+    (sampled,) = report["sample"]["types"]
+    assert sampled["type"] == "epub"
+    assert (sampled["parsed"], sampled["failed"]) == (1, 0)

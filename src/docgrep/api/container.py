@@ -19,6 +19,7 @@ from docgrep.adapters.models.real import (
     load_tokenizer,
 )
 from docgrep.adapters.models.sparse import BM25SparseEncoder
+from docgrep.adapters.parsers.epub import EpubParser
 from docgrep.adapters.parsers.markdown import MarkdownParser
 from docgrep.adapters.parsers.pdf import PdfParser
 from docgrep.adapters.parsers.text import TextParser
@@ -112,6 +113,7 @@ def _parsers(settings: Settings) -> Mapping[FileType, DocumentParser]:
         FileType.TXT: TextParser(settings.corpus_root),
         FileType.MARKDOWN: MarkdownParser(settings.corpus_root),
         FileType.PDF: PdfParser(settings.corpus_root),
+        FileType.EPUB: EpubParser(settings.corpus_root),
     }
 
 
