@@ -243,6 +243,15 @@ This runs lint, formatting, strict type checking, and the CPU test suite, includ
 uv run pytest -m gpu -q
 ```
 
+After pulling a release into a working copy with an editable install, refresh the installed package metadata so that it matches the code version:
+
+```sh
+export UV_NO_SYNC=1
+uv pip install --no-deps -e .
+```
+
+Otherwise the package test that compares the installed version with the code version fails, although the code is fine. `--no-deps` leaves the installed dependencies, including the chosen torch build, untouched.
+
 ## License
 
 docgrep is licensed under AGPL-3.0-or-later (see [LICENSE](LICENSE)).
