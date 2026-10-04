@@ -2,6 +2,7 @@
 
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, Literal, cast
@@ -100,9 +101,9 @@ class Lock:
         self.held = held
 
     @contextmanager
-    def hold(self) -> Iterator[None]:
+    def hold(self, operation: str = "build") -> Iterator[None]:
         if self.held:
-            raise IndexLockHeld("held")
+            raise IndexLockHeld(f"held, {operation} refused")
         yield
 
     def is_held(self) -> bool:
@@ -548,3 +549,49 @@ def test_build_records_a_declared_parser_version() -> None:
     assert markdown is not None and markdown.source.parser_version is None
     stored = {item[1].parser_version for item in harness.store._items.values()}
     assert stored == {"3", None}
+
+
+def test_the_plan_splits_modified_by_reason(harness: Harness) -> None:
+    files = harness.corpus.files
+    files["b.txt"] = ("six seven changed", 2.0)  # content changed
+    harness.parsers[FileType.MARKDOWN] = Parser(harness.corpus, version="2")
+    harness.parsers[FileType.EPUB] = harness.parser  # d.epub was unsupported
+
+    plan = harness.update().run().plan
+
+    assert (plan.content_changed, plan.parser_changed, plan.newly_supported) == (
+        1,
+        1,
+        1,
+    )
+    assert plan.modified == 3 and plan.retried == 0
+
+
+@pytest.mark.parametrize("recorded", [None, ""])
+def test_a_missing_recorded_version_counts_as_version_1(
+    harness: Harness, recorded: str | None
+) -> None:
+    for path in ("a.txt", "b.txt", "c.md"):
+        record = harness.manifest.get_source(path)
+        assert record is not None
+        stale = replace(record.source, parser_version=recorded)
+        harness.manifest.record_source(stale, record.status, None, "model")
+    versioned = Parser(harness.corpus, version="1")
+    harness.parsers[FileType.TXT] = versioned
+    harness.parsers[FileType.MARKDOWN] = versioned
+
+    assert harness.update().run().no_changes
+
+    harness.parsers[FileType.TXT] = Parser(harness.corpus, version="2")
+    plan = harness.update().run().plan
+    assert (plan.parser_changed, plan.unchanged) == (2, 2)
+
+
+def test_a_parser_without_a_version_matches_a_recorded_1(harness: Harness) -> None:
+    record = harness.manifest.get_source("a.txt")
+    assert record is not None
+    harness.manifest.record_source(
+        replace(record.source, parser_version="1"), record.status, None, "model"
+    )
+
+    assert harness.update().run().no_changes

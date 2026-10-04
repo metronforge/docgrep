@@ -201,3 +201,23 @@ def fail_live_upsert_at(
 ) -> None:
     update: Any = services.update
     update.index = FailingLiveUpserts(update.index, call, error)
+
+
+class Versioned:
+    """A real parser declaring another version (None: declaring none)."""
+
+    def __init__(self, inner: Any, version: str | None) -> None:
+        self.inner = inner
+        if version is not None:
+            self.version = version
+
+    def parse(self, source: Any) -> Any:
+        return self.inner.parse(source)
+
+
+def with_version(operation: Any, file_type: FileType, version: str | None) -> None:
+    """Make a build or update of a container see another parser version."""
+    operation.parsers = {
+        **operation.parsers,
+        file_type: Versioned(operation.parsers[file_type], version),
+    }

@@ -25,6 +25,7 @@ from docgrep.domain.protocols import (
     LiveIndexWriter,
     Manifest,
     SparseEncoder,
+    effective_parser_version,
     parser_version,
 )
 from docgrep.domain.run_state import (
@@ -45,6 +46,8 @@ from docgrep.usecases.build_index import (
 _LOG = logging.getLogger(__name__)
 
 ChangeKind = Literal["removed", "modified", "retried", "added"]
+# Why a recorded source is processed again (the retried ones aside).
+ModifiedReason = Literal["content_changed", "parser_changed", "newly_supported"]
 _ORDER: tuple[ChangeKind, ...] = ("removed", "modified", "retried", "added")
 
 
@@ -56,6 +59,11 @@ class UpdatePlan:
     a failed source whose content changed counts as modified. ``refreshed``
     counts unchanged sources whose size or modification time changed while
     their content hash did not; only their recorded size and time are updated.
+
+    ``modified`` is the sum of the reasons: ``content_changed`` (the content
+    hash differs), ``parser_changed`` (the registered parser's version differs
+    from the recorded one, or the parser is gone) and ``newly_supported``
+    (skipped as unsupported before, a parser exists now).
     """
 
     added: int = 0
@@ -64,6 +72,9 @@ class UpdatePlan:
     unchanged: int = 0
     retried: int = 0
     refreshed: int = 0
+    content_changed: int = 0
+    parser_changed: int = 0
+    newly_supported: int = 0
 
     @property
     def changes(self) -> int:
@@ -191,7 +202,7 @@ class UpdateIndex(SourceIndexing):
         from the index.
         """
         started = self.clock()
-        with self.lock.hold():
+        with self.lock.hold("update"):
             self._check_preconditions()
             self._close_dead_update()
             run_id = self.manifest.start_run(self.run_config, kind="update")
@@ -240,6 +251,11 @@ class UpdateIndex(SourceIndexing):
     def _plan(self, retry_failed: bool) -> tuple[list[_Change], UpdatePlan]:
         recorded = {r.source.path: r for r in self.manifest.committed_sources()}
         found: dict[ChangeKind, list[_Change]] = {kind: [] for kind in _ORDER}
+        reasons: dict[ModifiedReason, int] = {
+            "content_changed": 0,
+            "parser_changed": 0,
+            "newly_supported": 0,
+        }
         seen: set[str] = set()
         unchanged = 0
         refreshed = 0
@@ -259,6 +275,7 @@ class UpdateIndex(SourceIndexing):
                 current = self.corpus.describe(item.path)
                 if current.content_hash != old.content_hash:
                     found["modified"].append(_Change("modified", current, record))
+                    reasons["content_changed"] += 1
                     continue
                 # Same content: only the recorded size and time follow the
                 # file, in the passages first and then in the record.
@@ -271,9 +288,11 @@ class UpdateIndex(SourceIndexing):
                     fresh, record.status, record.error, record.embedding_model
                 )
                 refreshed += 1
-            if self._parser_changed(record):
+            reason = self._parser_reason(record)
+            if reason is not None:
                 current = current or self.corpus.describe(item.path)
                 found["modified"].append(_Change("modified", current, record))
+                reasons[reason] += 1
             elif record.status.startswith("failed:") and retry_failed:
                 current = current or self.corpus.describe(item.path)
                 found["retried"].append(_Change("retried", current, record))
@@ -295,25 +314,31 @@ class UpdateIndex(SourceIndexing):
             unchanged=unchanged,
             retried=len(found["retried"]),
             refreshed=refreshed,
+            **reasons,
         )
         return changes, plan
 
-    def _parser_changed(self, record: ManifestSourceRecord) -> bool:
-        """Whether the registered parser would treat the source differently.
+    def _parser_reason(self, record: ManifestSourceRecord) -> ModifiedReason | None:
+        """Why the registered parser would treat the source differently, if so.
 
-        A source skipped as unsupported changes once a parser is registered; an
-        indexed or OCR-pending source changes when its parser's version differs
-        from the recorded one or its parser is gone. Failed sources are left to
-        the retry rule.
+        A source skipped as unsupported is newly supported once a parser is
+        registered; an indexed or OCR-pending source has a changed parser when
+        the parser's version differs from the recorded one or the parser is
+        gone. A missing or empty version, recorded or declared, counts as
+        version "1" (``effective_parser_version``), so sources recorded before
+        versions existed are not reprocessed for that alone. Failed sources are
+        left to the retry rule.
         """
         parser = self.parsers.get(record.source.file_type)
         if record.status == "skipped:unsupported":
-            return parser is not None
+            return None if parser is None else "newly_supported"
         if record.status.startswith("failed:"):
-            return False
+            return None
         if parser is None:
-            return True
-        return parser_version(parser) != record.source.parser_version
+            return "parser_changed"
+        declared = effective_parser_version(parser_version(parser))
+        recorded = effective_parser_version(record.source.parser_version)
+        return None if declared == recorded else "parser_changed"
 
     def _execute(
         self,
@@ -342,6 +367,9 @@ class UpdateIndex(SourceIndexing):
                     "unchanged": plan.unchanged,
                     "retried": plan.retried,
                     "refreshed": plan.refreshed,
+                    "content_changed": plan.content_changed,
+                    "parser_changed": plan.parser_changed,
+                    "newly_supported": plan.newly_supported,
                 },
             )
             if on_plan is not None:

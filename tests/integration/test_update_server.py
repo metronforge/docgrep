@@ -9,6 +9,7 @@ import pytest
 from qdrant_client import QdrantClient, models
 
 from docgrep.adapters.manifest import SQLiteManifest
+from docgrep.domain.models import FileType
 from resume_support import close, dump_points, search_snapshot, settings_for
 from update_support import (
     CHANGES,
@@ -21,6 +22,7 @@ from update_support import (
     fail_live_upsert_at,
     sources_table,
     update_services,
+    with_version,
     without_epub,
     write_files,
 )
@@ -151,3 +153,28 @@ def test_a_failure_inside_a_source_on_a_server_is_repaired(tmp_path: Path) -> No
     assert _update(settings).failed == 0
 
     assert _snapshot(settings) == reference
+
+
+def test_a_version_bump_on_a_server_equals_a_clean_build(tmp_path: Path) -> None:
+    corpus = tmp_path / "final"
+    write_files(corpus, FINAL)
+    clean = settings_for(corpus, tmp_path / "clean", url=URL, alias=CLEAN)
+    services = update_services(clean)
+    with_version(services.build, FileType.TXT, "2")
+    services.build.run()
+    close(services)
+    reference = _snapshot(clean)
+    live = settings_for(corpus, tmp_path / "live", url=URL, alias=UPDATED)
+    services = update_services(live)
+    services.build.run()
+    close(services)
+
+    services = update_services(live)
+    with_version(services.update, FileType.TXT, "2")
+    assert services.update is not None
+    summary = services.update.run()
+    close(services)
+
+    texts = sum(1 for name in FINAL if name.endswith(".txt"))
+    assert summary.plan.parser_changed == texts == summary.plan.modified
+    assert _snapshot(live) == reference

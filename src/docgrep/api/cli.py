@@ -280,6 +280,9 @@ def _format_plan(plan: UpdatePlan) -> str:
         f"Update plan: {plan.added} added, {plan.modified} modified, "
         f"{plan.removed} removed, {plan.retried} retried, "
         f"{plan.unchanged} unchanged.\n"
+        f"Modified by reason: {plan.newly_supported} newly supported, "
+        f"{plan.content_changed} content changed, "
+        f"{plan.parser_changed} parser changed, {plan.retried} retried.\n"
     )
 
 
