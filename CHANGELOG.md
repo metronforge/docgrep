@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v1.7.0 (2026-10-04)
+
+### Chores
+
+- Relicense under AGPL-3.0-or-later
+  ([`b4a11f3`](https://github.com/metronforge/docgrep/commit/b4a11f31807220e96afb2114479ba0d76efa973b))
+
+### Documentation
+
+- Add ADR-0014 on the AGPL-3.0-or-later license
+  ([`d9c83e3`](https://github.com/metronforge/docgrep/commit/d9c83e36b535fdea5e6ade1e04ddd3f78c677f90))
+
+### Features
+
+- **adapters**: Remove soft hyphens and drop garbled PDF text layers
+  ([`711419b`](https://github.com/metronforge/docgrep/commit/711419bb3abb41ab18f9916ebbd727f8d730ce2e))
+
+- **cli**: Measure PDF text layers in the dry-run sample
+  ([`019ba7e`](https://github.com/metronforge/docgrep/commit/019ba7e4ab6627c3d1baf269d5bef7dc58cc91db))
+
+- **usecases**: Give parsers versions that drive re-extraction on update
+  ([`5d5769b`](https://github.com/metronforge/docgrep/commit/5d5769b3c7542ab936d4da194492dc6a83f4b9df))
+
+
 ## v1.6.0 (2026-10-04)
 
 ### Documentation
