@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "docgrep"
 version = "1.6.0"
 description = "Local document corpus search service"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.13"
 dependencies = [

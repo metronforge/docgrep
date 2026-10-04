@@ -231,4 +231,6 @@ uv run pytest -m gpu -q
 
 ## License
 
-License: Apache-2.0
+docgrep is licensed under AGPL-3.0-or-later (see [LICENSE](LICENSE)).
+
+Using docgrep locally for yourself or inside your organisation imposes no obligations beyond keeping the licence notices. If you distribute modified versions, or let other people use a modified version over a network, the AGPL requires offering them the corresponding source of that version. The PDF backend PyMuPDF is itself licensed under AGPL-3.0 (or a commercial licence).
