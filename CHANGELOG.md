@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-10-04)
+
+### Documentation
+
+- Add ADR-0013 on incremental update writing in place
+  ([`0000fda`](https://github.com/metronforge/docgrep/commit/0000fda4f481481a58fcf7258303f8cfade4faa3))
+
+### Features
+
+- **adapters**: Parse EPUB books with the standard library
+  ([`7966066`](https://github.com/metronforge/docgrep/commit/7966066f16ed2540a38673c6686a231668ed9f69))
+
+- **cli**: Add docgrep update and show updates in status
+  ([`992f88c`](https://github.com/metronforge/docgrep/commit/992f88c9d23c014afee317730abca0ea6bc657c1))
+
+- **usecases**: Update the published index in place for corpus changes
+  ([`c903538`](https://github.com/metronforge/docgrep/commit/c9035387cf3efd30ec5290dc28542bc4c27616f4))
+
+### Testing
+
+- **settings**: Isolate tests from the caller's DOCGREP_ environment
+  ([`1a9b32e`](https://github.com/metronforge/docgrep/commit/1a9b32efb55fce845b60f9a5fb4cf3809e5f9250))
+
+
 ## v1.5.1 (2026-10-03)
 
 ### Bug Fixes
