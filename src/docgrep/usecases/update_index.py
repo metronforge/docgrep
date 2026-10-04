@@ -25,7 +25,7 @@ from docgrep.domain.protocols import (
     LiveIndexWriter,
     Manifest,
     SparseEncoder,
-    effective_parser_version,
+    parser_reprocess_reason,
     parser_version,
 )
 from docgrep.domain.run_state import (
@@ -330,15 +330,12 @@ class UpdateIndex(SourceIndexing):
         left to the retry rule.
         """
         parser = self.parsers.get(record.source.file_type)
-        if record.status == "skipped:unsupported":
-            return None if parser is None else "newly_supported"
-        if record.status.startswith("failed:"):
-            return None
-        if parser is None:
-            return "parser_changed"
-        declared = effective_parser_version(parser_version(parser))
-        recorded = effective_parser_version(record.source.parser_version)
-        return None if declared == recorded else "parser_changed"
+        return parser_reprocess_reason(
+            record.status,
+            record.source.parser_version,
+            registered=parser is not None,
+            declared_version=parser_version(parser),
+        )
 
     def _execute(
         self,
