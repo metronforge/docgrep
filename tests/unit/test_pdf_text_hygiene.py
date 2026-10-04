@@ -8,7 +8,7 @@ import pytest
 from docgrep.adapters.chunking import TokenChunker, WhitespaceTokenizer
 from docgrep.adapters.parsers import PdfParser
 from docgrep.domain.models import FileType, ParsedDocument, Source
-from pdf_support import garbled, pdf_bytes, prose, write_pdf
+from pdf_support import broken, pdf_bytes, prose, write_pdf
 
 SHY = "\u00ad"
 
@@ -20,8 +20,8 @@ def parse(
     return PdfParser(root).parse(Source(name, name, FileType.PDF))
 
 
-def test_the_parser_declares_version_2() -> None:
-    assert PdfParser.version == "2"
+def test_the_parser_declares_version_3() -> None:
+    assert PdfParser.version == "3"
 
 
 def test_soft_hyphens_at_line_ends_join_words(tmp_path: Path) -> None:
@@ -68,7 +68,7 @@ def test_text_without_soft_hyphens_is_unchanged(tmp_path: Path) -> None:
 def test_garbled_pages_are_dropped_and_logged_without_text(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    pages = [prose(1), garbled(2), prose(3), None, prose(4)]
+    pages = [prose(1), broken(2), prose(3), None, prose(4)]
 
     with caplog.at_level(logging.WARNING):
         document = parse(tmp_path, pages)
@@ -90,7 +90,7 @@ def test_garbled_pages_are_dropped_and_logged_without_text(
 
 
 def test_a_mostly_garbled_document_requires_ocr(tmp_path: Path) -> None:
-    document = parse(tmp_path, [prose(1), garbled(2), None])
+    document = parse(tmp_path, [prose(1), broken(2), None])
 
     assert document.requires_ocr and document.sections == ()
     assert document.quality is not None
@@ -99,7 +99,7 @@ def test_a_mostly_garbled_document_requires_ocr(tmp_path: Path) -> None:
 
 
 def test_a_minority_of_garbled_pages_keeps_the_document(tmp_path: Path) -> None:
-    document = parse(tmp_path, [prose(1), garbled(2), prose(3)])
+    document = parse(tmp_path, [prose(1), broken(2), prose(3)])
 
     assert not document.requires_ocr and len(document.sections) == 2
 
@@ -112,7 +112,7 @@ def test_a_text_less_pdf_still_requires_ocr_without_a_reason(tmp_path: Path) -> 
 
 
 def test_the_same_file_gives_the_same_passages(tmp_path: Path) -> None:
-    pages = [prose(1, lines=12), garbled(2), [f"split hyphen{SHY}", "ation"] + prose(3)]
+    pages = [prose(1, lines=12), broken(2), [f"split hyphen{SHY}", "ation"] + prose(3)]
     chunker = TokenChunker(WhitespaceTokenizer(), chunk_size=20, chunk_overlap=4)
 
     first = chunker.chunk(parse(tmp_path, pages))

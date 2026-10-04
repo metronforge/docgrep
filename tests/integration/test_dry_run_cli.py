@@ -135,6 +135,8 @@ def test_the_json_report_has_the_documented_keys(setup: tuple[Path, Path]) -> No
         "garbled_text_layer_files",
         "garbled_text_layer_fraction",
         "soft_hyphens_removed_per_file",
+        "pages_by_rule",
+        "flagged_files",
     }
     assert set(entry["text_quality"]) == text_quality_keys
     assert set(report["sample"]["text_quality"]) == text_quality_keys

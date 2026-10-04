@@ -11,17 +11,17 @@ import pytest
 from docgrep.api.cli import main
 from docgrep.api.container import create_dry_run
 from docgrep.settings import Settings
-from pdf_support import garbled, pdf_bytes, prose, write_pdf
+from pdf_support import broken, pdf_bytes, prose, write_pdf
 
-SHY = "­"
+SHY = "\u00ad"
 
 
 def _corpus(root: Path) -> None:
     hyphenated = [f"hyphen{SHY}", "ation", f"mid{SHY}word and {SHY}more"]
     write_pdf(root / "a-clean.pdf", pdf_bytes([prose(1), hyphenated]))
-    write_pdf(root / "b-partly.pdf", pdf_bytes([prose(2), garbled(3), prose(4)]))
-    write_pdf(root / "c-broken.pdf", pdf_bytes([garbled(5), garbled(6), prose(7)]))
-    write_pdf(root / "d-half.pdf", pdf_bytes([garbled(8), prose(9)]))
+    write_pdf(root / "b-partly.pdf", pdf_bytes([prose(2), broken(3), prose(4)]))
+    write_pdf(root / "c-broken.pdf", pdf_bytes([broken(5), broken(6), prose(7)]))
+    write_pdf(root / "d-half.pdf", pdf_bytes([broken(8), prose(9)]))
     (root / "notes.txt").write_text("marker10 plain words", encoding="utf-8")
 
 
@@ -60,6 +60,29 @@ def test_the_sample_counts_the_generated_garbled_pages(corpus: Path) -> None:
         "garbled_text_layer_files": ["c-broken.pdf", "d-half.pdf"],
         "garbled_text_layer_fraction": 0.5,
         "soft_hyphens_removed_per_file": 0.75,
+        "pages_by_rule": {
+            "r1_broken_characters": 4,
+            "r2_long_tokens": 2,
+            "r3_low_alnum": 0,
+        },
+        "flagged_files": [
+            {
+                "path": path,
+                "pages_dropped": len(dropped),
+                "pages_by_rule": {
+                    "r1_broken_characters": len(dropped),
+                    "r2_long_tokens": long_tokens,
+                    "r3_low_alnum": 0,
+                },
+                "dropped_pages": dropped,
+            }
+            # The broken pages of seeds 3 and 6 also form long tokens.
+            for path, dropped, long_tokens in (
+                ("b-partly.pdf", [2], 1),
+                ("c-broken.pdf", [1, 2], 1),
+                ("d-half.pdf", [1], 0),
+            )
+        ],
     }
     assert pdf["estimate"]["by_file_count"]["garbled_text_layer_files"] == 2.0
     txt = _types(report)["txt"]["text_quality"]

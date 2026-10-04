@@ -5,6 +5,7 @@ import pytest
 from docgrep.adapters.parsers.text_quality import (
     LONG_TOKEN_LENGTH,
     MIN_NON_WHITESPACE,
+    classify_page,
     is_garbled,
     remove_soft_hyphens,
 )
@@ -112,7 +113,8 @@ def test_a_short_page_is_never_judged() -> None:
     assert not is_garbled("#" * (MIN_NON_WHITESPACE - 1))
 
 
-GARBLED = {
+# Pages on which only weak signals fire: they are not garbled by themselves.
+WEAK_ONLY = {
     "upper-case run-on": "\n".join(
         "QWERTYUIOPASDFGHJKLZXCVBNMQWERTYUIOPASDFGHJKLZXCVBNMQWERTYUIOPASDFGH"
         for _ in range(5)
@@ -120,6 +122,9 @@ GARBLED = {
     "symbol soup": "\n".join(
         "#$% &*( )_+ {}| :<> ?~` !@ ^-= [];' ,./" for _ in range(8)
     ),
+}
+
+GARBLED = {
     "replacement characters": "\n".join(
         "the river \ufffd\ufffd\ufffd survey \ufffd\ufffd "
         "notes \ufffd\ufffd\ufffd\ufffd maps"
@@ -137,6 +142,14 @@ GARBLED = {
 def test_garbled_pages_are_flagged(name: str) -> None:
     assert sum(not c.isspace() for c in GARBLED[name]) >= MIN_NON_WHITESPACE
     assert is_garbled(GARBLED[name])
+
+
+@pytest.mark.parametrize("name", sorted(WEAK_ONLY))
+def test_weak_signals_alone_do_not_garble_a_page(name: str) -> None:
+    signals = classify_page(WEAK_ONLY[name])
+
+    assert signals.weak and not signals.broken
+    assert not is_garbled(WEAK_ONLY[name])
 
 
 def test_long_urls_are_not_long_tokens() -> None:

@@ -181,7 +181,15 @@ def _format_text_quality(label: str, quality: dict[str, Any]) -> str:
         f"text layer ({_fraction(quality['garbled_text_layer_fraction'])}); "
         f"soft hyphens removed per file {'n/a' if hyphens is None else hyphens}"
     )
-    return line + "".join(f"\n      garbled text layer: {path}" for path in files)
+    rules = quality["pages_by_rule"]
+    line += (
+        f"\n      pages per rule (weak signals drop nothing): "
+        f"R1 broken characters {rules['r1_broken_characters']}, "
+        f"R2 long tokens {rules['r2_long_tokens']}, "
+        f"R3 few letters and digits {rules['r3_low_alnum']}"
+    )
+    line += "".join(f"\n      garbled text layer: {path}" for path in files)
+    return line
 
 
 def _format_cancel(result: CancelResult) -> tuple[str, int]:

@@ -180,7 +180,10 @@ class ParseQuality:
 
     ``skip_reason`` names why a document that requires OCR does, when the
     parser knows more than that it has no text (for example
-    ``garbled_text_layer``).
+    ``garbled_text_layer``). ``pages_garbled`` counts the pages whose text
+    layer is garbled (dropped), and ``dropped_pages`` gives their numbers.
+    The ``pages_rule_*`` counts say on how many pages each page rule fired,
+    weak signals that do not drop a page included.
     """
 
     pages_total: int = 0
@@ -188,6 +191,10 @@ class ParseQuality:
     pages_garbled: int = 0
     soft_hyphens_removed: int = 0
     skip_reason: str | None = None
+    pages_rule_broken: int = 0
+    pages_rule_long_tokens: int = 0
+    pages_rule_low_alnum: int = 0
+    dropped_pages: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
