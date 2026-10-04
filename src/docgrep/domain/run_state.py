@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Literal
 
 from docgrep.domain.models import ManifestRunRecord
+from docgrep.domain.protocols import ManifestReader
 
 # What a reader sees: the stored status plus the one state that is derived.
 RunState = Literal[
@@ -71,3 +72,15 @@ def swap_already_happened(
     if run.total_sources is None:
         return journal_rows > 0
     return journal_rows >= run.total_sources
+
+
+def latest_build_run(manifest: ManifestReader) -> ManifestRunRecord | None:
+    """The latest run of kind build: the only kind that can be resumed.
+
+    Updates continue by running again (ADR-0013), so an update that stopped
+    never makes a build resumable or hides one.
+    """
+    latest = manifest.latest_run()
+    if latest is None or latest.kind == "build":
+        return latest
+    return manifest.latest_run_of_kind("build")

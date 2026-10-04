@@ -18,9 +18,23 @@ from docgrep.domain.models import (
 
 
 class DocumentParser(Protocol):
-    """Parse a source into verbatim, location-aware sections or raise an error."""
+    """Parse a source into verbatim, location-aware sections or raise an error.
+
+    A parser may also carry a ``version`` string attribute; it is optional and
+    read through ``parser_version``.
+    """
 
     def parse(self, source: Source) -> ParsedDocument: ...
+
+
+def parser_version(parser: DocumentParser | None) -> str | None:
+    """The version a parser declares in an optional ``version`` attribute.
+
+    A parser without one, or no parser, gives None, which is also what a
+    source records when nothing was declared.
+    """
+    version = getattr(parser, "version", None)
+    return version if isinstance(version, str) else None
 
 
 class TokenSpanTokenizer(Protocol):
@@ -49,6 +63,19 @@ class CorpusScanner(Protocol):
     """
 
     def scan(self) -> tuple[ScannedFile, ...]: ...
+
+
+class CorpusReader(Protocol):
+    """Scan the corpus cheaply, then describe single files on demand."""
+
+    def scan(self) -> tuple[ScannedFile, ...]:
+        """Every corpus file from directory entries alone, as ``CorpusScanner``."""
+        ...
+
+    def describe(self, path: str) -> Source:
+        """The source record of one corpus file, with its content hash, exactly
+        as ``CorpusEnumerator.enumerate`` would give it."""
+        ...
 
 
 class EmbeddingProvider(Protocol):
@@ -138,6 +165,49 @@ class PassageWriter(Protocol):
         ...
 
 
+class LiveIndexWriter(Protocol):
+    """Change the published collection in place, one source at a time.
+
+    Every call works on the collection the read alias points at, never on a
+    staging collection, and raises ``StoreUnavailable`` when none is published.
+    """
+
+    def read_completion_metadata(self) -> Mapping[str, str | int | float] | None: ...
+
+    def upsert_live_batch(
+        self,
+        items: Sequence[tuple[Passage, Source, Sequence[float], Mapping[int, float]]],
+    ) -> None:
+        """Write passages into the published collection; durable on return."""
+        ...
+
+    def delete_live_source_points(self, source_id: str) -> int:
+        """Delete every passage of a source; return how many were removed."""
+        ...
+
+    def delete_live_source_points_except(
+        self, source_id: str, keep: Collection[str]
+    ) -> int:
+        """Delete the passages of a source whose passage ids are not in ``keep``;
+        return how many were removed."""
+        ...
+
+    def refresh_live_source(self, source_id: str, *, size: int, mtime: float) -> None:
+        """Set the recorded size and modification time on every passage of a
+        source whose content did not change."""
+        ...
+
+    def merge_completion_metadata(
+        self, updates: Mapping[str, str | int | float]
+    ) -> None:
+        """Add or replace keys of the completion marker, keeping the others.
+
+        Refuses keys that describe vectors or chunking, which only a full build
+        may set.
+        """
+        ...
+
+
 class IndexLock(Protocol):
     """Guard the exclusive index write lock while a build runs.
 
@@ -202,6 +272,14 @@ class ManifestReader(Protocol):
 
     def latest_run(self) -> ManifestRunRecord | None: ...
 
+    def latest_run_of_kind(self, kind: str) -> ManifestRunRecord | None:
+        """The most recent run of one kind (``build`` or ``update``), or None."""
+        ...
+
+    def committed_sources(self) -> tuple[ManifestSourceRecord, ...]:
+        """Every committed source outcome, in path order."""
+        ...
+
     def run_sources(self, run_id: str) -> tuple[ManifestSourceRecord, ...]:
         """The journal of one run: every source outcome it recorded, by path."""
         ...
@@ -219,8 +297,13 @@ class ManifestWriter(Protocol):
         config: Mapping[str, str | int | float],
         *,
         resumed_from: str | None = None,
+        kind: str = "build",
     ) -> str:
-        """Open a run; ``resumed_from`` names the run it continues."""
+        """Open a run of a kind; ``resumed_from`` names the run it continues."""
+        ...
+
+    def remove_source(self, path: str) -> None:
+        """Delete the committed outcome of a source; nothing happens when absent."""
         ...
 
     def record_source(
@@ -236,7 +319,9 @@ class ManifestWriter(Protocol):
         """Record a source outcome.
 
         With a run id the outcome goes to that run's journal only; without one it
-        updates the committed sources directly.
+        updates the committed sources directly. ``status`` is ``indexed``,
+        ``skipped:<reason>``, ``failed:<reason>`` or, in an update's journal,
+        ``removed``.
         """
         ...
 

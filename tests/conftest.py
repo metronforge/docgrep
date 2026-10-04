@@ -1,10 +1,24 @@
-"""Shared fixtures for GPU-marked tests."""
+"""Shared fixtures: environment isolation and GPU-marked test support."""
 
 import gc
+import os
 import sys
 from collections.abc import Iterator
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_docgrep_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove the caller's DOCGREP_ settings so they cannot change any test.
+
+    DOCGREP_TEST_ variables configure the test run itself (such as the URL of a
+    throwaway Qdrant server) and are kept. A test that needs a setting sets it
+    with monkeypatch.
+    """
+    for name in list(os.environ):
+        if name.startswith("DOCGREP_") and not name.startswith("DOCGREP_TEST_"):
+            monkeypatch.delenv(name)
 
 
 @pytest.fixture

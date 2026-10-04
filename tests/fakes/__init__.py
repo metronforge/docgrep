@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Literal
 
-from docgrep.domain.errors import StagingInconsistent
+from docgrep.domain.errors import StagingInconsistent, StoreUnavailable, ValidationError
 from docgrep.domain.models import (
     ManifestRunRecord,
     ManifestSourceRecord,
@@ -14,6 +14,7 @@ from docgrep.domain.models import (
     Source,
     StagingInfo,
 )
+from docgrep.domain.run_state import VECTOR_CONFIG_KEYS
 
 
 class InMemoryPassageStore:
@@ -162,6 +163,63 @@ class InMemoryPassageStore:
         self._staged = {}
         self._building = False
 
+    # The live side: always the published collection, never the staging one.
+
+    def _published(
+        self,
+    ) -> dict[str, tuple[Passage, Source, tuple[float, ...], dict[int, float]]]:
+        if self._completion is None:
+            raise StoreUnavailable("No index is published")
+        return self._items
+
+    def upsert_live_batch(
+        self,
+        items: Sequence[tuple[Passage, Source, Sequence[float], Mapping[int, float]]],
+    ) -> None:
+        published = self._published()
+        for passage, source, dense_vector, sparse_vector in items:
+            published[passage.passage_id] = (
+                passage,
+                source,
+                tuple(dense_vector),
+                dict(sparse_vector),
+            )
+
+    def delete_live_source_points(self, source_id: str) -> int:
+        return self._delete_published(source_id, ())
+
+    def delete_live_source_points_except(
+        self, source_id: str, keep: Collection[str]
+    ) -> int:
+        return self._delete_published(source_id, keep)
+
+    def _delete_published(self, source_id: str, keep: Collection[str]) -> int:
+        published = self._published()
+        doomed = [
+            passage_id
+            for passage_id, item in published.items()
+            if item[1].source_id == source_id and passage_id not in keep
+        ]
+        for passage_id in doomed:
+            del published[passage_id]
+        return len(doomed)
+
+    def refresh_live_source(self, source_id: str, *, size: int, mtime: float) -> None:
+        published = self._published()
+        for passage_id, (passage, source, dense, sparse) in list(published.items()):
+            if source.source_id == source_id:
+                fresh = replace(source, size=size, mtime=mtime)
+                published[passage_id] = (passage, fresh, dense, sparse)
+
+    def merge_completion_metadata(
+        self, updates: Mapping[str, str | int | float]
+    ) -> None:
+        if set(updates) & set(VECTOR_CONFIG_KEYS):
+            raise ValidationError("Only a full build may set these keys")
+        if self._completion is None:
+            raise StoreUnavailable("No index is published")
+        self._completion = {**self._completion, **updates}
+
 
 class InMemoryManifest:
     """Keep source and run records with the same read/write port surface."""
@@ -176,6 +234,15 @@ class InMemoryManifest:
 
     def latest_run(self) -> ManifestRunRecord | None:
         return self._runs[-1] if self._runs else None
+
+    def latest_run_of_kind(self, kind: str) -> ManifestRunRecord | None:
+        return next((run for run in reversed(self._runs) if run.kind == kind), None)
+
+    def committed_sources(self) -> tuple[ManifestSourceRecord, ...]:
+        return tuple(self._sources[path] for path in sorted(self._sources))
+
+    def remove_source(self, path: str) -> None:
+        self._sources.pop(path, None)
 
     def request_cancel(self, run_id: str) -> str:
         run = self._find(run_id)
@@ -220,6 +287,7 @@ class InMemoryManifest:
         config: Mapping[str, str | int | float],
         *,
         resumed_from: str | None = None,
+        kind: str = "build",
     ) -> str:
         run_id = str(len(self._runs) + 1)
         self._runs.append(
@@ -227,6 +295,7 @@ class InMemoryManifest:
                 run_id,
                 "running",
                 tuple(sorted(config.items())),
+                kind=kind,
                 resumed_from=resumed_from,
             )
         )

@@ -172,6 +172,25 @@ def enumerate_corpus(
     return tuple(sorted(sources, key=lambda source: source.path))
 
 
+def describe_source(corpus_root: Path, path: str) -> Source:
+    """The source record of one corpus file, exactly as ``enumerate_corpus``
+    gives it, content hash included."""
+    file = corpus_root / path
+    try:
+        stat = file.stat()
+        content_hash = _content_hash(file)
+    except OSError as error:
+        raise _inaccessible(corpus_root, error) from error
+    return Source(
+        source_id=path,
+        path=path,
+        file_type=_FILE_TYPES.get(file.suffix.lower(), FileType.UNSUPPORTED),
+        content_hash=content_hash,
+        mtime=stat.st_mtime,
+        size=stat.st_size,
+    )
+
+
 NOT_MATCHED_BY_INCLUDES = "not_matched_by_includes"
 
 
@@ -201,13 +220,15 @@ def scan_corpus(
             else:
                 excluded_by = _matching_pattern(relative, exclude_globs)
             extension = path.suffix.lower()
+            stat = path.stat()
             scanned.append(
                 ScannedFile(
                     path=relative,
-                    size=path.stat().st_size,
+                    size=stat.st_size,
                     extension=extension,
                     file_type=_FILE_TYPES.get(extension),
                     excluded_by=excluded_by,
+                    mtime=stat.st_mtime,
                 )
             )
     except OSError as error:

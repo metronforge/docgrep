@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TypeVar
 
@@ -22,6 +22,7 @@ from docgrep.domain.models import (
     FileType,
     ManifestRunRecord,
     ManifestSourceRecord,
+    Passage,
     Source,
 )
 from docgrep.domain.progress import estimate_eta_seconds
@@ -34,11 +35,13 @@ from docgrep.domain.protocols import (
     Manifest,
     PassageWriter,
     SparseEncoder,
+    parser_version,
 )
 from docgrep.domain.run_state import (
     RESUMABLE_STATES,
     VECTOR_CONFIG_KEYS,
     config_drift,
+    latest_build_run,
     run_state,
     swap_already_happened,
 )
@@ -95,11 +98,28 @@ class _Plan:
     removed: int = 0
 
 
-class _Cancelled(Exception):
+class Cancelled(Exception):
     """Control flow: a cancel was requested and the current batch is done."""
 
 
-class _Progress:
+PassageItem = tuple[Passage, Source, tuple[float, ...], Mapping[int, float]]
+
+
+@dataclass(frozen=True, slots=True)
+class Prepared:
+    """A source run through parsing, chunking and embedding, before any write.
+
+    ``status`` is ``indexed`` (``items`` are ready to write), ``skipped:<reason>``
+    or ``failed:<reason>`` (``error`` says why).
+    """
+
+    source: Source
+    status: str
+    items: tuple[PassageItem, ...] = ()
+    error: Exception | None = None
+
+
+class Progress:
     """Emit ``index_progress`` records on a count and a time cadence.
 
     Only counters and timings are logged, never paths, titles or text.
@@ -171,7 +191,150 @@ class _Progress:
         self._logged_done = self.done
 
 
-class BuildIndex:
+class SourceIndexing:
+    """The per-source pipeline shared by full builds and incremental updates.
+
+    Subclasses provide the parsers, chunker, embedder, sparse encoder, manifest,
+    batch size and sleep as attributes, read at call time.
+    """
+
+    parsers: Mapping[FileType, DocumentParser]
+    chunker: Chunker
+    embedder: EmbeddingProvider
+    sparse_encoder: SparseEncoder
+    manifest: Manifest
+    batch_size: int
+    sleep: Callable[[float], None]
+    _cancel_event: threading.Event
+    _cancel_persisted: bool
+
+    def request_cancel(self) -> None:
+        """Ask the running build to stop after its current batch.
+
+        Safe to call from a signal handler: it only sets a flag. The build
+        persists the request itself, so other processes see it too.
+        """
+        self._cancel_event.set()
+
+    def _check_cancel(self, run_id: str) -> None:
+        if self._cancel_event.is_set():
+            if not self._cancel_persisted:
+                self.manifest.request_cancel(run_id)
+                self._cancel_persisted = True
+            raise Cancelled
+        if self.manifest.cancel_requested_at(run_id) is not None:
+            raise Cancelled
+
+    def _retry(self, operation: Callable[[], _T]) -> _T:
+        for attempt in range(3):
+            try:
+                return operation()
+            except Exception:
+                if attempt == 2:
+                    raise
+                self.sleep(float(2**attempt))
+        raise AssertionError("retry loop exhausted")
+
+    def _record_failure(
+        self, source: Source, reason: str, error: Exception, run_id: str
+    ) -> BuildFailure:
+        self.manifest.record_source(
+            source, f"failed:{reason}", str(error), run_id=run_id
+        )
+        _LOG.warning(
+            "index_source_failed",
+            extra={"source_id": source.source_id, "category": reason},
+        )
+        return BuildFailure(source.path, reason, str(error))
+
+    def _prepare(self, source: Source, run_id: str) -> Prepared:
+        """Parse, chunk and embed one source; checks for a cancel between batches.
+
+        A parser that declares a version stamps it on the source it returns.
+        """
+        parser = self.parsers.get(source.file_type)
+        if parser is None:
+            return Prepared(source, "skipped:unsupported")
+        try:
+            document = parser.parse(source)
+            parsed = document.source
+            version = parser_version(parser)
+            if version is not None:
+                parsed = replace(parsed, parser_version=version)
+            if document.requires_ocr:
+                return Prepared(parsed, "skipped:requires_ocr")
+            passages = self.chunker.chunk(document)
+        except Exception as error:
+            return Prepared(source, "failed:parse_error", error=error)
+
+        all_vectors: list[tuple[float, ...]] = []
+        for start in range(0, len(passages), self.batch_size):
+            if start:
+                # Between batches of one source; nothing of it is journaled yet.
+                self._check_cancel(run_id)
+            batch = passages[start : start + self.batch_size]
+            try:
+                vectors = self._retry(
+                    lambda: self.embedder.embed([passage.text for passage in batch])
+                )
+                if len(vectors) != len(batch):
+                    raise ValueError("embedder returned wrong vector count")
+            except Exception as error:
+                return Prepared(parsed, "failed:embedding_error", error=error)
+            all_vectors.extend(vectors)
+        items = tuple(
+            (passage, parsed, vector, self.sparse_encoder.encode(passage.text))
+            for passage, vector in zip(passages, all_vectors, strict=True)
+        )
+        return Prepared(parsed, "indexed", items)
+
+
+def finish_swapped_run(
+    manifest: Manifest, passage_writer: PassageWriter
+) -> ManifestRunRecord | None:
+    """Finish a build that published its index but did not commit its sources.
+
+    Called with the lock held, so such a run is dead. It is either stored as
+    swapped or, when the process died between the alias swap and the write
+    of that status, still running or aborted with its staging collection
+    already published. Only builds swap, so only the latest build is checked.
+    """
+    latest = latest_build_run(manifest)
+    if latest is None:
+        return None
+    reason = "swapped"
+    if latest.status != "swapped":
+        if latest.status not in ("running", "aborted"):
+            return None
+        if latest.staging_collection is None:
+            return None
+        info = passage_writer.staging_info(latest.staging_collection)
+        if info is None or not swap_already_happened(
+            latest,
+            journal_rows=len(manifest.run_sources(latest.run_id)),
+            staging_published=info.published,
+        ):
+            return None
+        manifest.mark_swapped(latest.run_id)
+        reason = "alias_target_reached"
+    totals = {"indexed": 0, "skipped": 0, "failed": 0}
+    for record in manifest.run_sources(latest.run_id):
+        totals[record.status.split(":")[0]] += 1
+    manifest.commit_run(latest.run_id)
+    manifest.finish_run(latest.run_id, "completed", totals)
+    _LOG.warning(
+        "run_recovered",
+        extra={
+            "run_id": latest.run_id,
+            "previous_status": latest.status,
+            "reason": reason,
+            **totals,
+        },
+    )
+    return latest
+
+
+class BuildIndex(SourceIndexing):
     """Rebuild a collection with an exclusive lock and durable source outcomes."""
 
     def __init__(
@@ -225,86 +388,9 @@ class BuildIndex:
         self._cancel_event = threading.Event()
         self._cancel_persisted = False
 
-    def request_cancel(self) -> None:
-        """Ask the running build to stop after its current batch.
-
-        Safe to call from a signal handler: it only sets a flag. The build
-        persists the request itself, so other processes see it too.
-        """
-        self._cancel_event.set()
-
-    def _check_cancel(self, run_id: str) -> None:
-        if self._cancel_event.is_set():
-            if not self._cancel_persisted:
-                self.manifest.request_cancel(run_id)
-                self._cancel_persisted = True
-            raise _Cancelled
-        if self.manifest.cancel_requested_at(run_id) is not None:
-            raise _Cancelled
-
-    def _retry(self, operation: Callable[[], _T]) -> _T:
-        for attempt in range(3):
-            try:
-                return operation()
-            except Exception:
-                if attempt == 2:
-                    raise
-                self.sleep(float(2**attempt))
-        raise AssertionError("retry loop exhausted")
-
-    def _record_failure(
-        self, source: Source, reason: str, error: Exception, run_id: str
-    ) -> BuildFailure:
-        self.manifest.record_source(
-            source, f"failed:{reason}", str(error), run_id=run_id
-        )
-        _LOG.warning(
-            "index_source_failed",
-            extra={"source_id": source.source_id, "category": reason},
-        )
-        return BuildFailure(source.path, reason, str(error))
-
     def _finish_swapped_run(self) -> ManifestRunRecord | None:
-        """Finish a run that published its index but did not commit its sources.
-
-        Called with the lock held, so such a run is dead. It is either stored as
-        swapped or, when the process died between the alias swap and the write
-        of that status, still running or aborted with its staging collection
-        already published.
-        """
-        latest = self.manifest.latest_run()
-        if latest is None:
-            return None
-        reason = "swapped"
-        if latest.status != "swapped":
-            if latest.status not in ("running", "aborted"):
-                return None
-            if latest.staging_collection is None:
-                return None
-            info = self.passage_writer.staging_info(latest.staging_collection)
-            if info is None or not swap_already_happened(
-                latest,
-                journal_rows=len(self.manifest.run_sources(latest.run_id)),
-                staging_published=info.published,
-            ):
-                return None
-            self.manifest.mark_swapped(latest.run_id)
-            reason = "alias_target_reached"
-        totals = {"indexed": 0, "skipped": 0, "failed": 0}
-        for record in self.manifest.run_sources(latest.run_id):
-            totals[record.status.split(":")[0]] += 1
-        self.manifest.commit_run(latest.run_id)
-        self.manifest.finish_run(latest.run_id, "completed", totals)
-        _LOG.warning(
-            "run_recovered",
-            extra={
-                "run_id": latest.run_id,
-                "previous_status": latest.status,
-                "reason": reason,
-                **totals,
-            },
-        )
-        return latest
+        """Finish the latest build if it only lacks its commit; see the function."""
+        return finish_swapped_run(self.manifest, self.passage_writer)
 
     def _drop_orphaned_staging_collections(self) -> None:
         for name in self.passage_writer.staging_collections():
@@ -314,50 +400,18 @@ class BuildIndex:
     def _index_source(
         self, source: Source, run_id: str
     ) -> tuple[str, BuildFailure | None, int]:
-        parser = self.parsers.get(source.file_type)
-        if parser is None:
-            self.manifest.record_source(source, "skipped:unsupported", run_id=run_id)
+        prepared = self._prepare(source, run_id)
+        if prepared.status.startswith("skipped:"):
+            self.manifest.record_source(prepared.source, prepared.status, run_id=run_id)
             return "skipped", None, 0
-        try:
-            document = parser.parse(source)
-            if document.requires_ocr:
-                self.manifest.record_source(
-                    document.source, "skipped:requires_ocr", run_id=run_id
-                )
-                return "skipped", None, 0
-            passages = self.chunker.chunk(document)
-        except Exception as error:
+        if prepared.error is not None:
+            reason = prepared.status.split(":", 1)[1]
             return (
                 "failed",
-                self._record_failure(source, "parse_error", error, run_id),
+                self._record_failure(prepared.source, reason, prepared.error, run_id),
                 0,
             )
-
-        all_vectors: list[tuple[float, ...]] = []
-        for start in range(0, len(passages), self.batch_size):
-            if start:
-                # Between batches of one source; nothing of it is journaled yet.
-                self._check_cancel(run_id)
-            batch = passages[start : start + self.batch_size]
-            try:
-                vectors = self._retry(
-                    lambda: self.embedder.embed([passage.text for passage in batch])
-                )
-                if len(vectors) != len(batch):
-                    raise ValueError("embedder returned wrong vector count")
-            except Exception as error:
-                return (
-                    "failed",
-                    self._record_failure(
-                        document.source, "embedding_error", error, run_id
-                    ),
-                    0,
-                )
-            all_vectors.extend(vectors)
-        items = [
-            (passage, document.source, vector, self.sparse_encoder.encode(passage.text))
-            for passage, vector in zip(passages, all_vectors, strict=True)
-        ]
+        items = prepared.items
         for start in range(0, len(items), self.upsert_batch_size):
             group = items[start : start + self.upsert_batch_size]
             try:
@@ -368,13 +422,13 @@ class BuildIndex:
                     details={"path": source.path, "reason": str(error)},
                 ) from error
         self.manifest.record_source(
-            document.source,
+            prepared.source,
             "indexed",
             embedding_model=self.embedder.model_name,
             run_id=run_id,
-            passages=len(passages),
+            passages=len(items),
         )
-        return "indexed", None, len(passages)
+        return "indexed", None, len(items)
 
     @property
     def run_config(self) -> dict[str, str | int | float]:
@@ -387,7 +441,7 @@ class BuildIndex:
 
     def _check_resumable_latest(self) -> ManifestRunRecord:
         """The latest run if it can be resumed, called with the lock held."""
-        latest = self.manifest.latest_run()
+        latest = latest_build_run(self.manifest)
         if latest is None:
             raise NothingToResume("There is no run to resume")
         # Nobody else holds the lock, so a run still stored as running is dead.
@@ -400,7 +454,7 @@ class BuildIndex:
         return latest
 
     def _refuse_if_resumable(self) -> None:
-        latest = self.manifest.latest_run()
+        latest = latest_build_run(self.manifest)
         if latest is None:
             return
         state = run_state(latest, lock_held=False)
@@ -656,7 +710,7 @@ class BuildIndex:
             plan = prepare(run_id)
             totals.update(plan.totals or {})
             failures.extend(plan.failures)
-            progress = _Progress(
+            progress = Progress(
                 run_id=run_id,
                 total=plan.total,
                 clock=self.clock,
@@ -693,7 +747,7 @@ class BuildIndex:
             swapped = True
             self.manifest.commit_run(run_id)
             self.manifest.finish_run(run_id, "completed", totals)
-        except _Cancelled:
+        except Cancelled:
             self.manifest.finish_run(run_id, "cancelled", totals)
             cancelled = True
         except Exception as error:

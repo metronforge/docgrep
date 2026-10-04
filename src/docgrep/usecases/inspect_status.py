@@ -10,6 +10,7 @@ from docgrep.domain.progress import estimate_eta_seconds
 from docgrep.domain.protocols import IndexLock, ManifestReader, StatusStore
 from docgrep.domain.run_state import (
     VECTOR_CONFIG_KEYS,
+    latest_build_run,
     run_state,
     swap_already_happened,
 )
@@ -92,14 +93,19 @@ class InspectStatus:
         manifest_ok = True
         manifest: ManifestReader | None = None
         latest: ManifestRunRecord | None = None
+        # Only builds publish, swap or resume; an update never changes the
+        # index state (ADR-0013).
+        build: ManifestRunRecord | None = None
         try:
             manifest = self.open_manifest()
             latest = None if manifest is None else manifest.latest_run()
+            if manifest is not None and latest is not None:
+                build = latest if latest.kind == "build" else latest_build_run(manifest)
         except Exception as error:
             manifest_ok = False
             warn("manifest_unreadable", f"The manifest cannot be read: {_short(error)}")
 
-        staging = None if latest is None else latest.staging_collection
+        staging = None if build is None else build.staging_collection
         store_view, metadata, passages, published = self._read_store(staging)
         if store_view.status == "unreachable":
             warn(
@@ -122,6 +128,7 @@ class InspectStatus:
                 embedding_dtype=_text(metadata, "embedding_dtype"),
                 docgrep_version=_text(metadata, "docgrep_version"),
                 completed_at=_text(metadata, "completed_at"),
+                last_updated_at=_text(metadata, "last_updated_at"),
             )
         drift = self._drift(metadata)
         if drift:
@@ -133,32 +140,46 @@ class InspectStatus:
 
         run_view: RunView | None = None
         state = None
-        if latest is not None:
-            state = run_state(latest, lock_held=lock_held)
+        if build is not None:
+            state = run_state(build, lock_held=lock_held)
             if (
                 state in ("interrupted", "aborted")
                 and manifest is not None
                 and published
                 and swap_already_happened(
-                    latest,
-                    journal_rows=self._journal_rows(manifest, latest),
+                    build,
+                    journal_rows=self._journal_rows(manifest, build),
                     staging_published=True,
                 )
             ):
                 # It died between the alias swap and the swapped status; the
                 # next build or resume finishes it. Only reported here.
                 state = "swapped"
+        if latest is not None:
             run_view = RunView(
                 latest.run_id,
                 latest.status,
-                state,
+                state
+                if latest is build and state is not None
+                else run_state(latest, lock_held=lock_held),
                 latest.started_at,
                 latest.finished_at,
                 latest.totals,
                 latest.total_sources,
                 latest.resumed_from,
                 latest.carried_sources,
+                latest.kind,
             )
+            if latest.kind == "update" and run_view.state in (
+                "aborted",
+                "cancelled",
+                "interrupted",
+            ):
+                warn(
+                    "update_unfinished",
+                    "The latest update did not finish; what it applied stays "
+                    "live, and `docgrep update` continues the work",
+                )
 
         active = None
         if lock_held:
@@ -170,7 +191,7 @@ class InspectStatus:
                     "The index lock is held, but no run is recorded as running",
                 )
 
-        index_state = self._index_state(manifest_ok, latest, state, metadata)
+        index_state = self._index_state(manifest_ok, build, state, metadata)
         if state in _PENDING:
             if state == "swapped":
                 warn(
@@ -296,7 +317,9 @@ class InspectStatus:
             )
         )
         return ActiveOperation(
-            kind="resume" if run.resumed_from else "build",
+            kind="update"
+            if run.kind == "update"
+            else ("resume" if run.resumed_from else "build"),
             run_id=run.run_id,
             started_at=run.started_at,
             sources_done=done,

@@ -66,12 +66,16 @@ class ScannedFile:
     extension: str
     file_type: FileType | None = None
     excluded_by: str | None = None
+    # Modification time from the same directory entry; None when not known.
+    mtime: float | None = None
 
     def __post_init__(self) -> None:
         if not self.path:
             raise ValueError("path must not be empty")
         if self.size < 0:
             raise ValueError("size must be non-negative")
+        if self.mtime is not None and not isfinite(self.mtime):
+            raise ValueError("mtime must be finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +217,8 @@ class ManifestRunRecord:
     """A single indexing run and its committed counters.
 
     ``swapped`` means the new index is published but the committed sources have
-    not been replaced from the run's journal yet.
+    not been replaced from the run's journal yet. ``kind`` is ``build`` for a
+    full build or its resume and ``update`` for an incremental update.
     """
 
     run_id: str
