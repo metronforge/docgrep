@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v1.9.0 (2026-10-04)
+
+### Documentation
+
+- Note how to refresh the editable install after a release
+  ([`9495d73`](https://github.com/metronforge/docgrep/commit/9495d7323047f69e075e83cd437143e399a8f4a2))
+
+### Features
+
+- **cli**: Show a breakdown of the sources table in docgrep status
+  ([`16db8c3`](https://github.com/metronforge/docgrep/commit/16db8c319f008fad86619fe840e3eb53d07bbe3b))
+
+### Testing
+
+- **adapters**: Spell invisible and look-alike characters as escapes
+  ([`f75d2dc`](https://github.com/metronforge/docgrep/commit/f75d2dc767287a6531b53e79cee8e1b6bdffd30a))
+
+
 ## v1.8.0 (2026-10-04)
 
 ### Bug Fixes

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "docgrep"
-version = "1.8.0"
+version = "1.9.0"
 description = "Local document corpus search service"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
