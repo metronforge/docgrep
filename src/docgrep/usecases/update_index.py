@@ -512,11 +512,13 @@ class UpdateIndex(SourceIndexing):
         indexed = prepared.status == "indexed"
         model = self.embedder.model_name if indexed else None
         # The passages are stored: only now does the committed record follow.
-        self.manifest.record_source(prepared.source, prepared.status, None, model)
+        self.manifest.record_source(
+            prepared.source, prepared.status, prepared.detail, model
+        )
         self.manifest.record_source(
             prepared.source,
             prepared.status,
-            None,
+            prepared.detail,
             model,
             run_id=run_id,
             passages=len(prepared.items),

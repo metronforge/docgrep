@@ -8,8 +8,12 @@ docgrep searches a local document corpus and returns ranked, verbatim passages w
 |---|---|---|---|---|
 | Plain text | `.txt` | none | none | UTF-8, else a confidently detected legacy encoding |
 | Markdown | `.md`, `.markdown` | heading path | `title`, `author`, `year` from YAML frontmatter | wikilinks are recorded |
-| PDF | `.pdf` | page number | title, author and creation year from the PDF metadata | pages without text are skipped; a PDF without any text is recorded as needing OCR |
+| PDF | `.pdf` | page number | title, author and creation year from the PDF metadata | pages without text and pages with a garbled text layer are skipped; a PDF without any text, or whose garbled pages are half or more of its pages with text, is recorded as needing OCR |
 | EPUB (2 and 3) | `.epub` | heading path (`h1` to `h6`, continued across chapters) | title, creators and year from the package metadata | text in spine (reading) order, navigation document and NCX skipped; DRM-encrypted books fail with `parse_error` (font obfuscation is accepted); a book without text is recorded as needing OCR |
+
+Passages are verbatim. The one exception is the PDF soft hyphen (U+00AD), which is removed from extracted PDF text; when it ends a line (optionally followed by spaces), the line break and those spaces are removed too, so the two halves of the word are joined. A visible hyphen `-` is never touched.
+
+A PDF page counts as garbled when it has at least 200 non-whitespace characters and any of these holds: replacement, private-use or control characters and `(cid:N)` placeholders make up more than 10% of them; tokens longer than 40 characters (other than URLs) make up more than 40%; or letters and digits of any script make up less than 40%. The rules are deliberately conservative, so prose, code, tables of numbers, lists of URLs and bibliographies are not flagged. Garbled pages never become passages; when they are half or more of the pages with text, the PDF is recorded as `skipped:requires_ocr` with the reason `garbled_text_layer`, otherwise a WARNING `pdf_pages_dropped` with `source_id`, `dropped` and `total` page counts is logged.
 
 DOCX and DjVu files are recognised but not parsed yet; they are recorded as skipped (unsupported), and `docgrep update` indexes them once a parser for their type is registered.
 
