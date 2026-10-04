@@ -170,6 +170,10 @@ class ParsedSection:
     heading_path: tuple[str, ...] = ()
 
 
+# The skip reason of a document whose text layer is unusable as text.
+GARBLED_TEXT_LAYER = "garbled_text_layer"
+
+
 @dataclass(frozen=True, slots=True)
 class ParseQuality:
     """What a parser noticed about a source's text layer; counts only, no text.

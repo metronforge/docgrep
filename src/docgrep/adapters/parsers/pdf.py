@@ -10,6 +10,7 @@ import pymupdf
 from docgrep.adapters.parsers.text_quality import is_garbled, remove_soft_hyphens
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import (
+    GARBLED_TEXT_LAYER,
     FileType,
     ParsedDocument,
     ParsedSection,
@@ -22,7 +23,6 @@ _PDF_DATE_YEAR = re.compile(r"^D:(\d{4})")
 # When at least this share of the pages that have text are garbled, the text
 # layer as a whole is unusable and the document is left to OCR.
 GARBLED_DOCUMENT_SHARE = 0.5
-GARBLED_TEXT_LAYER = "garbled_text_layer"
 
 
 def _metadata_text(value: str | None) -> str | None:

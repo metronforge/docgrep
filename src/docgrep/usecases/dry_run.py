@@ -14,6 +14,7 @@ from typing import Any
 
 from docgrep.domain.errors import ValidationError
 from docgrep.domain.models import (
+    GARBLED_TEXT_LAYER,
     FileType,
     ParsedDocument,
     ParsedSection,
@@ -54,6 +55,12 @@ class SampleTypeReport:
     seconds: float
     corpus_files: int
     corpus_bytes: int
+    # Text layer figures from the parsers that report them (PDF); zero and
+    # empty for the other types.
+    pages_sampled: int = 0
+    pages_garbled: int = 0
+    garbled_files: tuple[str, ...] = ()
+    soft_hyphens_removed: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         ok = self.parsed
@@ -76,6 +83,7 @@ class SampleTypeReport:
             "passages_per_file": _round(per_file_passages),
             "passages_per_mb": _round(per_mb_passages),
             "parse_chunk_seconds_per_file": _round(per_file_seconds, 4),
+            "text_quality": _text_quality([self]),
             "estimate": {
                 "note": "extrapolated from the sample; not a measurement",
                 "corpus_files": self.corpus_files,
@@ -83,6 +91,10 @@ class SampleTypeReport:
                 "by_file_count": {
                     "passages": scaled(per_file_passages, self.corpus_files),
                     "parse_chunk_seconds": scaled(per_file_seconds, self.corpus_files),
+                    "garbled_text_layer_files": scaled(
+                        len(self.garbled_files) / ok if ok else None,
+                        self.corpus_files,
+                    ),
                 },
                 "by_size": {
                     "passages": scaled(per_mb_passages, corpus_mb),
@@ -94,6 +106,25 @@ class SampleTypeReport:
 
 def _round(value: float | None, digits: int = 2) -> float | None:
     return None if value is None else round(value, digits)
+
+
+def _text_quality(reports: Sequence[SampleTypeReport]) -> dict[str, Any]:
+    """Measured text layer figures of sampled files; counts and paths only."""
+    parsed = sum(r.parsed for r in reports)
+    pages = sum(r.pages_sampled for r in reports)
+    garbled_pages = sum(r.pages_garbled for r in reports)
+    files = [path for r in reports for path in r.garbled_files]
+    hyphens = sum(r.soft_hyphens_removed for r in reports)
+    return {
+        "pages_sampled": pages,
+        "pages_garbled": garbled_pages,
+        "pages_garbled_fraction": round(garbled_pages / pages, 4) if pages else None,
+        "garbled_text_layer_files": files,
+        "garbled_text_layer_fraction": round(len(files) / parsed, 4)
+        if parsed
+        else None,
+        "soft_hyphens_removed_per_file": round(hyphens / parsed, 2) if parsed else None,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +229,7 @@ class DryRunReport:
                 "seed": self.sample_seed,
                 "note": "estimates are extrapolated from the sample",
                 "types": [entry.as_dict() for entry in self.sample],
+                "text_quality": _text_quality(self.sample),
             },
         }
         if with_files:
@@ -326,6 +358,8 @@ class DryRun:
     ) -> SampleTypeReport:
         parser = self.parsers[file_type]
         parsed = failed = ocr = passages = sampled_bytes = 0
+        pages = garbled_pages = hyphens = 0
+        garbled_files: list[str] = []
         seconds = 0.0
         for item in chosen:
             source = Source(item.path, item.path, file_type, size=item.size)
@@ -343,6 +377,13 @@ class DryRun:
             ocr += int(document.requires_ocr)
             passages += found
             sampled_bytes += item.size
+            quality = document.quality
+            if quality is not None:
+                pages += quality.pages_total
+                garbled_pages += quality.pages_garbled
+                hyphens += quality.soft_hyphens_removed
+                if quality.skip_reason == GARBLED_TEXT_LAYER:
+                    garbled_files.append(item.path)
         return SampleTypeReport(
             file_type=file_type.value,
             sampled=tuple(item.path for item in chosen),
@@ -354,6 +395,10 @@ class DryRun:
             seconds=seconds,
             corpus_files=len(pool),
             corpus_bytes=sum(item.size for item in pool),
+            pages_sampled=pages,
+            pages_garbled=garbled_pages,
+            garbled_files=tuple(garbled_files),
+            soft_hyphens_removed=hyphens,
         )
 
     def run(
