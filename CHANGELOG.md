@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.8.0 (2026-10-04)
+
+### Bug Fixes
+
+- **adapters**: Drop PDF pages only for broken characters
+  ([`106ea63`](https://github.com/metronforge/docgrep/commit/106ea639ca54267612a2f40ff03c8b6161d9b2d6))
+
+### Features
+
+- **cli**: Show which page rules fire in the dry-run sample
+  ([`c3ed844`](https://github.com/metronforge/docgrep/commit/c3ed8449c3da837189923f9b92cf483edef44dde))
+
+
 ## v1.7.0 (2026-10-04)
 
 ### Chores
