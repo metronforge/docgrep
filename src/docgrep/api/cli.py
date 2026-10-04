@@ -147,6 +147,9 @@ def _format_dry_run(report: dict[str, Any]) -> str:
                 f"parse+chunk {entry['parse_chunk_seconds_per_file']} s/file, "
                 f"requires OCR {'n/a' if ocr is None else f'{ocr:.1%}'}"
             )
+            quality = entry["text_quality"]
+            if quality["pages_sampled"]:
+                lines.append(_format_text_quality("    text layer", quality))
             est = entry["estimate"]
             lines.append(
                 f"    estimate for {est['corpus_files']} files: "
@@ -156,7 +159,29 @@ def _format_dry_run(report: dict[str, Any]) -> str:
                 f"count, "
                 f"{est['by_size']['parse_chunk_seconds']} s by size"
             )
+        total = sample["text_quality"]
+        if total["pages_sampled"]:
+            lines.append(_format_text_quality("  Text layer, all sampled", total))
     return "\n".join(lines) + "\n"
+
+
+def _fraction(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1%}"
+
+
+def _format_text_quality(label: str, quality: dict[str, Any]) -> str:
+    """Measured text layer figures: counts, fractions and file paths, no text."""
+    files = quality["garbled_text_layer_files"]
+    hyphens = quality["soft_hyphens_removed_per_file"]
+    line = (
+        f"{label}: {quality['pages_sampled']} pages sampled, "
+        f"{quality['pages_garbled']} garbled "
+        f"({_fraction(quality['pages_garbled_fraction'])}); "
+        f"{len(files)} files would be skipped as requires_ocr for a garbled "
+        f"text layer ({_fraction(quality['garbled_text_layer_fraction'])}); "
+        f"soft hyphens removed per file {'n/a' if hyphens is None else hyphens}"
+    )
+    return line + "".join(f"\n      garbled text layer: {path}" for path in files)
 
 
 def _format_cancel(result: CancelResult) -> tuple[str, int]:
@@ -280,6 +305,9 @@ def _format_plan(plan: UpdatePlan) -> str:
         f"Update plan: {plan.added} added, {plan.modified} modified, "
         f"{plan.removed} removed, {plan.retried} retried, "
         f"{plan.unchanged} unchanged.\n"
+        f"Modified by reason: {plan.newly_supported} newly supported, "
+        f"{plan.content_changed} content changed, "
+        f"{plan.parser_changed} parser changed, {plan.retried} retried.\n"
     )
 
 

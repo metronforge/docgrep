@@ -15,7 +15,7 @@ class FileIndexLock:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def _acquire(self) -> IO[bytes]:
+    def _acquire(self, operation: str) -> IO[bytes]:
         handle: IO[bytes] | None = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -25,7 +25,9 @@ class FileIndexLock:
             if handle is not None:
                 handle.close()
             raise IndexLockHeld(
-                "An index build is already running", details={"path": str(self.path)}
+                f"Another index operation is running, so the {operation} cannot "
+                "start; try again when it has finished",
+                details={"path": str(self.path)},
             ) from error
         except OSError as error:
             if handle is not None:
@@ -63,13 +65,13 @@ class FileIndexLock:
             handle.close()
 
     @contextmanager
-    def hold(self) -> Iterator[None]:
+    def hold(self, operation: str = "build") -> Iterator[None]:
         """Acquire the lock, run the managed block, then release the lock.
 
-        Only acquisition failures are translated; whatever the block raises
-        propagates unchanged.
+        Only acquisition failures are translated, naming ``operation`` as the
+        one that cannot start; whatever the block raises propagates unchanged.
         """
-        handle = self._acquire()
+        handle = self._acquire(operation)
         try:
             yield
         finally:

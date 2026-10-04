@@ -8,8 +8,12 @@ docgrep searches a local document corpus and returns ranked, verbatim passages w
 |---|---|---|---|---|
 | Plain text | `.txt` | none | none | UTF-8, else a confidently detected legacy encoding |
 | Markdown | `.md`, `.markdown` | heading path | `title`, `author`, `year` from YAML frontmatter | wikilinks are recorded |
-| PDF | `.pdf` | page number | title, author and creation year from the PDF metadata | pages without text are skipped; a PDF without any text is recorded as needing OCR |
+| PDF | `.pdf` | page number | title, author and creation year from the PDF metadata | pages without text and pages with a garbled text layer are skipped; a PDF without any text, or whose garbled pages are half or more of its pages with text, is recorded as needing OCR |
 | EPUB (2 and 3) | `.epub` | heading path (`h1` to `h6`, continued across chapters) | title, creators and year from the package metadata | text in spine (reading) order, navigation document and NCX skipped; DRM-encrypted books fail with `parse_error` (font obfuscation is accepted); a book without text is recorded as needing OCR |
+
+Passages are verbatim. The one exception is the PDF soft hyphen (U+00AD), which is removed from extracted PDF text; when it ends a line (optionally followed by spaces), the line break and those spaces are removed too, so the two halves of the word are joined. A visible hyphen `-` is never touched.
+
+A PDF page counts as garbled when it has at least 200 non-whitespace characters and any of these holds: replacement, private-use or control characters and `(cid:N)` placeholders make up more than 10% of them; tokens longer than 40 characters (other than URLs) make up more than 40%; or letters and digits of any script make up less than 40%. The rules are deliberately conservative, so prose, code, tables of numbers, lists of URLs and bibliographies are not flagged. Garbled pages never become passages; when they are half or more of the pages with text, the PDF is recorded as `skipped:requires_ocr` with the reason `garbled_text_layer`, otherwise a WARNING `pdf_pages_dropped` with `source_id`, `dropped` and `total` page counts is logged.
 
 DOCX and DjVu files are recognised but not parsed yet; they are recorded as skipped (unsupported), and `docgrep update` indexes them once a parser for their type is registered.
 
@@ -71,7 +75,16 @@ uv run docgrep update                     # apply added, modified and removed fi
 uv run docgrep update --no-retry-failed   # keep sources that failed instead of retrying them
 ```
 
-It compares the corpus with the committed sources. A file is added when it is not recorded, removed when it is recorded but gone (or now excluded by the patterns), and modified when its content hash changed (size and modification time are only a cheap first check), when the parser of its type now declares a different version, or when it was skipped as unsupported and a parser for its type now exists. A file whose size or time changed but whose content did not only gets its recorded size and time refreshed. Sources that failed before are tried again unless `--no-retry-failed` is given. It prints the plan (added, modified, removed, retried, unchanged), then a summary line with what was processed, how many sources were skipped or failed, and how many passages were written and removed, followed by the failed sources.
+It compares the corpus with the committed sources. A file is added when it is not recorded, removed when it is recorded but gone (or now excluded by the patterns), and modified when its content hash changed (size and modification time are only a cheap first check), when the parser of its type now declares a different version, or when it was skipped as unsupported and a parser for its type now exists. A file whose size or time changed but whose content did not only gets its recorded size and time refreshed. Sources that failed before are tried again unless `--no-retry-failed` is given. It prints the plan in two lines, then a summary line with what was processed, how many sources were skipped or failed, and how many passages were written and removed, followed by the failed sources:
+
+```text
+Update plan: 2 added, 4 modified, 2 removed, 0 retried, 5 unchanged.
+Modified by reason: 2 newly supported, 2 content changed, 0 parser changed, 0 retried.
+```
+
+`modified` is the sum of three reasons: `newly supported` (skipped as unsupported before, a parser exists now), `content changed` (the content hash differs) and `parser changed` (the parser of the type declares another version than the one recorded, or no parser is registered any more). `retried` repeats the count of failed sources tried again, which are not part of `modified`. Without any change only `No changes detected (N sources unchanged).` is printed. The `index_update_plan` log record carries the same counts as `added`, `modified`, `removed`, `unchanged`, `retried`, `refreshed`, `content_changed`, `parser_changed` and `newly_supported`.
+
+Every built-in parser declares a version (text, Markdown, PDF and EPUB all started at `1`), and builds and updates record it with each source. When a parser's version changes, `docgrep update` extracts the sources of that type again, insert-first like any other modified source. Sources recorded before versions existed have no recorded version; a missing or empty version counts as `1`, so they are not processed again merely because nothing was recorded.
 
 An update writes into the live index, one source at a time, so search keeps working throughout; a query may briefly see the old and the new version of a source. A changed source has its new passages written before its old ones are removed, and its record follows only after that, so a source that fails to update stays searchable with its old content and is picked up again by the next update. The run is recorded with kind `update`, logs `index_progress` like a build, and on completion records the time of the update in the index (`last_updated_at`); the settings of the index are never changed.
 
@@ -155,9 +168,9 @@ The report gives the total number of files, and for each file type the count and
 
 - `--path-prefix` restricts every figure to paths starting with the given relative prefix.
 - `--limit` (1 to 500, default 100) and `--offset` page the file list, which is part of the JSON output only.
-- `--sample N` (1 to 50, off by default) parses and chunks N randomly chosen files of the supported types, spread proportionally over the types, with the seed given by `--seed` (default 0), so the same seed picks the same files. Nothing is embedded or written. For each type it reports passages per file and per MB (1 MB is 1,000,000 bytes), parse plus chunk seconds per file and the fraction flagged as needing OCR, and then extrapolates the passage count and parse time of the whole corpus both by file count and by size. These are estimates from a sample, not measurements. Sampling reads whole files, which is why it is opt-in; with the real backend it loads the tokenizer files of the embedding model, never its weights.
+- `--sample N` (1 to 50, off by default) parses and chunks N randomly chosen files of the supported types, spread proportionally over the types, with the seed given by `--seed` (default 0), so the same seed picks the same files. Nothing is embedded or written. For each type it reports passages per file and per MB (1 MB is 1,000,000 bytes), parse plus chunk seconds per file and the fraction flagged as needing OCR, and then extrapolates the passage count and parse time of the whole corpus both by file count and by size. These are estimates from a sample, not measurements. For PDFs it also measures the text layer of the sampled files: pages sampled, pages classified as garbled (count and fraction), the files that a build would skip as `requires_ocr` because of a garbled text layer (count, fraction of the parsed sampled files and their paths) and the soft hyphens removed per file on average, per type and for all sampled files together; the corpus-wide number of such files is extrapolated as an estimate like the others. Sampling reads whole files, which is why it is opt-in; with the real backend it loads the tokenizer files of the embedding model, never its weights.
 
-The report never contains file content, only counts, sizes, timings, patterns and, in the JSON file list and sample, relative paths. Invalid values give a `validation_error` and exit status 1.
+The report never contains file content, only counts, sizes, timings, patterns and, in the JSON file list and sample, relative paths; the plain-text report lists no files except the sampled files that would be skipped for a garbled text layer. Invalid values give a `validation_error` and exit status 1.
 
 The JSON output has these keys (`schema_version` is 1):
 
@@ -167,7 +180,8 @@ The JSON output has these keys (`schema_version` is 1):
 - `would_be_indexed` (`files`, `size_bytes`) and `recognised_without_parser` (`files`, `size_bytes`, `types`).
 - `excluded`: `files`, `size_bytes` and `by_pattern`, a list of `pattern` and `files`.
 - `files`: `offset`, `limit`, `total` and `items`, a list of `path`, `size_bytes`, `extension`, `type` (null when unsupported), `status` (`indexed`, `recognised_without_parser`, `unsupported` or `excluded`) and `excluded_by`.
-- `sample`: null without `--sample`, otherwise `requested`, `seed`, `note` and `types`, a list of `type`, `sampled_files`, `parsed`, `failed`, `requires_ocr_fraction`, `passages_per_file`, `passages_per_mb`, `parse_chunk_seconds_per_file` and `estimate` (`note`, `corpus_files`, `corpus_size_bytes`, and `by_file_count` and `by_size`, each with `passages` and `parse_chunk_seconds`).
+- `sample`: null without `--sample`, otherwise `requested`, `seed`, `note` and `types`, a list of `type`, `sampled_files`, `parsed`, `failed`, `requires_ocr_fraction`, `passages_per_file`, `passages_per_mb`, `parse_chunk_seconds_per_file`, `text_quality` and `estimate` (`note`, `corpus_files`, `corpus_size_bytes`, and `by_file_count` and `by_size`, each with `passages` and `parse_chunk_seconds`; `by_file_count` also has `garbled_text_layer_files`, the estimated number of files in the corpus that would be skipped for a garbled text layer). `sample.text_quality` totals the same figures over all sampled types.
+- `text_quality` (measured on the sampled files, never text): `pages_sampled`, `pages_garbled`, `pages_garbled_fraction` (of the pages sampled), `garbled_text_layer_files` (paths of the sampled files that would be skipped as `requires_ocr` for a garbled text layer), `garbled_text_layer_fraction` (of the parsed sampled files) and `soft_hyphens_removed_per_file` (average over the parsed sampled files). Fractions are null when there is nothing to divide by; types other than PDF report zero pages.
 
 ## Search
 
@@ -231,4 +245,6 @@ uv run pytest -m gpu -q
 
 ## License
 
-License: Apache-2.0
+docgrep is licensed under AGPL-3.0-or-later (see [LICENSE](LICENSE)).
+
+Using docgrep locally for yourself or inside your organisation imposes no obligations beyond keeping the licence notices. If you distribute modified versions, or let other people use a modified version over a network, the AGPL requires offering them the corresponding source of that version. The PDF backend PyMuPDF is itself licensed under AGPL-3.0 (or a commercial licence).

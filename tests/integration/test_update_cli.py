@@ -106,11 +106,15 @@ def test_update_prints_the_plan_and_a_summary(built: Path) -> None:
     assert lines[0] == (
         "Update plan: 2 added, 2 modified, 2 removed, 0 retried, 7 unchanged."
     )
-    assert lines[1].startswith(
+    assert lines[1] == (
+        "Modified by reason: 0 newly supported, 2 content changed, "
+        "0 parser changed, 0 retried."
+    )
+    assert lines[2].startswith(
         "Update 2: 2 added, 2 modified, 2 removed, 0 retried, 7 unchanged, "
         "0 skipped, 0 failed; "
     )
-    assert "passages written" in lines[1] and len(lines) == 2
+    assert "passages written" in lines[2] and len(lines) == 3
 
 
 def test_a_second_update_reports_no_changes(built: Path) -> None:
@@ -128,6 +132,8 @@ class _FailsFor:
     def __init__(self, inner: Any, path: str) -> None:
         self.inner = inner
         self.path = path
+        # It stands in for the real parser, declared version included.
+        self.version = inner.version
 
     def parse(self, source: Source) -> ParsedDocument:
         if source.path == self.path:

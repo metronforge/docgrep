@@ -170,6 +170,26 @@ class ParsedSection:
     heading_path: tuple[str, ...] = ()
 
 
+# The skip reason of a document whose text layer is unusable as text.
+GARBLED_TEXT_LAYER = "garbled_text_layer"
+
+
+@dataclass(frozen=True, slots=True)
+class ParseQuality:
+    """What a parser noticed about a source's text layer; counts only, no text.
+
+    ``skip_reason`` names why a document that requires OCR does, when the
+    parser knows more than that it has no text (for example
+    ``garbled_text_layer``).
+    """
+
+    pages_total: int = 0
+    pages_with_text: int = 0
+    pages_garbled: int = 0
+    soft_hyphens_removed: int = 0
+    skip_reason: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedDocument:
     """Parser output before token-aware chunking."""
@@ -178,6 +198,7 @@ class ParsedDocument:
     sections: tuple[ParsedSection, ...]
     requires_ocr: bool = False
     metadata: tuple[tuple[str, str], ...] = ()
+    quality: ParseQuality | None = None
 
 
 @dataclass(frozen=True, slots=True)

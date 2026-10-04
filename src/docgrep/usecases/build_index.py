@@ -117,6 +117,8 @@ class Prepared:
     status: str
     items: tuple[PassageItem, ...] = ()
     error: Exception | None = None
+    # Why a source was skipped, when the parser said more than the status.
+    detail: str | None = None
 
 
 class Progress:
@@ -262,7 +264,8 @@ class SourceIndexing:
             if version is not None:
                 parsed = replace(parsed, parser_version=version)
             if document.requires_ocr:
-                return Prepared(parsed, "skipped:requires_ocr")
+                reason = document.quality.skip_reason if document.quality else None
+                return Prepared(parsed, "skipped:requires_ocr", detail=reason)
             passages = self.chunker.chunk(document)
         except Exception as error:
             return Prepared(source, "failed:parse_error", error=error)
@@ -402,7 +405,9 @@ class BuildIndex(SourceIndexing):
     ) -> tuple[str, BuildFailure | None, int]:
         prepared = self._prepare(source, run_id)
         if prepared.status.startswith("skipped:"):
-            self.manifest.record_source(prepared.source, prepared.status, run_id=run_id)
+            self.manifest.record_source(
+                prepared.source, prepared.status, prepared.detail, run_id=run_id
+            )
             return "skipped", None, 0
         if prepared.error is not None:
             reason = prepared.status.split(":", 1)[1]

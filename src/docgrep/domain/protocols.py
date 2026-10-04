@@ -37,6 +37,18 @@ def parser_version(parser: DocumentParser | None) -> str | None:
     return version if isinstance(version, str) else None
 
 
+# Sources indexed before parsers declared versions recorded none. They count
+# as version "1", the first declared version of every built-in parser, so an
+# update does not reprocess them merely because nothing was recorded.
+LEGACY_PARSER_VERSION = "1"
+
+
+def effective_parser_version(version: str | None) -> str:
+    """A recorded or declared parser version, with missing or empty read as
+    ``LEGACY_PARSER_VERSION``."""
+    return version or LEGACY_PARSER_VERSION
+
+
 class TokenSpanTokenizer(Protocol):
     """Return ordered character spans for countable tokens in exact input text."""
 
@@ -215,9 +227,11 @@ class IndexLock(Protocol):
     waiting. It raises ``IndexLockHeld`` when another operation owns the lock
     and ``StoreUnavailable`` when the lock cannot be accessed. Exceptions raised
     inside the managed block propagate unchanged, and the lock is released.
+    ``operation`` names what wants the lock (``build`` or ``update``) for the
+    refusal message.
     """
 
-    def hold(self) -> AbstractContextManager[None]: ...
+    def hold(self, operation: str = "build") -> AbstractContextManager[None]: ...
 
     def is_held(self) -> bool:
         """Whether the lock is owned right now, by anyone including this process.

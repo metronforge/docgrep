@@ -10,6 +10,10 @@ from docgrep.domain.models import FileType, ParsedDocument, ParsedSection, Sourc
 class TextParser:
     """Parse a TXT source as one verbatim section."""
 
+    # Recorded with every source it parses; a change makes `docgrep update`
+    # extract the sources of this type again.
+    version = "1"
+
     def __init__(self, corpus_root: Path) -> None:
         self.corpus_root = corpus_root
 

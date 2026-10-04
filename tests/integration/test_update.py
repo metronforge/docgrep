@@ -347,6 +347,8 @@ class _FailsFor:
     def __init__(self, inner: Any, path: str) -> None:
         self.inner = inner
         self.path = path
+        # It stands in for the real parser, declared version included.
+        self.version = inner.version
 
     def parse(self, source: Source) -> ParsedDocument:
         if source.path == self.path:

@@ -108,7 +108,13 @@ def test_the_json_report_has_the_documented_keys(setup: tuple[Path, Path]) -> No
         "status",
         "excluded_by",
     }
-    assert set(report["sample"]) == {"requested", "seed", "note", "types"}
+    assert set(report["sample"]) == {
+        "requested",
+        "seed",
+        "note",
+        "types",
+        "text_quality",
+    }
     entry = report["sample"]["types"][0]
     assert set(entry) == {
         "type",
@@ -119,8 +125,19 @@ def test_the_json_report_has_the_documented_keys(setup: tuple[Path, Path]) -> No
         "passages_per_file",
         "passages_per_mb",
         "parse_chunk_seconds_per_file",
+        "text_quality",
         "estimate",
     }
+    text_quality_keys = {
+        "pages_sampled",
+        "pages_garbled",
+        "pages_garbled_fraction",
+        "garbled_text_layer_files",
+        "garbled_text_layer_fraction",
+        "soft_hyphens_removed_per_file",
+    }
+    assert set(entry["text_quality"]) == text_quality_keys
+    assert set(report["sample"]["text_quality"]) == text_quality_keys
     assert set(entry["estimate"]) == {
         "note",
         "corpus_files",

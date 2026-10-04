@@ -89,6 +89,10 @@ def _sections(text: str) -> tuple[ParsedSection, ...]:
 class MarkdownParser:
     """Parse Markdown structure while retaining original body text."""
 
+    # Recorded with every source it parses; a change makes `docgrep update`
+    # extract the sources of this type again.
+    version = "1"
+
     def __init__(self, corpus_root: Path) -> None:
         self.corpus_root = corpus_root
 
