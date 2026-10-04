@@ -194,7 +194,7 @@ def test_entities_are_decoded(tmp_path: Path) -> None:
 
     document = parse(tmp_path, epub_bytes(chapters))
 
-    assert document.sections[0].text == "Fish & chips <tag> Ж Ж — a b"
+    assert document.sections[0].text == "Fish & chips <tag> Ж Ж — a\u00a0b"
 
 
 def test_blocks_whitespace_pre_tables_and_ignored_elements(tmp_path: Path) -> None:

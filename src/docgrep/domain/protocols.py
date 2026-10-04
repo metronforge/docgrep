@@ -49,6 +49,34 @@ def effective_parser_version(version: str | None) -> str:
     return version or LEGACY_PARSER_VERSION
 
 
+def parser_reprocess_reason(
+    status: str,
+    recorded_version: str | None,
+    *,
+    registered: bool,
+    declared_version: str | None,
+) -> Literal["newly_supported", "parser_changed"] | None:
+    """Why the registered parser would treat a recorded source differently.
+
+    A source skipped as unsupported is newly supported once a parser for its
+    type is registered; an indexed or OCR-pending source has a changed parser
+    when the declared version differs from the recorded one or no parser is
+    registered any more. A missing or empty version, recorded or declared,
+    counts as version "1" (``effective_parser_version``), so sources recorded
+    before versions existed are not reprocessed for that alone. Failed sources
+    are left to the retry rule.
+    """
+    if status == "skipped:unsupported":
+        return "newly_supported" if registered else None
+    if status.startswith("failed:"):
+        return None
+    if not registered:
+        return "parser_changed"
+    declared = effective_parser_version(declared_version)
+    recorded = effective_parser_version(recorded_version)
+    return None if declared == recorded else "parser_changed"
+
+
 class TokenSpanTokenizer(Protocol):
     """Return ordered character spans for countable tokens in exact input text."""
 

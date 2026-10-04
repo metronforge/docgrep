@@ -24,7 +24,7 @@ def test_term_frequencies_and_shared_query_indices() -> None:
 def test_unicode_normalization_and_token_boundaries() -> None:
     encoder = BM25SparseEncoder()
 
-    assert encoder.encode("Ｃａｆｅ́") == encoder.encode("café")
+    assert encoder.encode("\uff23\uff41\uff46\uff45\u0301") == encoder.encode("café")
     assert encoder.encode("Привет, мир!") == encoder.encode("привет МИР")
     assert encoder.encode("foo_bar") == encoder.encode("foo bar")
     assert encoder.encode("  !?") == {}

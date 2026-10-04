@@ -33,6 +33,7 @@ from docgrep.domain.protocols import (
     Reranker,
     StatusStore,
     TokenSpanTokenizer,
+    parser_version,
 )
 from docgrep.settings import Settings
 from docgrep.usecases.build_index import BuildIndex, BuildSummary
@@ -213,6 +214,11 @@ def create_status(settings: Settings) -> InspectStatus:
         open_store=open_store,
         store_mode="server" if settings.qdrant_url else "local",
         runtime_config=runtime,
+        # Constructing the parsers reads nothing; only their versions are used.
+        parser_versions={
+            file_type: parser_version(parser)
+            for file_type, parser in _parsers(settings).items()
+        },
     )
 
 

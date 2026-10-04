@@ -1,13 +1,20 @@
 """Report the state of the index and of long operations without changing anything."""
 
 import logging
+from collections import Counter
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 
 from docgrep.domain.errors import DocgrepError
-from docgrep.domain.models import ManifestRunRecord
+from docgrep.domain.models import GARBLED_TEXT_LAYER, FileType, ManifestRunRecord
 from docgrep.domain.progress import estimate_eta_seconds
-from docgrep.domain.protocols import IndexLock, ManifestReader, StatusStore
+from docgrep.domain.protocols import (
+    IndexLock,
+    ManifestReader,
+    StatusStore,
+    parser_reprocess_reason,
+)
 from docgrep.domain.run_state import (
     VECTOR_CONFIG_KEYS,
     latest_build_run,
@@ -15,10 +22,15 @@ from docgrep.domain.run_state import (
     swap_already_happened,
 )
 from docgrep.domain.status import (
+    FAILED_SOURCES_LIMIT,
+    SKIP_REASONS,
+    SKIPPED_EXTENSIONS_LIMIT,
     ActiveOperation,
     CollectionView,
     DriftView,
+    FailedSourceView,
     RunView,
+    SourcesView,
     StatusReport,
     StatusWarning,
     StoreView,
@@ -37,7 +49,11 @@ _PENDING = {
 
 def _short(error: Exception) -> str:
     reason = error.details.get("reason") if isinstance(error, DocgrepError) else None
-    text = " ".join(str(reason or error).split())
+    return _shorten(str(reason or error))
+
+
+def _shorten(value: str) -> str:
+    text = " ".join(value.split())
     return text if len(text) <= _REASON_LIMIT else text[: _REASON_LIMIT - 3] + "..."
 
 
@@ -67,13 +83,19 @@ class InspectStatus:
         store_mode: str,
         runtime_config: Mapping[str, str | int | float],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        parser_versions: Mapping[FileType, str | None] | None = None,
     ) -> None:
+        """``parser_versions`` maps each file type with a registered parser to
+        the version it declares; without it the parser-version count is None."""
         self.lock = lock
         self.open_manifest = open_manifest
         self.open_store = open_store
         self.store_mode = store_mode
         self.runtime_config = dict(runtime_config)
         self.now = now
+        self.parser_versions = (
+            None if parser_versions is None else dict(parser_versions)
+        )
 
     def run(self) -> StatusReport:
         warnings: list[StatusWarning] = []
@@ -214,6 +236,9 @@ class InspectStatus:
                 "index_incomplete",
                 "The latest run completed, but the store holds no completed index",
             )
+        sources = None
+        if manifest_ok and manifest is not None:
+            sources = self._sources(manifest)
         return StatusReport(
             index_state,
             run_view,
@@ -222,6 +247,59 @@ class InspectStatus:
             collection,
             drift,
             tuple(warnings),
+            sources,
+        )
+
+    def _sources(self, manifest: ManifestReader) -> SourcesView | None:
+        """Summarise the committed sources; None when they cannot be read."""
+        try:
+            records = manifest.committed_sources()
+        except Exception:
+            _LOG.debug("status_sources_unreadable", exc_info=True)
+            return None
+        states = {"indexed": 0, "skipped": 0, "failed": 0}
+        reasons = dict.fromkeys((*SKIP_REASONS, "other"), 0)
+        extensions: Counter[str] = Counter()
+        failed: list[FailedSourceView] = []
+        versions = self.parser_versions
+        changed = 0
+        for record in records:
+            state, _, detail = record.status.partition(":")
+            if state in states:
+                states[state] += 1
+            if state == "skipped":
+                # A garbled text layer is stored as requires_ocr with its
+                # reason code in the error column.
+                if detail == "requires_ocr" and record.error == GARBLED_TEXT_LAYER:
+                    detail = GARBLED_TEXT_LAYER
+                reasons[detail if detail in SKIP_REASONS else "other"] += 1
+                suffix = PurePosixPath(record.source.path).suffix.lower()
+                extensions[suffix or "(none)"] += 1
+            elif state == "failed" and len(failed) < FAILED_SOURCES_LIMIT:
+                failed.append(
+                    FailedSourceView(
+                        record.source.path,
+                        detail,
+                        None if record.error is None else _shorten(record.error),
+                    )
+                )
+            if versions is not None:
+                file_type = record.source.file_type
+                reason = parser_reprocess_reason(
+                    record.status,
+                    record.source.parser_version,
+                    registered=file_type in versions,
+                    declared_version=versions.get(file_type),
+                )
+                changed += reason == "parser_changed"
+        top = sorted(extensions.items(), key=lambda item: (-item[1], item[0]))
+        return SourcesView(
+            total=len(records),
+            by_state=tuple(states.items()),
+            skipped_by_reason=tuple(reasons.items()),
+            skipped_by_extension=tuple(top[:SKIPPED_EXTENSIONS_LIMIT]),
+            failed=tuple(failed),
+            parser_changed=None if versions is None else changed,
         )
 
     def _read_store(

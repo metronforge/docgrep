@@ -79,6 +79,37 @@ class StatusWarning:
     message: str
 
 
+# The skip reasons reported by name; any other reason counts as "other".
+SKIP_REASONS = ("requires_ocr", "garbled_text_layer", "unsupported")
+# At most this many extensions and failed sources are listed.
+SKIPPED_EXTENSIONS_LIMIT = 10
+FAILED_SOURCES_LIMIT = 20
+
+
+@dataclass(frozen=True, slots=True)
+class FailedSourceView:
+    path: str
+    category: str
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SourcesView:
+    """What the committed sources table says; counts, paths and reasons only.
+
+    ``parser_changed`` is the number of sources the next update would extract
+    again because their parser's version changed, or None when the registered
+    parsers are not known.
+    """
+
+    total: int
+    by_state: tuple[tuple[str, int], ...]
+    skipped_by_reason: tuple[tuple[str, int], ...]
+    skipped_by_extension: tuple[tuple[str, int], ...]
+    failed: tuple[FailedSourceView, ...]
+    parser_changed: int | None
+
+
 @dataclass(frozen=True, slots=True)
 class StatusReport:
     index_state: IndexState
@@ -88,6 +119,7 @@ class StatusReport:
     collection: CollectionView | None
     drift: tuple[DriftView, ...]
     warnings: tuple[StatusWarning, ...]
+    sources: SourcesView | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """The JSON form; its key names are stable and documented in the README."""
@@ -145,4 +177,22 @@ class StatusReport:
                 for d in self.drift
             ],
             "warnings": [{"code": w.code, "message": w.message} for w in self.warnings],
+            "sources": None if self.sources is None else _sources(self.sources),
         }
+
+
+def _sources(view: SourcesView) -> dict[str, Any]:
+    return {
+        "total": view.total,
+        "by_state": dict(view.by_state),
+        "skipped_by_reason": dict(view.skipped_by_reason),
+        "skipped_by_extension": [
+            {"extension": extension, "sources": count}
+            for extension, count in view.skipped_by_extension
+        ],
+        "failed": [
+            {"path": f.path, "category": f.category, "reason": f.reason}
+            for f in view.failed
+        ],
+        "parser_changed": view.parser_changed,
+    }

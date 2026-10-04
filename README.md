@@ -152,6 +152,7 @@ The JSON output has these keys (`schema_version` is 1; sections that do not appl
 - `vector_store`: `mode` (`local` or `server`), `status` (`reachable`, `unreachable`, `busy` or `absent` for a local store that does not exist yet) and `reason`, a short text for the degraded cases.
 - `collection`: when the index can be read. `passage_count`, `embedding_model`, `embedding_dimension`, `embedding_dtype`, `docgrep_version`, `completed_at` and `last_updated_at` (when the latest `docgrep update` completed, `null` before the first).
 - `drift`: a list of `field`, `indexed` and `runtime` for the settings that decide what vectors contain (see the resume rules above) and differ from the index. Only keys the index recorded and that are known without loading a model are compared.
+- `sources`: what the committed sources table says, or `null` when the manifest is missing or cannot be read. `total`; `by_state` with `indexed`, `skipped` and `failed`; `skipped_by_reason` with `requires_ocr` (no text layer), `garbled_text_layer` (a PDF whose text layer is garbled), `unsupported` (no parser for the type) and `other`; `skipped_by_extension`, the 10 most common extensions among the skipped sources, a list of `extension` (`(none)` without one) and `sources`; `failed`, the first 20 failed sources by path, each with `path`, `category` (for example `parse_error`, `embedding_error` or `store_error`) and `reason` (the stored error message, shortened to 200 characters); and `parser_changed`, the number of sources that the next `docgrep update` would extract again because their parser declares another version (the same rule as update, missing versions counting as `1`). The plain-text report shows a `Sources:` line, the skipped counts per reason and the failed sources with their paths.
 - `warnings`: a list of `code` and `message`, for example `store_unreachable`, `store_busy`, `manifest_unreadable`, `config_drift`, `resume_available`, `swap_pending_commit`, `update_unfinished` (the latest update was cancelled, aborted or interrupted; run `docgrep update` again), `index_incomplete`, `lock_held_without_run` and `lock_unreadable`.
 
 ## Dry run
@@ -242,6 +243,15 @@ This runs lint, formatting, strict type checking, and the CPU test suite, includ
 ```sh
 uv run pytest -m gpu -q
 ```
+
+After pulling a release into a working copy with an editable install, refresh the installed package metadata so that it matches the code version:
+
+```sh
+export UV_NO_SYNC=1
+uv pip install --no-deps -e .
+```
+
+Otherwise the package test that compares the installed version with the code version fails, although the code is fine. `--no-deps` leaves the installed dependencies, including the chosen torch build, untouched.
 
 ## License
 

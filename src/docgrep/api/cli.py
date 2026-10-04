@@ -295,6 +295,38 @@ def _format_status(report: dict[str, Any]) -> str:
                 else ""
             )
         )
+    sources = report.get("sources")
+    if sources is not None:
+        states = sources["by_state"]
+        changed = sources["parser_changed"]
+        lines.append(
+            f"Sources: {sources['total']} total, {states['indexed']} indexed, "
+            f"{states['skipped']} skipped, {states['failed']} failed"
+            + (
+                f"; {changed} to re-extract for a changed parser version"
+                if changed
+                else ""
+            )
+        )
+        lines.append(
+            "Skipped by reason: "
+            + ", ".join(
+                f"{reason} {count}"
+                for reason, count in sources["skipped_by_reason"].items()
+            )
+        )
+        if sources["failed"]:
+            listed = len(sources["failed"])
+            lines.append(
+                f"Failed sources ({listed} of {states['failed']} listed):"
+                if listed < states["failed"]
+                else "Failed sources:"
+            )
+            lines.extend(
+                f"  {entry['path']}: {entry['category']}"
+                + (f": {entry['reason']}" if entry["reason"] else "")
+                for entry in sources["failed"]
+            )
     for entry in report["drift"]:
         lines.append(
             f"Drift: {entry['field']} is {entry['indexed']} in the index and "
