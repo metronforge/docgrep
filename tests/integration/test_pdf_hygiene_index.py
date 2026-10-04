@@ -4,7 +4,7 @@ from pathlib import Path
 
 from docgrep.adapters.manifest import SQLiteManifest
 from docgrep.domain.models import FileType
-from pdf_support import garbled, pdf_bytes, prose, write_pdf
+from pdf_support import broken, garbled, pdf_bytes, prose, write_pdf
 from resume_support import close, dump_points, settings_for
 from update_support import sources_table, update_services, with_version
 
@@ -20,27 +20,33 @@ def _corpus(root: Path) -> None:
 
 def test_a_garbled_text_layer_is_recorded_as_requiring_ocr(tmp_path: Path) -> None:
     _corpus(tmp_path / "corpus")
+    # Weak signals alone (partly.pdf, and broken.pdf on two of three pages)
+    # drop nothing; a layer of broken characters is left to OCR.
+    layer = pdf_bytes([broken(10), broken(11), prose(12)])
+    write_pdf(tmp_path / "corpus" / "layer.pdf", layer)
     settings = settings_for(tmp_path / "corpus", tmp_path / "data")
     services = update_services(settings)
 
     summary = services.build.run()
     close(services)
 
-    assert (summary.indexed, summary.skipped, summary.failed) == (3, 1, 0)
+    assert (summary.indexed, summary.skipped, summary.failed) == (4, 1, 0)
     manifest = SQLiteManifest(settings.data_dir)
-    broken = manifest.get_source("broken.pdf")
-    assert broken is not None
-    assert (broken.status, broken.error) == (
+    skipped = manifest.get_source("layer.pdf")
+    assert skipped is not None
+    assert (skipped.status, skipped.error) == (
         "skipped:requires_ocr",
         "garbled_text_layer",
     )
-    assert broken.source.parser_version == "2"
+    assert skipped.source.parser_version == "3"
+    weak = manifest.get_source("broken.pdf")
+    assert weak is not None and weak.status == "indexed"
     pages = {
         p[1]["page_number"]
         for p in dump_points(settings)
         if p[1]["path"] == "partly.pdf"
     }
-    assert pages == {1, 3}
+    assert pages == {1, 2, 3}
     texts = " ".join(p[1]["text"] for p in dump_points(settings))
     assert "hyphenation" in texts and SHY not in texts
 

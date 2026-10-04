@@ -11,17 +11,17 @@ import pytest
 from docgrep.api.cli import main
 from docgrep.api.container import create_dry_run
 from docgrep.settings import Settings
-from pdf_support import garbled, pdf_bytes, prose, write_pdf
+from pdf_support import broken, pdf_bytes, prose, write_pdf
 
-SHY = "­"
+SHY = "\u00ad"
 
 
 def _corpus(root: Path) -> None:
     hyphenated = [f"hyphen{SHY}", "ation", f"mid{SHY}word and {SHY}more"]
     write_pdf(root / "a-clean.pdf", pdf_bytes([prose(1), hyphenated]))
-    write_pdf(root / "b-partly.pdf", pdf_bytes([prose(2), garbled(3), prose(4)]))
-    write_pdf(root / "c-broken.pdf", pdf_bytes([garbled(5), garbled(6), prose(7)]))
-    write_pdf(root / "d-half.pdf", pdf_bytes([garbled(8), prose(9)]))
+    write_pdf(root / "b-partly.pdf", pdf_bytes([prose(2), broken(3), prose(4)]))
+    write_pdf(root / "c-broken.pdf", pdf_bytes([broken(5), broken(6), prose(7)]))
+    write_pdf(root / "d-half.pdf", pdf_bytes([broken(8), prose(9)]))
     (root / "notes.txt").write_text("marker10 plain words", encoding="utf-8")
 
 
