@@ -17,6 +17,8 @@ class CancelResult:
     outcome: CancelOutcome
     run_id: str | None = None
     requested_at: str | None = None
+    # The kind of the run concerned: build or update.
+    kind: str = "build"
 
 
 class CancelIndex:
@@ -37,13 +39,16 @@ class CancelIndex:
         held = self.lock.is_held()
         if not held:
             if latest.status == "running":
-                return CancelResult("interrupted", latest.run_id)
-            return CancelResult("nothing_running", latest.run_id)
+                return CancelResult("interrupted", latest.run_id, kind=latest.kind)
+            return CancelResult("nothing_running", latest.run_id, kind=latest.kind)
         if latest.status not in ("running", "swapped"):
-            return CancelResult("nothing_running", latest.run_id)
+            return CancelResult("nothing_running", latest.run_id, kind=latest.kind)
         if latest.cancel_requested_at is not None:
             return CancelResult(
-                "already_requested", latest.run_id, latest.cancel_requested_at
+                "already_requested",
+                latest.run_id,
+                latest.cancel_requested_at,
+                kind=latest.kind,
             )
         requested_at = self.manifest.request_cancel(latest.run_id)
-        return CancelResult("requested", latest.run_id, requested_at)
+        return CancelResult("requested", latest.run_id, requested_at, kind=latest.kind)

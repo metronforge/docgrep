@@ -175,8 +175,15 @@ class UpdateIndex(SourceIndexing):
             "embedding_dimension": self.embedder.dimension,
         }
 
-    def run(self, *, retry_failed: bool = True) -> UpdateSummary:
+    def run(
+        self,
+        *,
+        retry_failed: bool = True,
+        on_plan: Callable[[UpdatePlan], None] | None = None,
+    ) -> UpdateSummary:
         """Update the index; raises before writing anything when it is refused.
+
+        ``on_plan`` is called with the work plan before any change is applied.
 
         Refusals: ``IndexLockHeld``, ``ResumeAvailable`` when the latest build
         is unfinished, ``IndexIncomplete`` without a completed index and
@@ -191,7 +198,7 @@ class UpdateIndex(SourceIndexing):
             _LOG.info(
                 "index_update_started", extra={"run_id": run_id, **self.log_context}
             )
-            return self._execute(run_id, started, retry_failed)
+            return self._execute(run_id, started, retry_failed, on_plan)
 
     def _check_preconditions(self) -> None:
         build = latest_build_run(self.manifest)
@@ -309,7 +316,11 @@ class UpdateIndex(SourceIndexing):
         return parser_version(parser) != record.source.parser_version
 
     def _execute(
-        self, run_id: str, started: float, retry_failed: bool
+        self,
+        run_id: str,
+        started: float,
+        retry_failed: bool,
+        on_plan: Callable[[UpdatePlan], None] | None,
     ) -> UpdateSummary:
         counts: dict[str, int] = dict.fromkeys(_ORDER, 0)
         totals = {"indexed": 0, "skipped": 0, "failed": 0}
@@ -333,6 +344,8 @@ class UpdateIndex(SourceIndexing):
                     "refreshed": plan.refreshed,
                 },
             )
+            if on_plan is not None:
+                on_plan(plan)
             progress = Progress(
                 run_id=run_id,
                 total=len(changes),

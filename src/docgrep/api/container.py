@@ -1,6 +1,6 @@
 """Composition root for local indexing and retrieval."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -40,7 +40,7 @@ from docgrep.usecases.cancel_index import CancelIndex
 from docgrep.usecases.dry_run import DryRun
 from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
-from docgrep.usecases.update_index import UpdateIndex, UpdateSummary
+from docgrep.usecases.update_index import UpdateIndex, UpdatePlan, UpdateSummary
 
 
 class SearchOperation(Protocol):
@@ -62,7 +62,12 @@ class BuildOperation(Protocol):
 class UpdateOperation(Protocol):
     """Run one incremental update of the published index."""
 
-    def run(self, *, retry_failed: bool = True) -> UpdateSummary: ...
+    def run(
+        self,
+        *,
+        retry_failed: bool = True,
+        on_plan: Callable[[UpdatePlan], None] | None = None,
+    ) -> UpdateSummary: ...
 
     def request_cancel(self) -> None: ...
 

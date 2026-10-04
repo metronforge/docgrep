@@ -11,7 +11,7 @@ docgrep searches a local document corpus and returns ranked, verbatim passages w
 | PDF | `.pdf` | page number | title, author and creation year from the PDF metadata | pages without text are skipped; a PDF without any text is recorded as needing OCR |
 | EPUB (2 and 3) | `.epub` | heading path (`h1` to `h6`, continued across chapters) | title, creators and year from the package metadata | text in spine (reading) order, navigation document and NCX skipped; DRM-encrypted books fail with `parse_error` (font obfuscation is accepted); a book without text is recorded as needing OCR |
 
-DOCX and DjVu files are recognised but not parsed yet; they are recorded as skipped (unsupported).
+DOCX and DjVu files are recognised but not parsed yet; they are recorded as skipped (unsupported), and `docgrep update` indexes them once a parser for their type is registered.
 
 ## Install
 
@@ -52,7 +52,7 @@ Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOC
 
 ## Exit codes
 
-`docgrep` exits with 0 on success and 1 on failure. `docgrep index` also exits with 1 when the build completed but one or more sources failed; the summary and the failed sources are still printed on standard output. It exits with 2 when the build was cancelled (see [Long builds](#long-builds)). Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
+`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
 
 ## Logging
 
@@ -62,11 +62,37 @@ Diagnostics go to standard error as one line per record: a UTC timestamp, the le
 
 While `docgrep index` runs it logs an `index_progress` record at INFO level every 25 sources or every 60 seconds, whichever comes first, and once more when the loop over the sources ends. The fields are `run_id`, `sources_done`, `sources_total`, `passages_written`, `elapsed_seconds`, `passages_per_second`, `eta_seconds` and `failed`. `eta_seconds` is `null` until at least one source is done; afterwards it extrapolates the pace so far over the remaining sources. The records carry counters and timings only, never paths, titles or text.
 
+### Updating the index
+
+After the first full build, `docgrep update` brings the index up to date with the corpus without rebuilding it:
+
+```sh
+uv run docgrep update                     # apply added, modified and removed files
+uv run docgrep update --no-retry-failed   # keep sources that failed instead of retrying them
+```
+
+It compares the corpus with the committed sources. A file is added when it is not recorded, removed when it is recorded but gone (or now excluded by the patterns), and modified when its content hash changed (size and modification time are only a cheap first check), when the parser of its type now declares a different version, or when it was skipped as unsupported and a parser for its type now exists. A file whose size or time changed but whose content did not only gets its recorded size and time refreshed. Sources that failed before are tried again unless `--no-retry-failed` is given. It prints the plan (added, modified, removed, retried, unchanged), then a summary line with what was processed, how many sources were skipped or failed, and how many passages were written and removed, followed by the failed sources.
+
+An update writes into the live index, one source at a time, so search keeps working throughout; a query may briefly see the old and the new version of a source. A changed source has its new passages written before its old ones are removed, and its record follows only after that, so a source that fails to update stays searchable with its old content and is picked up again by the next update. The run is recorded with kind `update`, logs `index_progress` like a build, and on completion records the time of the update in the index (`last_updated_at`); the settings of the index are never changed.
+
+Updates are idempotent: a second `docgrep update` without corpus changes reports `No changes detected` and only records the check. An update is not resumable; one that was cancelled, aborted or killed keeps everything it applied, and running `docgrep update` again continues the work. Such an update never blocks `docgrep index`, `docgrep update` or `docgrep status`.
+
+An update is refused (exit status 1) before anything is written:
+
+- `resume_available`: the latest full build is unfinished. Continue it with `docgrep index --resume` or discard it with `docgrep index --restart`.
+- `config_drift`: a key that decides vectors or chunking (the same keys as for resume, see below) differs from the index. An update cannot change them; run a full rebuild with `docgrep index`, or restore the settings.
+- `index_incomplete`: no completed index exists yet; build one with `docgrep index`.
+- `index_lock_held`: another build or update is running.
+
+The HTTP API has no update endpoint yet.
+
 ### Cancelling a build
 
 Cancelling is cooperative. The first Ctrl-C (or SIGTERM) during `docgrep index` asks the build to stop: it finishes the batch it is embedding, does not record the source it stopped in the middle of, marks the run `cancelled`, keeps the unpublished staging collection and the per-source journal, releases the index lock and exits with status 2. The live index and the committed sources are not touched, so search keeps working throughout. A second Ctrl-C stops the process immediately; the run then stays `running` and, because nothing holds the lock any more, is reported as interrupted.
 
-`docgrep cancel` does the same from another shell or for a build started elsewhere, such as through `docgrep serve`. It takes no lock and writes only the cancel request on the latest run, so it also works while another process owns the local Qdrant store. It says that the operation is stopping and exits with 0; a second call reports the time of the first request. If the latest run is `running` but nothing holds the lock, it reports the run as interrupted (exit 0) and changes nothing. With nothing running it says so and exits with 1. There is no force option.
+`docgrep update` is cancelled the same way: it stops after the current batch, keeps the changes applied so far, marks the run `cancelled` and exits with 2; run it again to continue.
+
+`docgrep cancel` does the same from another shell or for a build or update started elsewhere, such as through `docgrep serve`. It takes no lock and writes only the cancel request on the latest run, so it also works while another process owns the local Qdrant store. It says that the operation is stopping and exits with 0; a second call reports the time of the first request. If the latest run is `running` but nothing holds the lock, it reports the run as interrupted (exit 0) and changes nothing. With nothing running it says so and exits with 1. There is no force option.
 
 ### Resuming a build
 
@@ -100,7 +126,7 @@ uv run docgrep status --json   # the same report with stable key names
 The `index_state` is one of:
 
 - `not_built`: no completed index exists.
-- `ready`: a completed index exists and the latest run is not waiting for anything (a build running right now does not change this).
+- `ready`: a completed index exists and the latest run is not waiting for anything (a build running right now does not change this). Updates never change the index state: only full builds can be resumed, so these states consider the latest build.
 - `aborted_pending_resume`, `cancelled_pending_resume`, `interrupted_pending_resume`: the latest run is unfinished and can be resumed. An interrupted run is one that is recorded as `running` while nothing holds the index lock; the state is derived on every read and never stored.
 - `swap_pending_commit`: a run published its index but died before committing its sources; the next build or `docgrep index --resume` finishes it. This includes a run that died right between the alias swap and the write of its `swapped` status: it is still recorded as `running` (or `aborted`), but its staging collection is already the published index and its journal covers the planned sources. `latest_run.state` shows `swapped` for it, and `status` only reports it.
 - `manifest_unreadable`: the manifest cannot be read.
@@ -108,12 +134,12 @@ The `index_state` is one of:
 The JSON output has these keys (`schema_version` is 1; sections that do not apply are `null`):
 
 - `schema_version`, `index_state`.
-- `latest_run`: `run_id`, `status` (stored: `running`, `swapped`, `completed`, `aborted` or `cancelled`), `state` (the status, or `interrupted` for a `running` run without a lock holder), `started_at`, `finished_at`, `totals` (`indexed`, `skipped`, `failed`), `total_sources`, `resumed_from` and `carried_sources` (sources taken over from the resumed run).
-- `active_operation`: present while the index lock is held. `kind` (`build` or `resume`), `run_id`, `started_at`, `sources_done` and `passages_written` (from the run's journal, so they include carried-over sources), `sources_total`, `elapsed_seconds`, `eta_seconds` (`null` until computable; the pace of this process, ignoring carried-over sources) and `cancel_requested_at`.
+- `latest_run`: the latest run of either kind. `run_id`, `kind` (`build`, including a resumed build, or `update`), `status` (stored: `running`, `swapped`, `completed`, `aborted` or `cancelled`), `state` (the status, or `interrupted` for a `running` run without a lock holder), `started_at`, `finished_at`, `totals` (`indexed`, `skipped`, `failed`; an update adds `added`, `modified`, `removed`, `retried` and `unchanged` source counts and `passages_written` and `passages_removed`), `total_sources`, `resumed_from` and `carried_sources` (sources taken over from the resumed run).
+- `active_operation`: present while the index lock is held. `kind` (`build`, `resume` or `update`), `run_id`, `started_at`, `sources_done` and `passages_written` (from the run's journal, so they include carried-over sources), `sources_total`, `elapsed_seconds`, `eta_seconds` (`null` until computable; the pace of this process, ignoring carried-over sources) and `cancel_requested_at`.
 - `vector_store`: `mode` (`local` or `server`), `status` (`reachable`, `unreachable`, `busy` or `absent` for a local store that does not exist yet) and `reason`, a short text for the degraded cases.
-- `collection`: when the index can be read. `passage_count`, `embedding_model`, `embedding_dimension`, `embedding_dtype`, `docgrep_version` and `completed_at`.
+- `collection`: when the index can be read. `passage_count`, `embedding_model`, `embedding_dimension`, `embedding_dtype`, `docgrep_version`, `completed_at` and `last_updated_at` (when the latest `docgrep update` completed, `null` before the first).
 - `drift`: a list of `field`, `indexed` and `runtime` for the settings that decide what vectors contain (see the resume rules above) and differ from the index. Only keys the index recorded and that are known without loading a model are compared.
-- `warnings`: a list of `code` and `message`, for example `store_unreachable`, `store_busy`, `manifest_unreadable`, `config_drift`, `resume_available`, `swap_pending_commit`, `index_incomplete`, `lock_held_without_run` and `lock_unreadable`.
+- `warnings`: a list of `code` and `message`, for example `store_unreachable`, `store_busy`, `manifest_unreadable`, `config_drift`, `resume_available`, `swap_pending_commit`, `update_unfinished` (the latest update was cancelled, aborted or interrupted; run `docgrep update` again), `index_incomplete`, `lock_held_without_run` and `lock_unreadable`.
 
 ## Dry run
 

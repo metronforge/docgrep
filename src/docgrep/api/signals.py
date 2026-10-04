@@ -19,6 +19,7 @@ def graceful_cancel(
     *,
     register: Register = signal.signal,
     raise_signal: Callable[[int], None] = signal.raise_signal,
+    operation: str = "build",
 ) -> Iterator[None]:
     """Route SIGINT and SIGTERM to ``request_cancel`` for the managed block.
 
@@ -38,7 +39,7 @@ def graceful_cancel(
         state["signals"] += 1
         if state["signals"] == 1:
             notify(
-                "Cancel requested: the build stops after the current batch. "
+                f"Cancel requested: the {operation} stops after the current batch. "
                 "Press Ctrl-C again to stop immediately."
             )
             request_cancel()

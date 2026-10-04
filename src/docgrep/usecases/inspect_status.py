@@ -128,6 +128,7 @@ class InspectStatus:
                 embedding_dtype=_text(metadata, "embedding_dtype"),
                 docgrep_version=_text(metadata, "docgrep_version"),
                 completed_at=_text(metadata, "completed_at"),
+                last_updated_at=_text(metadata, "last_updated_at"),
             )
         drift = self._drift(metadata)
         if drift:
@@ -167,7 +168,18 @@ class InspectStatus:
                 latest.total_sources,
                 latest.resumed_from,
                 latest.carried_sources,
+                latest.kind,
             )
+            if latest.kind == "update" and run_view.state in (
+                "aborted",
+                "cancelled",
+                "interrupted",
+            ):
+                warn(
+                    "update_unfinished",
+                    "The latest update did not finish; what it applied stays "
+                    "live, and `docgrep update` continues the work",
+                )
 
         active = None
         if lock_held:

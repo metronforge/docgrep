@@ -30,6 +30,7 @@ class RunView:
     total_sources: int | None
     resumed_from: str | None
     carried_sources: int
+    kind: str = "build"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,7 @@ class CollectionView:
     embedding_dtype: str | None
     docgrep_version: str | None
     completed_at: str | None
+    last_updated_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +101,7 @@ class StatusReport:
             if run is None
             else {
                 "run_id": run.run_id,
+                "kind": run.kind,
                 "status": run.status,
                 "state": run.state,
                 "started_at": run.started_at,
@@ -135,6 +138,7 @@ class StatusReport:
                 "embedding_dtype": collection.embedding_dtype,
                 "docgrep_version": collection.docgrep_version,
                 "completed_at": collection.completed_at,
+                "last_updated_at": collection.last_updated_at,
             },
             "drift": [
                 {"field": d.field, "indexed": d.indexed, "runtime": d.runtime}

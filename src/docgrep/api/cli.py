@@ -24,6 +24,7 @@ from docgrep.settings import Settings
 from docgrep.usecases.cancel_index import CancelIndex, CancelResult
 from docgrep.usecases.dry_run import DEFAULT_LIMIT, DryRun
 from docgrep.usecases.inspect_status import InspectStatus
+from docgrep.usecases.update_index import UpdatePlan, UpdateSummary
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -47,6 +48,15 @@ def _parser() -> argparse.ArgumentParser:
         "--no-retry-failed",
         action="store_true",
         help="With --resume: keep sources that failed instead of trying them again",
+    )
+    update = commands.add_parser(
+        "update",
+        help="Apply the corpus changes since the last run to the index, in place",
+    )
+    update.add_argument(
+        "--no-retry-failed",
+        action="store_true",
+        help="Keep sources that failed before instead of trying them again",
     )
     search = commands.add_parser("search", help="Find verbatim passages")
     search.add_argument("query")
@@ -163,6 +173,13 @@ def _format_cancel(result: CancelResult) -> tuple[str, int]:
             f"{result.requested_at}: the operation is stopping.\n",
             0,
         )
+    if result.outcome == "interrupted" and result.kind == "update":
+        return (
+            f"Update run {result.run_id} was interrupted: its process is gone and "
+            "nothing holds the index lock. What it applied stays live; run "
+            "`docgrep update` again to continue.\n",
+            0,
+        )
     if result.outcome == "interrupted":
         return (
             f"Run {result.run_id} was interrupted: its process is gone and "
@@ -199,14 +216,30 @@ def _format_status(report: dict[str, Any]) -> str:
             f"(dimension {collection['embedding_dimension']}, "
             f"{collection['embedding_dtype']}), docgrep "
             f"{collection['docgrep_version']}, completed {collection['completed_at']}"
+            + (
+                f", last update {collection['last_updated_at']}"
+                if collection["last_updated_at"]
+                else ""
+            )
         )
     run = report["latest_run"]
     if run is None:
         lines.append("Latest run: none")
+    elif run["kind"] == "update":
+        totals = run["totals"]
+        lines.append(
+            f"Latest run: {run['run_id']} (update) {run['state']}, started "
+            f"{run['started_at']}, finished {run['finished_at'] or '-'}, "
+            + ", ".join(
+                f"{totals.get(key, 0)} {key}"
+                for key in ("added", "modified", "removed", "retried", "failed")
+            )
+            + f", {totals.get('unchanged', 0)} unchanged"
+        )
     else:
         totals = run["totals"]
         lines.append(
-            f"Latest run: {run['run_id']} {run['state']}, started "
+            f"Latest run: {run['run_id']} ({run['kind']}) {run['state']}, started "
             f"{run['started_at']}, finished {run['finished_at'] or '-'}, "
             f"{totals.get('indexed', 0)} indexed, {totals.get('skipped', 0)} "
             f"skipped, {totals.get('failed', 0)} failed of "
@@ -240,6 +273,42 @@ def _format_status(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _format_plan(plan: UpdatePlan) -> str:
+    if plan.changes == 0:
+        return f"No changes detected ({plan.unchanged} sources unchanged).\n"
+    return (
+        f"Update plan: {plan.added} added, {plan.modified} modified, "
+        f"{plan.removed} removed, {plan.retried} retried, "
+        f"{plan.unchanged} unchanged.\n"
+    )
+
+
+def _format_update(summary: UpdateSummary) -> str:
+    counts = (
+        f"{summary.added} added, {summary.modified} modified, "
+        f"{summary.removed} removed, {summary.retried} retried, "
+        f"{summary.unchanged} unchanged, {summary.skipped} skipped, "
+        f"{summary.failed} failed; {summary.passages_written} passages written, "
+        f"{summary.passages_removed} removed in {summary.elapsed_seconds:.2f}s"
+    )
+    if summary.cancelled:
+        return (
+            f"Update {summary.run_id} cancelled: {counts}. The changes applied "
+            "so far stay live; run `docgrep update` again to continue.\n"
+        )
+    lines = [f"Update {summary.run_id}: {counts}\n"]
+    lines.extend(
+        f"  {failure.path}: {failure.reason}: {failure.message}\n"
+        for failure in summary.failures
+    )
+    return "".join(lines)
+
+
+def _plan_printer(plan: UpdatePlan) -> None:
+    sys.stdout.write(_format_plan(plan))
+    sys.stdout.flush()
+
+
 def _warn_user(message: str) -> None:
     sys.stderr.write(message + "\n")
 
@@ -262,8 +331,8 @@ def main(
     """Run one CLI command and return a process exit status.
 
     The status is 0 on success and 1 when the command fails, including an index
-    build that finished with failed sources. A build stopped by a cancel request
-    exits with 2.
+    build or update that finished with failed sources or was refused. A build or
+    update stopped by a cancel request exits with 2.
     """
     args = _parser().parse_args(argv)
     try:
@@ -307,6 +376,25 @@ def main(
             return status
 
         services = container_factory(settings)
+        if args.command == "update":
+            update = services.update
+            if update is None:
+                sys.stderr.write("update is not available in this configuration\n")
+                return 1
+            with graceful_cancel(
+                lambda: update.request_cancel(),
+                _warn_user,
+                register=register_signal,
+                operation="update",
+            ):
+                outcome = update.run(
+                    retry_failed=not args.no_retry_failed, on_plan=_plan_printer
+                )
+            sys.stdout.write(_format_update(outcome))
+            if outcome.cancelled:
+                return 2
+            return 1 if outcome.failed else 0
+
         if args.command == "index":
             with graceful_cancel(
                 lambda: services.build.request_cancel(),
