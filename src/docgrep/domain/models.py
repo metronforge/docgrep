@@ -107,13 +107,18 @@ class Passage:
 
 @dataclass(frozen=True, slots=True)
 class RankedPassage:
-    """A passage with source metadata and retrieval scores."""
+    """A passage with source metadata and retrieval scores.
+
+    ``duplicates`` holds the passages with the same normalized text that were
+    collapsed into this one, in ranking order; empty when nothing was collapsed.
+    """
 
     passage: Passage
     source: Source
     score: float
     dense_score: float
     reranker_score: float | None = None
+    duplicates: tuple["RankedPassage", ...] = ()
 
     def __post_init__(self) -> None:
         if self.passage.source_id != self.source.source_id:
@@ -142,7 +147,11 @@ class Query:
 
 @dataclass(frozen=True, slots=True)
 class SearchResult:
-    """Ranked findings and metadata describing the retrieval."""
+    """Ranked findings and metadata describing the retrieval.
+
+    ``collapsed_duplicates`` counts the candidates removed from the ranking as
+    duplicates of another one; None when duplicates were not collapsed.
+    """
 
     results: tuple[RankedPassage, ...]
     total_hits: int
@@ -151,10 +160,15 @@ class SearchResult:
     rerank_skipped: bool = False
     rerank_skip_reason: str | None = None
     hint: str | None = None
+    collapsed_duplicates: int | None = None
 
     def __post_init__(self) -> None:
         if self.total_hits < len(self.results):
             raise ValueError("total_hits must include all returned results")
+        if self.collapsed_duplicates is not None and not (
+            0 <= self.collapsed_duplicates <= self.total_hits
+        ):
+            raise ValueError("collapsed_duplicates must be within total_hits")
         if not isfinite(self.took_ms) or self.took_ms < 0:
             raise ValueError("took_ms must be finite and non-negative")
         if self.rerank_skip_reason is not None and not self.rerank_skipped:

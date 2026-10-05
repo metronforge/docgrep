@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     top_n: int = Field(default=10, gt=0)
     top_n_max: int = Field(default=50, gt=0)
     max_query_len: int = Field(default=1000, gt=0)
+    # Collapse results whose text is identical after whitespace normalization
+    # into one result that lists the other locations; a request may override it.
+    collapse_duplicates: bool = True
 
     embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"

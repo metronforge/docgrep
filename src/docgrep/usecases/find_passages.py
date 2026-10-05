@@ -4,6 +4,7 @@ import logging
 import math
 import time
 
+from docgrep.domain.duplicates import collapse_duplicates as collapse
 from docgrep.domain.errors import (
     ConfigDrift,
     IndexIncomplete,
@@ -58,6 +59,7 @@ class FindPassages:
         default_top_n: int,
         top_n_max: int,
         max_query_len: int,
+        collapse_duplicates: bool = True,
     ) -> None:
         if top_k <= 0 or not 0 < default_top_n <= top_n_max:
             raise ValueError("result limits must be positive")
@@ -71,10 +73,25 @@ class FindPassages:
         self.default_top_n = default_top_n
         self.top_n_max = top_n_max
         self.max_query_len = max_query_len
+        self.collapse_duplicates = collapse_duplicates
 
-    def run(self, query: str, *, top_n: int | None = None) -> SearchResult:
-        """Find passages, keeping the indexed text unchanged in every result."""
+    def run(
+        self,
+        query: str,
+        *,
+        top_n: int | None = None,
+        collapse_duplicates: bool | None = None,
+    ) -> SearchResult:
+        """Find passages, keeping the indexed text unchanged in every result.
+
+        ``collapse_duplicates`` overrides the configured default when given.
+        """
         started = time.monotonic()
+        collapsing = (
+            self.collapse_duplicates
+            if collapse_duplicates is None
+            else collapse_duplicates
+        )
         if not query.strip():
             raise ValidationError("query is required")
         if len(query) > self.max_query_len:
@@ -128,6 +145,7 @@ class FindPassages:
             rerank_skipped: bool = False,
             rerank_skip_reason: str | None = None,
             hint: str | None = None,
+            collapsed_duplicates: int = 0,
         ) -> SearchResult:
             outcome = SearchResult(
                 passages,
@@ -137,6 +155,7 @@ class FindPassages:
                 rerank_skipped,
                 rerank_skip_reason,
                 hint,
+                collapsed_duplicates if collapsing else None,
             )
             # Counts and timings only: neither the query nor passage text is logged.
             _LOG.info(
@@ -230,9 +249,15 @@ class FindPassages:
             )
         else:
             ordered = tuple(sorted(ranked, key=ranked_passage_key))
+        removed = 0
+        if collapsing:
+            # Grouping follows the final order, so the cut below keeps the
+            # best member of each group and refills the slots of the others.
+            ordered, removed = collapse(ordered)
         return result(
             ordered[:limit],
             len(valid),
             rerank_skipped=rerank_skipped,
             rerank_skip_reason=rerank_skip_reason,
+            collapsed_duplicates=removed,
         )

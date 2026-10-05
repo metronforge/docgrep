@@ -223,6 +223,25 @@ uv run docgrep search "phrase to find" --json
 
 Results include the exact stored passage text, source path, and a page number or Markdown heading path when available. The JSON form includes scores and query metadata.
 
+### Duplicate passages
+
+The same book often exists as several files with different bytes, for example two downloads of the same PDF. Their passages have different ids, but the same text would take several result slots. By default docgrep therefore collapses passages whose text is identical into one result:
+
+- The grouping key is the passage text after Unicode NFC normalization, with every run of whitespace replaced by one space and leading and trailing whitespace removed. Case and punctuation are not folded. Only exact matches under this rule are collapsed: near duplicates, such as a second edition, an OCR'd copy or a layout that chunks differently, stay separate results.
+- Grouping happens after the final ordering of all reranked candidates (or of the first-stage order when reranking is skipped) and before the cut to `top_n`. The first member of a group under the tie-break rule (reranker score, then dense score, descending, then passage id ascending) represents it; the slots of the others are filled by the next distinct passages.
+- The representative is returned unchanged, with its own verbatim text and its own scores. The other members are listed on it in `duplicates`, in ranking order, each with `passage_id`, `source_id`, `path`, `file_type`, `page_number` and `heading_path`. A result without duplicates has no `duplicates` key.
+- The response gains `collapsed_duplicates`, the number of candidates removed from the ranking as duplicates of another one (over the whole candidate pool, including groups below the cut). `total_hits` still counts the candidates before collapsing.
+
+The plain-text output lists the other copies below a result, one line each:
+
+```text
+books/comet.pdf:12 (score 0.912)
+...passage text...
+also in: downloads/comet (1).pdf (page 12)
+```
+
+Collapsing is controlled by `DOCGREP_COLLAPSE_DUPLICATES` (default `true`), by the request field `collapse_duplicates` of `POST /search` (`true`, `false`, or `null` for the setting) and by `docgrep search --no-collapse-duplicates`. With collapsing off, results and response are exactly those of release 1.10.0: no `duplicates` and no `collapsed_duplicates` keys. Collapsing works at query time on the stored passages; it changes nothing in the index and needs no rebuild.
+
 ## HTTP API
 
 ```sh
@@ -236,6 +255,8 @@ curl -X POST http://127.0.0.1:8000/search \
   -H 'Content-Type: application/json' \
   -d '{"query":"phrase to find","top_n":5}'
 ```
+
+The body of `POST /search` takes `query`, an optional `top_n` and an optional `collapse_duplicates` (see [Duplicate passages](#duplicate-passages)).
 
 `POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `GET /health` and `GET /info` provide basic service information.
 
