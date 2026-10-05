@@ -7,6 +7,8 @@ from collections.abc import Iterator
 
 import pytest
 
+from qdrant_server_guard import check_server
+
 
 @pytest.fixture(autouse=True)
 def isolated_docgrep_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,3 +40,19 @@ def release_gpu_memory(request: pytest.FixtureRequest) -> Iterator[None]:
     torch = sys.modules.get("torch")
     if torch is not None and torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Stop before any qdrant_server test if the server holds foreign data.
+
+    Runs once, after collection and deselection and before the first test, so
+    nothing on the server has been touched when the run is refused.
+    """
+    url = os.environ.get("DOCGREP_TEST_QDRANT_URL")
+    if not url:
+        return
+    if not any(item.get_closest_marker("qdrant_server") for item in session.items):
+        return
+    refusal = check_server(url)
+    if refusal is not None:
+        pytest.exit(refusal, returncode=pytest.ExitCode.USAGE_ERROR)
