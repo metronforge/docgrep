@@ -1,6 +1,6 @@
 # docgrep
 
-docgrep searches a local document corpus and returns ranked, verbatim passages with source locations. The current slice indexes TXT, Markdown, text-bearing PDF and EPUB files. Image-only PDFs and EPUBs without text are recorded as needing OCR; other file types are skipped.
+docgrep searches a local document corpus and returns ranked, verbatim passages with source locations. The current slice indexes TXT, Markdown, EPUB, and text-bearing PDF and DjVu files. Image-only PDFs and DjVu files and EPUBs without text are recorded as needing OCR; other file types are skipped.
 
 ## Supported formats
 
@@ -10,12 +10,13 @@ docgrep searches a local document corpus and returns ranked, verbatim passages w
 | Markdown | `.md`, `.markdown` | heading path | `title`, `author`, `year` from YAML frontmatter | wikilinks are recorded |
 | PDF | `.pdf` | page number | title, author and creation year from the PDF metadata | pages without text and pages with a garbled text layer are skipped; a PDF without any text, or whose text layer is garbled as a whole, is recorded as needing OCR |
 | EPUB (2 and 3) | `.epub` | heading path (`h1` to `h6`, continued across chapters) | title, creators and year from the package metadata | text in spine (reading) order, navigation document and NCX skipped; DRM-encrypted books fail with `parse_error` (font obfuscation is accepted); a book without text is recorded as needing OCR |
+| DjVu | `.djvu`, `.djv` | page number | none | the existing hidden text layer, read with the djvulibre tools (`djvused`, `djvutxt`); same soft-hyphen handling and page policy as PDF; a file without any text is recorded as needing OCR with the reason `no_text_layer`; when the tools are missing the file is recorded as failed (`djvu_tools_missing`) and retried by `docgrep update` |
 
 Passages are verbatim. The one exception is the PDF soft hyphen (U+00AD), which is removed from extracted PDF text; when it ends a line (optionally followed by spaces), the line break and those spaces are removed too, so the two halves of the word are joined. A visible hyphen `-` is never touched.
 
 A PDF page is judged only when it has at least 200 non-whitespace characters, by three rules. R1, broken characters: replacement, private-use or control characters and `(cid:N)` placeholders make up more than 10% of them. R2, long tokens: tokens longer than 40 characters (other than URLs) make up more than 40%. R3, few letters and digits: letters and digits of any script make up less than 40%. R2 and R3 ignore dot leaders (four or more dots or ellipsis characters, with or without spaces between them), so a table of contents is measured by its titles and page numbers; the text itself keeps them. Only R1 marks a page as garbled: such pages never become passages, and a WARNING `pdf_pages_dropped` with `source_id`, `dropped` and `total` page counts is logged. R2 and R3 are weak signals, because tables of contents, code with long class names, keys and hashes, and regular expressions trigger them on readable pages; they never drop a page by themselves. The whole PDF is recorded as `skipped:requires_ocr` with the reason `garbled_text_layer` when R1 fires on half or more of the pages with text, or when any of the three rules fires on 80% or more of them.
 
-DOCX and DjVu files are recognised but not parsed yet; they are recorded as skipped (unsupported), and `docgrep update` indexes them once a parser for their type is registered.
+DOCX files are recognised but not parsed yet; they are recorded as skipped (unsupported), and `docgrep update` indexes them once a parser for their type is registered.
 
 ## Install
 
@@ -165,7 +166,7 @@ uv run docgrep dry-run --json              # machine-readable report with a file
 uv run docgrep dry-run --path-prefix books/ --sample 20 --seed 1
 ```
 
-The report gives the total number of files, and for each file type the count and the total, average and largest size. Types that docgrep recognises but cannot parse yet (for example DOCX and DjVu) are listed separately as recognised without a parser, files with other extensions as unsupported with the 20 most common extensions, and excluded files with the pattern that excluded them (`not_matched_by_includes` when no include pattern matched).
+The report gives the total number of files, and for each file type the count and the total, average and largest size. Types that docgrep recognises but cannot parse yet (for example DOCX) are listed separately as recognised without a parser, files with other extensions as unsupported with the 20 most common extensions, and excluded files with the pattern that excluded them (`not_matched_by_includes` when no include pattern matched).
 
 - `--path-prefix` restricts every figure to paths starting with the given relative prefix.
 - `--limit` (1 to 500, default 100) and `--offset` page the file list, which is part of the JSON output only.

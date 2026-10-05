@@ -172,6 +172,9 @@ class ParsedSection:
 
 # The skip reason of a document whose text layer is unusable as text.
 GARBLED_TEXT_LAYER = "garbled_text_layer"
+# The skip reason of a document that has no text layer at all (a scan), when
+# the parser says so explicitly.
+NO_TEXT_LAYER = "no_text_layer"
 
 
 @dataclass(frozen=True, slots=True)

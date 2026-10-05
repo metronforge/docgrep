@@ -7,27 +7,23 @@ from pathlib import Path
 
 import pymupdf
 
-from docgrep.adapters.parsers.text_quality import classify_page, remove_soft_hyphens
+from docgrep.adapters.parsers.page_policy import (
+    ANY_RULE_DOCUMENT_SHARE,
+    GARBLED_DOCUMENT_SHARE,
+    apply_page_policy,
+)
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import (
     GARBLED_TEXT_LAYER,
     FileType,
     ParsedDocument,
-    ParsedSection,
-    ParseQuality,
     Source,
 )
 
 _LOG = logging.getLogger(__name__)
 _PDF_DATE_YEAR = re.compile(r"^D:(\d{4})")
-# When at least this share of the pages that have text are garbled (R1), the
-# text layer as a whole is unusable and the document is left to OCR.
-GARBLED_DOCUMENT_SHARE = 0.5
-# When at least this share of the pages that have text fire any page rule
-# (R1, or the weak signals R2 and R3), the document is left to OCR as well:
-# weak signals on nearly every page mean a broken layer, not a few tables of
-# contents or pages of code.
-ANY_RULE_DOCUMENT_SHARE = 0.8
+# The document shares live with the shared page policy; named here too.
+__all__ = ["ANY_RULE_DOCUMENT_SHARE", "GARBLED_DOCUMENT_SHARE", "PdfParser"]
 
 
 def _metadata_text(value: str | None) -> str | None:
@@ -72,26 +68,13 @@ class PdfParser:
             with pymupdf.open(self.corpus_root / source.path) as pdf:  # type: ignore[no-untyped-call]
                 metadata = pdf.metadata or {}
                 pages_total = pdf.page_count
-                kept: list[ParsedSection] = []
-                with_text = 0
-                dropped: list[int] = []
-                any_rule = long_tokens = low_alnum = 0
-                soft_hyphens = 0
-                for page_number in range(1, pages_total + 1):
-                    raw = pdf.load_page(page_number - 1).get_text("text")
-                    text, removed = remove_soft_hyphens(raw)
-                    soft_hyphens += removed
-                    if not text.strip():
-                        continue
-                    with_text += 1
-                    signals = classify_page(text)
-                    any_rule += signals.any_rule
-                    long_tokens += signals.long_tokens
-                    low_alnum += signals.low_alnum
-                    if signals.garbled:
-                        dropped.append(page_number)
-                        continue
-                    kept.append(ParsedSection(text=text, page_number=page_number))
+                sections, quality = apply_page_policy(
+                    (
+                        (number, pdf.load_page(number - 1).get_text("text"))
+                        for number in range(1, pages_total + 1)
+                    ),
+                    pages_total,
+                )
                 enriched = replace(
                     source,
                     title=_metadata_text(metadata.get("title")),
@@ -103,22 +86,8 @@ class PdfParser:
                 "PDF cannot be parsed",
                 details={"path": source.path, "reason": str(error)},
             ) from error
-        garbled = len(dropped)
-        unusable = (garbled > 0 and garbled >= GARBLED_DOCUMENT_SHARE * with_text) or (
-            any_rule > 0 and any_rule >= ANY_RULE_DOCUMENT_SHARE * with_text
-        )
-        quality = ParseQuality(
-            pages_total=pages_total,
-            pages_with_text=with_text,
-            pages_garbled=garbled,
-            soft_hyphens_removed=soft_hyphens,
-            skip_reason=GARBLED_TEXT_LAYER if unusable else None,
-            pages_rule_broken=garbled,
-            pages_rule_long_tokens=long_tokens,
-            pages_rule_low_alnum=low_alnum,
-            dropped_pages=tuple(dropped),
-        )
-        if unusable:
+        garbled = quality.pages_garbled
+        if quality.skip_reason == GARBLED_TEXT_LAYER:
             return ParsedDocument(
                 source=enriched, sections=(), requires_ocr=True, quality=quality
             )
@@ -131,7 +100,6 @@ class PdfParser:
                     "total": pages_total,
                 },
             )
-        sections = tuple(kept)
         return ParsedDocument(
             source=enriched,
             sections=sections,
