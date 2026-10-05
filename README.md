@@ -185,6 +185,29 @@ The JSON output has these keys (`schema_version` is 1):
 - `sample`: null without `--sample`, otherwise `requested`, `seed`, `note` and `types`, a list of `type`, `sampled_files`, `parsed`, `failed`, `requires_ocr_fraction`, `passages_per_file`, `passages_per_mb`, `parse_chunk_seconds_per_file`, `text_quality` and `estimate` (`note`, `corpus_files`, `corpus_size_bytes`, and `by_file_count` and `by_size`, each with `passages` and `parse_chunk_seconds`; `by_file_count` also has `garbled_text_layer_files`, the estimated number of files in the corpus that would be skipped for a garbled text layer). `sample.text_quality` totals the same figures over all sampled types.
 - `text_quality` (measured on the sampled files, never text): `pages_sampled`, `pages_garbled`, `pages_garbled_fraction` (of the pages sampled), `garbled_text_layer_files` (paths of the sampled files that would be skipped as `requires_ocr` for a garbled text layer), `garbled_text_layer_fraction` (of the parsed sampled files), `soft_hyphens_removed_per_file` (average over the parsed sampled files), `pages_by_rule` (on how many sampled pages each rule fired, counted separately from the dropped pages so that the weak signals stay visible: `r1_broken_characters`, `r2_long_tokens` and `r3_low_alnum`) and `flagged_files`, a list of the sampled files on which any rule fired, each with `path`, `pages_dropped` (pages dropped for broken characters), `pages_by_rule` and `dropped_pages` (at most the first 20 dropped page numbers). The plain-text report shows the counts per rule but lists no flagged files; use `--json` for them. Fractions are null when there is nothing to divide by; types other than PDF report zero pages.
 
+## Scan discovery
+
+`docgrep discover-scans` lists the PDF and DjVu files whose text layer is missing or unusable, so that you can decide which ones need OCR. It is read-only like the dry run: it takes no index lock, opens neither the manifest nor Qdrant, loads no model, writes nothing and can run before any build. It uses the build's corpus root and include and exclude patterns.
+
+```sh
+uv run docgrep discover-scans                          # plain-text list and counts
+uv run docgrep discover-scans --json                   # machine-readable report
+uv run docgrep discover-scans --path-glob 'books/**' --file-type djvu
+```
+
+- `--path-glob` keeps the files whose relative path matches the pattern (the same glob rules as the include and exclude patterns).
+- `--file-type` (`pdf` or `djvu`, repeatable) restricts the types; the default is both.
+
+For each file a few pages are sampled: the first 3, the last one and 2 from the middle, capped at the page count and without duplicates. The middle pages are chosen from SHA-256 of the relative path and the page count, so the same file is always sampled the same way and two runs on an unchanged corpus give the same report. The text density is the mean number of non-whitespace characters per sampled page, where a page that the page policy would drop for broken characters (R1) counts as zero. Below `DOCGREP_SCAN_DENSITY_LOWER` (default 100) a file is `scanned`, above `DOCGREP_SCAN_DENSITY_UPPER` (default 500) it is `native`, in between (bounds included) `mixed_or_uncertain`. An ordinary book page carries well over 1,000 characters, so a book stays native even with blank pages or short chapter openings in its sample, while a scan whose text layer is empty, or holds only a page number or a title page, stays far below 100. A file whose sampled pages are at least half broken (R1) is `scanned` with the reason `garbled_text_layer`, because OCR has to redo such a layer. Native files are only counted; the others are listed. A file that cannot be inspected is listed as `inspection_failed` and the scan continues.
+
+Exit status 0 on success and 2 for usage or configuration errors (an unknown option or file type, invalid thresholds, an inaccessible corpus root).
+
+The JSON report has these keys (`schema_version` is 1):
+
+- `schema_version`, `filters` (`path_glob`, `file_types`) and `thresholds` (`density_lower`, `density_upper`).
+- `files`: the scanned, uncertain and failed files, sorted by file type and path, each with `path` (relative to the corpus root), `file_type` (`pdf` or `djvu`), `size_bytes`, `page_count` (null when unknown), `classification` (`scanned`, `mixed_or_uncertain` or `inspection_failed`), `reason` (`low_text_density`, `garbled_text_layer` or `uncertain_text_density`; for failures `encrypted`, `corrupt_header`, `djvu_invalid`, `djvu_tools_missing`, `djvu_timeout`, `djvu_output_too_large` or `unsamplable`), `hint` (how to install the DjVu tools when they are missing, else null), `ocr_status` (always `not_processed` until an OCR registry exists), `large_file` (more than 5000 pages or 1 GiB), `text_density` (null for failures) and `sampled_pages`.
+- `totals` and `by_file_type` (per requested type): `inspected`, `native`, `scanned`, `uncertain` and `inspection_failed`.
+
 ## Search
 
 ```sh
@@ -208,7 +231,7 @@ curl -X POST http://127.0.0.1:8000/search \
   -d '{"query":"phrase to find","top_n":5}'
 ```
 
-`POST /index/build` triggers the same full rebuild as `docgrep index`. `GET /health` and `GET /info` provide basic service information.
+`POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `GET /health` and `GET /info` provide basic service information.
 
 When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
 

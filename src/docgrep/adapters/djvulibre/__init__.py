@@ -144,7 +144,8 @@ class DjvuError(Exception):
         self.reason = reason
 
 
-def _run(runner: CommandRunner, args: Sequence[str]) -> bytes:
+def run_tool(runner: CommandRunner, args: Sequence[str]) -> bytes:
+    """Standard output of a successful call; every failure is a DjvuError."""
     try:
         result = runner.run(args)
     except ToolMissing as error:
@@ -169,7 +170,7 @@ def _run(runner: CommandRunner, args: Sequence[str]) -> bytes:
 
 def page_count(runner: CommandRunner, path: Path) -> int:
     """The number of pages, from ``djvused -e n``."""
-    output = _run(runner, [DJVUSED, "-e", "n", str(path)])
+    output = run_tool(runner, [DJVUSED, "-e", "n", str(path)])
     text = output.decode("ascii", "replace").strip()
     if not text.isdecimal():
         raise DjvuError(INVALID, "djvused printed no page count")
@@ -267,7 +268,7 @@ def parse_page_texts(data: bytes) -> list[str]:
 def page_texts(runner: CommandRunner, path: Path) -> list[str]:
     """The text of every page, in page order, checked against the page count."""
     count = page_count(runner, path)
-    pages = parse_page_texts(_run(runner, [DJVUTXT, "--detail=page", str(path)]))
+    pages = parse_page_texts(run_tool(runner, [DJVUTXT, "--detail=page", str(path)]))
     if len(pages) != count:
         raise DjvuError(
             INVALID,

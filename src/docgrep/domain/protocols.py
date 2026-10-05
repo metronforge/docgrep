@@ -5,6 +5,7 @@ from contextlib import AbstractContextManager
 from typing import Literal, Protocol
 
 from docgrep.domain.models import (
+    FileType,
     ManifestRunRecord,
     ManifestSourceRecord,
     ParsedDocument,
@@ -15,6 +16,7 @@ from docgrep.domain.models import (
     Source,
     StagingInfo,
 )
+from docgrep.domain.scans import PageSample
 
 
 class DocumentParser(Protocol):
@@ -115,6 +117,24 @@ class CorpusReader(Protocol):
     def describe(self, path: str) -> Source:
         """The source record of one corpus file, with its content hash, exactly
         as ``CorpusEnumerator.enumerate`` would give it."""
+        ...
+
+
+class ScanProbe(Protocol):
+    """Look at the text layer of a PDF or DjVu file without reading its text
+    into any result: page count and per-page character counts only.
+
+    Paths are relative to the corpus root. Both calls raise
+    ``InspectionFailed`` (with ``details["reason"]``) when the file as a whole
+    cannot be read; nothing is written and no other error is expected.
+    """
+
+    def page_count(self, path: str, file_type: FileType) -> int: ...
+
+    def sample(
+        self, path: str, file_type: FileType, pages: Sequence[int]
+    ) -> tuple[PageSample | None, ...]:
+        """One entry per requested page, None for a page that failed."""
         ...
 
 

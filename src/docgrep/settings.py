@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    # Scan discovery: mean non-whitespace characters per sampled page below
+    # which a PDF or DjVu file counts as scanned, and above which as native.
+    scan_density_lower: float = Field(default=100.0, ge=0)
+    scan_density_upper: float = Field(default=500.0, gt=0)
     # Extra host names accepted in the Host and Origin headers, as a
     # comma-separated list in the environment (for container deployments).
     allowed_hosts: Annotated[tuple[str, ...], NoDecode] = ()
@@ -65,4 +69,6 @@ class Settings(BaseSettings):
             raise ValueError("top_n must not exceed top_n_max")
         if self.top_n > self.top_k:
             raise ValueError("top_n must not exceed top_k")
+        if self.scan_density_lower >= self.scan_density_upper:
+            raise ValueError("scan_density_lower must be below scan_density_upper")
         return self
