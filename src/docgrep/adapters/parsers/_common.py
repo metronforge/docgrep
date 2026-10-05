@@ -5,6 +5,7 @@ from pathlib import Path
 
 import chardet
 
+from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import Source
 
@@ -17,7 +18,10 @@ def read_text(corpus_root: Path, source: Source) -> str:
     except OSError as error:
         raise ParseError(
             "source cannot be read",
-            details={"path": source.path, "reason": str(error)},
+            details={
+                "path": source.path,
+                "reason": scrub_tool_output(str(error), (path, corpus_root)),
+            },
         ) from error
     return decode_text(data, source.path)
 

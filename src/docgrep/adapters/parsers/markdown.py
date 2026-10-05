@@ -8,6 +8,7 @@ import yaml
 from markdown_it import MarkdownIt
 
 from docgrep.adapters.parsers._common import read_text
+from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import FileType, ParsedDocument, ParsedSection, Source
 
@@ -25,7 +26,10 @@ def _frontmatter(text: str, source: Source) -> tuple[dict[str, object], str]:
             except yaml.YAMLError as error:
                 raise ParseError(
                     "invalid Markdown frontmatter",
-                    details={"path": source.path, "reason": str(error)},
+                    details={
+                        "path": source.path,
+                        "reason": scrub_tool_output(str(error)),
+                    },
                 ) from error
             if loaded is None:
                 return {}, "".join(lines[index + 1 :])

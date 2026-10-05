@@ -11,6 +11,7 @@ from docgrep.adapters.djvulibre import (
     page_texts,
 )
 from docgrep.adapters.parsers.page_policy import apply_page_policy
+from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import (
     GARBLED_TEXT_LAYER,
@@ -50,7 +51,10 @@ class DjvuParser:
             texts = page_texts(self.runner, path)
         except DjvuError as error:
             raise ParseError(
-                f"DjVu cannot be read ({error.reason}): {error}",
+                scrub_tool_output(
+                    f"DjVu cannot be read ({error.reason}): {error}",
+                    (path, self.corpus_root),
+                ),
                 details={"path": source.path, "reason": error.reason},
             ) from error
         sections, quality = apply_page_policy(

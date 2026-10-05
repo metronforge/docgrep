@@ -11,6 +11,7 @@ from urllib.parse import unquote
 from xml.etree import ElementTree
 
 from docgrep.adapters.parsers._common import decode_text
+from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import FileType, ParsedDocument, ParsedSection, Source
 
@@ -152,7 +153,7 @@ class _Book:
                     "path": self.source.path,
                     "reason": "malformed_xml",
                     "member": name,
-                    "error": str(error),
+                    "error": scrub_tool_output(str(error)),
                 },
             ) from error
 
@@ -423,7 +424,9 @@ class EpubParser:
                 details={
                     "path": source.path,
                     "reason": "unreadable",
-                    "error": str(error),
+                    "error": scrub_tool_output(
+                        str(error), (self.corpus_root / source.path, self.corpus_root)
+                    ),
                 },
             ) from error
 
