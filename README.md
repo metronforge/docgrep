@@ -1,6 +1,6 @@
 # docgrep
 
-docgrep searches a local document corpus and returns ranked, verbatim passages with source locations. The current slice indexes TXT, Markdown, text-bearing PDF and EPUB files. Image-only PDFs and EPUBs without text are recorded as needing OCR; other file types are skipped.
+docgrep searches a local document corpus and returns ranked, verbatim passages with source locations. The current slice indexes TXT, Markdown, EPUB, and text-bearing PDF and DjVu files. Image-only PDFs and DjVu files and EPUBs without text are recorded as needing OCR; other file types are skipped.
 
 ## Supported formats
 
@@ -10,12 +10,13 @@ docgrep searches a local document corpus and returns ranked, verbatim passages w
 | Markdown | `.md`, `.markdown` | heading path | `title`, `author`, `year` from YAML frontmatter | wikilinks are recorded |
 | PDF | `.pdf` | page number | title, author and creation year from the PDF metadata | pages without text and pages with a garbled text layer are skipped; a PDF without any text, or whose text layer is garbled as a whole, is recorded as needing OCR |
 | EPUB (2 and 3) | `.epub` | heading path (`h1` to `h6`, continued across chapters) | title, creators and year from the package metadata | text in spine (reading) order, navigation document and NCX skipped; DRM-encrypted books fail with `parse_error` (font obfuscation is accepted); a book without text is recorded as needing OCR |
+| DjVu | `.djvu`, `.djv` | page number | none | the existing hidden text layer, read with the djvulibre tools (`djvused`, `djvutxt`); same soft-hyphen handling and page policy as PDF; a file without any text is recorded as needing OCR with the reason `no_text_layer`; when the tools are missing the file is recorded as failed (`djvu_tools_missing`) and retried by `docgrep update` |
 
 Passages are verbatim. The one exception is the PDF soft hyphen (U+00AD), which is removed from extracted PDF text; when it ends a line (optionally followed by spaces), the line break and those spaces are removed too, so the two halves of the word are joined. A visible hyphen `-` is never touched.
 
 A PDF page is judged only when it has at least 200 non-whitespace characters, by three rules. R1, broken characters: replacement, private-use or control characters and `(cid:N)` placeholders make up more than 10% of them. R2, long tokens: tokens longer than 40 characters (other than URLs) make up more than 40%. R3, few letters and digits: letters and digits of any script make up less than 40%. R2 and R3 ignore dot leaders (four or more dots or ellipsis characters, with or without spaces between them), so a table of contents is measured by its titles and page numbers; the text itself keeps them. Only R1 marks a page as garbled: such pages never become passages, and a WARNING `pdf_pages_dropped` with `source_id`, `dropped` and `total` page counts is logged. R2 and R3 are weak signals, because tables of contents, code with long class names, keys and hashes, and regular expressions trigger them on readable pages; they never drop a page by themselves. The whole PDF is recorded as `skipped:requires_ocr` with the reason `garbled_text_layer` when R1 fires on half or more of the pages with text, or when any of the three rules fires on 80% or more of them.
 
-DOCX and DjVu files are recognised but not parsed yet; they are recorded as skipped (unsupported), and `docgrep update` indexes them once a parser for their type is registered.
+DOCX files are recognised but not parsed yet; they are recorded as skipped (unsupported), and `docgrep update` indexes them once a parser for their type is registered.
 
 ## Install
 
@@ -29,6 +30,12 @@ uv sync --extra cu130   # CUDA 13.0 build (needs a recent NVIDIA driver, R580 or
 Then run commands without re-syncing, for example after `export UV_NO_SYNC=1` (or with `uv run --no-sync ...`). A plain `uv run` or `uv sync` re-resolves without extras and replaces torch with the PyPI build, which is the CUDA build with about 3 GB of nvidia packages. `scripts/check.sh` sets `UV_NO_SYNC=1` itself and stops with a hint when no environment exists.
 
 The default backend uses `BAAI/bge-m3` for embeddings and `BAAI/bge-reranker-v2-m3` for reranking. Model weights download on first use. The reranker runs in float16 on CUDA and in float32 on CPU; set `DOCGREP_RERANKER_DTYPE` to `auto` (default), `float16` or `float32` to override it. The embedding model follows the same rule through `DOCGREP_EMBEDDING_DTYPE`; vectors are always returned as float32, and the precision is recorded in the index metadata for information only, so an index built in float16 stays searchable in float32. For a small local trial without model downloads, set `DOCGREP_BACKEND=fake` as shown below.
+
+DjVu text layers are read with the djvulibre command-line tools (`djvused` and `djvutxt`), an optional system dependency (see [ADR-0015](docs/adr/0015-djvu-via-djvulibre-subprocess.md)). Without them everything else works; DjVu files are recorded as failed with `djvu_tools_missing`, scan discovery reports them as `inspection_failed`, and the next `docgrep update` processes them once the tools are installed. On Debian-family systems:
+
+```sh
+sudo apt install djvulibre-bin
+```
 
 ## Configure and index
 
@@ -165,7 +172,7 @@ uv run docgrep dry-run --json              # machine-readable report with a file
 uv run docgrep dry-run --path-prefix books/ --sample 20 --seed 1
 ```
 
-The report gives the total number of files, and for each file type the count and the total, average and largest size. Types that docgrep recognises but cannot parse yet (for example DOCX and DjVu) are listed separately as recognised without a parser, files with other extensions as unsupported with the 20 most common extensions, and excluded files with the pattern that excluded them (`not_matched_by_includes` when no include pattern matched).
+The report gives the total number of files, and for each file type the count and the total, average and largest size. Types that docgrep recognises but cannot parse yet (for example DOCX) are listed separately as recognised without a parser, files with other extensions as unsupported with the 20 most common extensions, and excluded files with the pattern that excluded them (`not_matched_by_includes` when no include pattern matched).
 
 - `--path-prefix` restricts every figure to paths starting with the given relative prefix.
 - `--limit` (1 to 500, default 100) and `--offset` page the file list, which is part of the JSON output only.
@@ -183,6 +190,29 @@ The JSON output has these keys (`schema_version` is 1):
 - `files`: `offset`, `limit`, `total` and `items`, a list of `path`, `size_bytes`, `extension`, `type` (null when unsupported), `status` (`indexed`, `recognised_without_parser`, `unsupported` or `excluded`) and `excluded_by`.
 - `sample`: null without `--sample`, otherwise `requested`, `seed`, `note` and `types`, a list of `type`, `sampled_files`, `parsed`, `failed`, `requires_ocr_fraction`, `passages_per_file`, `passages_per_mb`, `parse_chunk_seconds_per_file`, `text_quality` and `estimate` (`note`, `corpus_files`, `corpus_size_bytes`, and `by_file_count` and `by_size`, each with `passages` and `parse_chunk_seconds`; `by_file_count` also has `garbled_text_layer_files`, the estimated number of files in the corpus that would be skipped for a garbled text layer). `sample.text_quality` totals the same figures over all sampled types.
 - `text_quality` (measured on the sampled files, never text): `pages_sampled`, `pages_garbled`, `pages_garbled_fraction` (of the pages sampled), `garbled_text_layer_files` (paths of the sampled files that would be skipped as `requires_ocr` for a garbled text layer), `garbled_text_layer_fraction` (of the parsed sampled files), `soft_hyphens_removed_per_file` (average over the parsed sampled files), `pages_by_rule` (on how many sampled pages each rule fired, counted separately from the dropped pages so that the weak signals stay visible: `r1_broken_characters`, `r2_long_tokens` and `r3_low_alnum`) and `flagged_files`, a list of the sampled files on which any rule fired, each with `path`, `pages_dropped` (pages dropped for broken characters), `pages_by_rule` and `dropped_pages` (at most the first 20 dropped page numbers). The plain-text report shows the counts per rule but lists no flagged files; use `--json` for them. Fractions are null when there is nothing to divide by; types other than PDF report zero pages.
+
+## Scan discovery
+
+`docgrep discover-scans` lists the PDF and DjVu files whose text layer is missing or unusable, so that you can decide which ones need OCR. It is read-only like the dry run: it takes no index lock, opens neither the manifest nor Qdrant, loads no model, writes nothing and can run before any build. It uses the build's corpus root and include and exclude patterns.
+
+```sh
+uv run docgrep discover-scans                          # plain-text list and counts
+uv run docgrep discover-scans --json                   # machine-readable report
+uv run docgrep discover-scans --path-glob 'books/**' --file-type djvu
+```
+
+- `--path-glob` keeps the files whose relative path matches the pattern (the same glob rules as the include and exclude patterns).
+- `--file-type` (`pdf` or `djvu`, repeatable) restricts the types; the default is both.
+
+For each file a few pages are sampled: the first 3, the last one and 2 from the middle, capped at the page count and without duplicates. The middle pages are chosen from SHA-256 of the relative path and the page count, so the same file is always sampled the same way and two runs on an unchanged corpus give the same report. The text density is the mean number of non-whitespace characters per sampled page, where a page that the page policy would drop for broken characters (R1) counts as zero. Below `DOCGREP_SCAN_DENSITY_LOWER` (default 100) a file is `scanned`, above `DOCGREP_SCAN_DENSITY_UPPER` (default 500) it is `native`, in between (bounds included) `mixed_or_uncertain`. An ordinary book page carries well over 1,000 characters, so a book stays native even with blank pages or short chapter openings in its sample, while a scan whose text layer is empty, or holds only a page number or a title page, stays far below 100. A file whose sampled pages are at least half broken (R1) is `scanned` with the reason `garbled_text_layer`, because OCR has to redo such a layer. Native files are only counted; the others are listed. A file that cannot be inspected is listed as `inspection_failed` and the scan continues.
+
+Exit status 0 on success and 2 for usage or configuration errors (an unknown option or file type, invalid thresholds, an inaccessible corpus root).
+
+The JSON report has these keys (`schema_version` is 1):
+
+- `schema_version`, `filters` (`path_glob`, `file_types`) and `thresholds` (`density_lower`, `density_upper`).
+- `files`: the scanned, uncertain and failed files, sorted by file type and path, each with `path` (relative to the corpus root), `file_type` (`pdf` or `djvu`), `size_bytes`, `page_count` (null when unknown), `classification` (`scanned`, `mixed_or_uncertain` or `inspection_failed`), `reason` (`low_text_density`, `garbled_text_layer` or `uncertain_text_density`; for failures `encrypted`, `corrupt_header`, `djvu_invalid`, `djvu_tools_missing`, `djvu_timeout`, `djvu_output_too_large` or `unsamplable`), `hint` (how to install the DjVu tools when they are missing, else null), `ocr_status` (always `not_processed` until an OCR registry exists), `large_file` (more than 5000 pages or 1 GiB), `text_density` (null for failures) and `sampled_pages`.
+- `totals` and `by_file_type` (per requested type): `inspected`, `native`, `scanned`, `uncertain` and `inspection_failed`.
 
 ## Search
 
@@ -207,7 +237,7 @@ curl -X POST http://127.0.0.1:8000/search \
   -d '{"query":"phrase to find","top_n":5}'
 ```
 
-`POST /index/build` triggers the same full rebuild as `docgrep index`. `GET /health` and `GET /info` provide basic service information.
+`POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `GET /health` and `GET /info` provide basic service information.
 
 When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
 

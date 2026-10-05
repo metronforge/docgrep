@@ -19,11 +19,13 @@ from docgrep.adapters.models.real import (
     load_tokenizer,
 )
 from docgrep.adapters.models.sparse import BM25SparseEncoder
+from docgrep.adapters.parsers.djvu import DjvuParser
 from docgrep.adapters.parsers.epub import EpubParser
 from docgrep.adapters.parsers.markdown import MarkdownParser
 from docgrep.adapters.parsers.pdf import PdfParser
 from docgrep.adapters.parsers.text import TextParser
 from docgrep.adapters.qdrant import QdrantPassageStore
+from docgrep.adapters.scans import FileScanProbe
 from docgrep.api.log_config import configure_logging
 from docgrep.domain.models import FileType, ScannedFile, SearchResult, Source
 from docgrep.domain.protocols import (
@@ -38,6 +40,7 @@ from docgrep.domain.protocols import (
 from docgrep.settings import Settings
 from docgrep.usecases.build_index import BuildIndex, BuildSummary
 from docgrep.usecases.cancel_index import CancelIndex
+from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DryRun
 from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
@@ -133,6 +136,7 @@ def _parsers(settings: Settings) -> Mapping[FileType, DocumentParser]:
         FileType.MARKDOWN: MarkdownParser(settings.corpus_root),
         FileType.PDF: PdfParser(settings.corpus_root),
         FileType.EPUB: EpubParser(settings.corpus_root),
+        FileType.DJVU: DjvuParser(settings.corpus_root),
     }
 
 
@@ -154,6 +158,21 @@ def create_dry_run(settings: Settings) -> DryRun:
         scanner=_CorpusEnumerator(settings),
         parsers=_parsers(settings),
         chunker=TokenChunker(tokenizer, settings.chunk_size, settings.chunk_overlap),
+    )
+
+
+def create_discover_scans(settings: Settings) -> DiscoverScans:
+    """Wire the read-only scan discovery (UC-5).
+
+    It needs only the corpus scan and a probe for PDF and DjVu pages: no
+    index store, manifest, lock or model, and it creates nothing on disk.
+    """
+    configure_logging(settings.log_level)
+    return DiscoverScans(
+        scanner=_CorpusEnumerator(settings),
+        probe=FileScanProbe(settings.corpus_root),
+        density_lower=settings.scan_density_lower,
+        density_upper=settings.scan_density_upper,
     )
 
 

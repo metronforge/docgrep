@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from threading import Lock
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
@@ -12,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 
 from docgrep import __version__
 from docgrep.adapters.qdrant import local_passage_count, warn_if_local_mode_is_large
-from docgrep.api.container import Services, create_container
+from docgrep.api.container import Services, create_container, create_discover_scans
 from docgrep.api.log_config import (
     configure_logging,
     log_server_start,
@@ -128,6 +129,13 @@ class BuildFailureResponse(BaseModel):
     path: str
     reason: str
     message: str
+
+
+class DiscoverScansRequest(BaseModel):
+    """Optional filters of a scan discovery."""
+
+    path_glob: str | None = None
+    file_types: list[Literal["pdf", "djvu"]] | None = None
 
 
 class BuildRequest(BaseModel):
@@ -297,6 +305,15 @@ def create_app(
     def search(request: SearchRequest) -> SearchResponse:
         result = operations().search.run(request.query, top_n=request.top_n)
         return SearchResponse.from_domain(result)
+
+    @app.post("/scans/discover")
+    def discover_scans(request: DiscoverScansRequest | None = None) -> dict[str, Any]:
+        """Read-only (UC-5): the same report as `docgrep discover-scans --json`."""
+        body = request or DiscoverScansRequest()
+        report = create_discover_scans(effective).run(
+            path_glob=body.path_glob, file_types=body.file_types
+        )
+        return report.as_dict()
 
     @app.post("/index/build", response_model=BuildResponse)
     def build(request: BuildRequest | None = None) -> BuildResponse:

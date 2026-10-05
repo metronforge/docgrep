@@ -88,6 +88,12 @@ class StagingInconsistent(DocgrepError):
     category = "staging_inconsistent"
 
 
+class InspectionFailed(DocgrepError):
+    """A file cannot be inspected; ``details["reason"]`` says why."""
+
+    category = "inspection_failed"
+
+
 class CorpusDrift(DocgrepError):
     """The corpus changed too much since the run for a resume to make sense."""
 

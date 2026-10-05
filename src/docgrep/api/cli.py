@@ -13,15 +13,17 @@ from docgrep.api.container import (
     Services,
     create_cancel,
     create_container,
+    create_discover_scans,
     create_dry_run,
     create_status,
 )
 from docgrep.api.http import SearchResponse, create_app
 from docgrep.api.log_config import configure_logging
 from docgrep.api.signals import Register, graceful_cancel
-from docgrep.domain.errors import DocgrepError
+from docgrep.domain.errors import DocgrepError, ValidationError
 from docgrep.settings import Settings
 from docgrep.usecases.cancel_index import CancelIndex, CancelResult
+from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DEFAULT_LIMIT, DryRun
 from docgrep.usecases.inspect_status import InspectStatus
 from docgrep.usecases.update_index import UpdatePlan, UpdateSummary
@@ -72,6 +74,19 @@ def _parser() -> argparse.ArgumentParser:
     dry.add_argument("--offset", type=int, default=0)
     dry.add_argument("--sample", type=int, default=None)
     dry.add_argument("--seed", type=int, default=0)
+    discover = commands.add_parser(
+        "discover-scans",
+        help="List PDF and DjVu files whose text layer needs OCR (read-only)",
+    )
+    discover.add_argument("--path-glob", dest="path_glob")
+    discover.add_argument(
+        "--file-type",
+        dest="file_types",
+        action="append",
+        choices=["pdf", "djvu"],
+        help="Restrict to a file type; repeat for both (default: both)",
+    )
+    discover.add_argument("--json", action="store_true")
     commands.add_parser(
         "cancel", help="Ask a running index build to stop after its current batch"
     )
@@ -190,6 +205,36 @@ def _format_text_quality(label: str, quality: dict[str, Any]) -> str:
     )
     line += "".join(f"\n      garbled text layer: {path}" for path in files)
     return line
+
+
+def _format_discover_scans(report: dict[str, Any]) -> str:
+    """Render scan discovery as plain text: paths, counts and sizes only."""
+    lines = [
+        "Scan discovery (read-only: nothing is indexed, locked or written)",
+        f"Thresholds: scanned below {report['thresholds']['density_lower']:g}, "
+        f"native above {report['thresholds']['density_upper']:g} characters "
+        "per sampled page",
+    ]
+    files = report["files"]
+    if files:
+        lines.append("Files needing OCR or attention:")
+    for entry in files:
+        pages = entry["page_count"] if entry["page_count"] is not None else "?"
+        lines.append(
+            f"  {entry['path']}  {entry['file_type']}  {entry['classification']}"
+            f"  {entry['reason'] or '-'}  {pages} pages  {_size(entry['size_bytes'])}"
+            + ("  large file" if entry["large_file"] else "")
+            + (f"  ({entry['hint']})" if entry["hint"] else "")
+        )
+    for label, counts in [("Total", report["totals"])] + [
+        (name, counts) for name, counts in report["by_file_type"].items()
+    ]:
+        lines.append(
+            f"{label}: {counts['inspected']} inspected, {counts['native']} native, "
+            f"{counts['scanned']} scanned, {counts['uncertain']} uncertain, "
+            f"{counts['inspection_failed']} inspection failed"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _format_cancel(result: CancelResult) -> tuple[str, int]:
@@ -392,6 +437,7 @@ def main(
     *,
     container_factory: Callable[[Settings], Services] = create_container,
     dry_run_factory: Callable[[Settings], DryRun] = create_dry_run,
+    discover_factory: Callable[[Settings], DiscoverScans] = create_discover_scans,
     cancel_factory: Callable[[Settings], CancelIndex] = create_cancel,
     status_factory: Callable[[Settings], InspectStatus] = create_status,
     register_signal: Register = signal.signal,
@@ -429,6 +475,20 @@ def main(
         if args.command == "index" and args.no_retry_failed and not args.resume:
             sys.stderr.write("usage: --no-retry-failed requires --resume\n")
             return 1
+
+        if args.command == "discover-scans":
+            try:
+                discovery = discover_factory(settings).run(
+                    path_glob=args.path_glob, file_types=args.file_types
+                )
+            except ValidationError as error:
+                sys.stderr.write(_describe(error) + "\n")
+                return 2
+            if args.json:
+                sys.stdout.write(json.dumps(discovery.as_dict(), indent=2) + "\n")
+            else:
+                sys.stdout.write(_format_discover_scans(discovery.as_dict()))
+            return 0
 
         if args.command == "status":
             status_report = status_factory(settings).run().as_dict()
@@ -530,7 +590,8 @@ def main(
         return 1
     except SettingsValidationError as error:
         sys.stderr.write(f"invalid_settings: {error}\n")
-        return 1
+        # Scan discovery reports configuration errors with 2, like usage errors.
+        return 2 if args.command == "discover-scans" else 1
     except OSError as error:
         sys.stderr.write(f"io_error: {error}\n")
         return 1
