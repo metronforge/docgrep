@@ -37,6 +37,149 @@ DjVu text layers are read with the djvulibre command-line tools (`djvused` and `
 sudo apt install djvulibre-bin
 ```
 
+## How-to examples
+
+Short recipes to copy and paste. Paths such as `~/library` and `~/docgrep-data` are examples: replace them with your own. Every command reads its settings from the environment, so each shell needs the same settings exported; the simplest way is to keep them in one file and `source` it. The reference sections further down describe every command in full.
+
+### First run
+
+Keep the settings in one file, for example `~/docgrep-trial.env`, with these lines:
+
+```sh
+export UV_NO_SYNC=1                                # keep the torch build chosen at install
+export DOCGREP_CORPUS_ROOT="$HOME/library"          # the documents to search
+export DOCGREP_DATA_DIR="$HOME/docgrep-data"       # manifest (and index in local mode)
+export DOCGREP_QDRANT_URL=http://localhost:6333    # omit for local mode
+export DOCGREP_BACKEND=real                        # fake: no models, for a dry trial
+export DOCGREP_DEVICE=cuda                         # cpu, cuda or auto
+```
+
+`DOCGREP_QDRANT_URL` needs a running Qdrant server (see [Running with a Qdrant server](#running-with-a-qdrant-server)); without it the index lives in local mode under the data directory. Then, in every shell you use:
+
+```sh
+source ~/docgrep-trial.env
+uv run docgrep index                               # first full build
+uv run docgrep status                              # should report Index: ready
+uv run docgrep search "a sentence you remember from a book"
+```
+
+`docgrep index` builds the whole index from scratch; once it exists, use `docgrep update` to apply changes (see [Keeping the index current](#keeping-the-index-current)).
+
+### Searching from the command line
+
+```sh
+uv run docgrep search "phrase to find"                            # 10 results as text
+uv run docgrep search "phrase to find" --top-n 5
+uv run docgrep search "phrase to find" --json                     # scores and metadata
+uv run docgrep search "phrase to find" --no-collapse-duplicates   # list every copy separately
+```
+
+The text output gives the location, the score and the verbatim passage; copies of the same passage in other files are listed below it (see [Duplicate passages](#duplicate-passages)):
+
+```text
+books/example.pdf:42 (score 0.874)
+Placeholder passage text, exactly as stored in the index.
+also in: downloads/example (1).pdf (page 42)
+```
+
+To read the JSON output compactly without extra tools, define a small filter once per shell. It prints rank, score, path, page or heading path and the first 200 characters of each passage:
+
+```sh
+compact() { python3 -c '
+import json, sys
+for n, r in enumerate(json.load(sys.stdin)["results"], 1):
+    p = r["passage"]
+    at = p["page_number"] or " > ".join(p["heading_path"]) or "-"
+    print(n, round(r["score"], 3), r["source"]["path"], at)
+    print("   ", p["text"][:200].replace("\n", " "))
+    for d in r.get("duplicates", []):
+        print("    also in:", d["path"], d["page_number"] or "-")
+'; }
+uv run docgrep search "phrase to find" --json | compact
+```
+
+```text
+1 0.874 books/example.pdf 42
+    Placeholder passage text, exactly as stored in the index.
+    also in: downloads/example (1).pdf 42
+2 0.731 notes/example.md Chapter > Section
+    Another placeholder passage.
+```
+
+### Searching over HTTP
+
+Start the server in one terminal, after sourcing the settings:
+
+```sh
+source ~/docgrep-trial.env
+uv run docgrep serve
+```
+
+In another terminal, use the same `compact` filter on the response:
+
+```sh
+curl -s -X POST http://127.0.0.1:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "phrase to find", "top_n": 5}' | compact
+curl -s -X POST http://127.0.0.1:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "phrase to find", "collapse_duplicates": false}' | compact
+```
+
+The first request after the server starts loads the models and takes longer (about 15 s on the reference GPU); later requests are fast (about 2 s). Each `docgrep search` invocation is a new process and pays the load time every time, so for many queries the server is quicker. In local mode only one process can open the index, so use a Qdrant server to run `docgrep search` while `docgrep serve` is running (see [HTTP API](#http-api)).
+
+### Different kinds of queries
+
+Search combines a sparse keyword match with a dense meaning match and then reranks the candidates, so very different queries work:
+
+```sh
+uv run docgrep search "the exact sentence as it is printed in the book"   # exact text: found best by the sparse part
+uv run docgrep search "the same idea said in other words"                 # paraphrase: found by the dense part
+uv run docgrep search "river survey water levels"                         # a few keywords: sparse part
+uv run docgrep search "why were the water levels measured every spring?"  # a question: passages, not an answer
+uv run docgrep search 'max_connections = 100'                             # code or configuration fragment
+```
+
+A query in another language works too, in any language the embedding model supports, and can find passages written in a different language, mostly through the dense part. Quote the query with single quotes when it contains `$`, `!` or backticks. Queries are limited to 1000 characters (`DOCGREP_MAX_QUERY_LEN`).
+
+### Keeping the index current
+
+```sh
+uv run docgrep dry-run --sample 50   # before a first build: what would be indexed, with estimates
+uv run docgrep update                # after adding, changing or removing files
+uv run docgrep status                # index state, latest run and the sources block
+uv run docgrep cancel                # from another shell: stop a running build or update
+```
+
+The sources block of `docgrep status` counts the recorded sources and lists the failed ones:
+
+```text
+Sources: 120 total, 112 indexed, 6 skipped, 2 failed
+Skipped by reason: requires_ocr 4, garbled_text_layer 1, unsupported 1, other 0
+Failed sources:
+  books/example.djvu: parse_error: DjVu cannot be read (djvu_tools_missing): ...
+```
+
+See [Dry run](#dry-run), [Updating the index](#updating-the-index), [Status](#status) and [Cancelling a build](#cancelling-a-build) for the details.
+
+### Finding files that need OCR
+
+```sh
+uv run docgrep discover-scans                          # list and counts as text
+uv run docgrep discover-scans --file-type pdf          # PDFs only (djvu for DjVu only)
+uv run docgrep discover-scans --file-type djvu --json  # machine-readable report
+```
+
+Files classified `scanned` have no usable text layer and need OCR (reason `low_text_density`, or `garbled_text_layer` when the layer is broken); `mixed_or_uncertain` files are worth a look by hand; `inspection_failed` files could not be read, and their reason says why (for example `djvu_tools_missing`). Native files are only counted. OCR itself is not part of this release. See [Scan discovery](#scan-discovery) for the thresholds and the JSON keys.
+
+### Troubleshooting
+
+- `docgrep status` reports `not_built` although you built an index: the settings are not exported in this shell; `source` the settings file again.
+- The vector store is `unreachable`: the Qdrant server is not running, or `DOCGREP_QDRANT_URL` points to the wrong address.
+- `docgrep search` fails with `store_unavailable` while `docgrep serve` runs: in local mode only one process can open the index; stop the server, search over HTTP, or use a Qdrant server.
+- The first query is slow: the models are loaded on first use; later requests to a running server are fast.
+- DjVu files are skipped or fail with `djvu_tools_missing`: install `djvulibre-bin`, then run `uv run docgrep update`.
+
 ## Configure and index
 
 Set a corpus directory and a separate data directory for the SQLite manifest and, in local mode, the Qdrant index (see [Running with a Qdrant server](#running-with-a-qdrant-server) for larger corpora):
