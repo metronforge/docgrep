@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.10.0 (2026-10-05)
+
+### Documentation
+
+- Add ADR-0015 on reading DjVu through djvulibre subprocesses
+  ([`f03dc08`](https://github.com/metronforge/docgrep/commit/f03dc08b575938fcec401cb38d4d4fa61a88dcf6))
+
+### Features
+
+- **adapters**: Read DjVu text layers with the djvulibre tools
+  ([`9e4a2df`](https://github.com/metronforge/docgrep/commit/9e4a2dfda86527f98469da10e9bc234c250d69ac))
+
+- **api**: Discover PDF and DjVu files that need OCR
+  ([`74caff5`](https://github.com/metronforge/docgrep/commit/74caff523066e60422ad63da79fac7f64f911e19))
+
+
 ## v1.9.0 (2026-10-04)
 
 ### Documentation
