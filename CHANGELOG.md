@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.11.0 (2026-10-05)
+
+### Documentation
+
+- Add ADR-0016 on collapsing exact duplicate passages at query time
+  ([`cce8484`](https://github.com/metronforge/docgrep/commit/cce8484c68af7893048d134f8d19ddf9ce9d63f1))
+
+- Add how-to examples to the README
+  ([`2750726`](https://github.com/metronforge/docgrep/commit/2750726bce7b5905f3d5709be860adca862ad781))
+
+### Features
+
+- **usecases**: Collapse passages with identical text from several files
+  ([`96dcc5f`](https://github.com/metronforge/docgrep/commit/96dcc5f965a9ffac6915650a265a4a08d4cab858))
+
+
 ## v1.10.0 (2026-10-05)
 
 ### Documentation
