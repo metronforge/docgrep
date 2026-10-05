@@ -31,6 +31,12 @@ Then run commands without re-syncing, for example after `export UV_NO_SYNC=1` (o
 
 The default backend uses `BAAI/bge-m3` for embeddings and `BAAI/bge-reranker-v2-m3` for reranking. Model weights download on first use. The reranker runs in float16 on CUDA and in float32 on CPU; set `DOCGREP_RERANKER_DTYPE` to `auto` (default), `float16` or `float32` to override it. The embedding model follows the same rule through `DOCGREP_EMBEDDING_DTYPE`; vectors are always returned as float32, and the precision is recorded in the index metadata for information only, so an index built in float16 stays searchable in float32. For a small local trial without model downloads, set `DOCGREP_BACKEND=fake` as shown below.
 
+DjVu text layers are read with the djvulibre command-line tools (`djvused` and `djvutxt`), an optional system dependency (see [ADR-0015](docs/adr/0015-djvu-via-djvulibre-subprocess.md)). Without them everything else works; DjVu files are recorded as failed with `djvu_tools_missing`, scan discovery reports them as `inspection_failed`, and the next `docgrep update` processes them once the tools are installed. On Debian-family systems:
+
+```sh
+sudo apt install djvulibre-bin
+```
+
 ## Configure and index
 
 Set a corpus directory and a separate data directory for the SQLite manifest and, in local mode, the Qdrant index (see [Running with a Qdrant server](#running-with-a-qdrant-server) for larger corpora):
