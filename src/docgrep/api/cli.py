@@ -64,6 +64,14 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--top-n", type=int, dest="top_n")
     search.add_argument("--json", action="store_true")
+    search.add_argument(
+        "--no-collapse-duplicates",
+        dest="collapse_duplicates",
+        action="store_const",
+        const=False,
+        default=None,
+        help="List passages with identical text from several files separately",
+    )
     dry = commands.add_parser(
         "dry-run",
         help="Preview what a build would index, without changing anything",
@@ -417,6 +425,31 @@ def _format_update(summary: UpdateSummary) -> str:
     return "".join(lines)
 
 
+def _format_search(response: SearchResponse) -> str:
+    """Render search results as plain text with the verbatim passage text."""
+    lines: list[str] = []
+    if response.hint:
+        lines.append(response.hint + "\n")
+    for item in response.results:
+        location = item.source.path
+        if item.passage.page_number is not None:
+            location += f":{item.passage.page_number}"
+        if item.passage.heading_path:
+            location += " — " + " > ".join(item.passage.heading_path)
+        lines.append(f"{location} (score {item.score:.3f})\n")
+        lines.append(item.passage.text + "\n")
+        for duplicate in item.duplicates:
+            if duplicate.page_number is not None:
+                where = f" (page {duplicate.page_number})"
+            elif duplicate.heading_path:
+                where = f" ({' > '.join(duplicate.heading_path)})"
+            else:
+                where = ""
+            lines.append(f"also in: {duplicate.path}{where}\n")
+        lines.append("\n")
+    return "".join(lines)
+
+
 def _plan_printer(plan: UpdatePlan) -> None:
     sys.stdout.write(_format_plan(plan))
     sys.stdout.flush()
@@ -569,21 +602,19 @@ def main(
                 )
             return 1 if summary.failed else 0
 
-        result = services.search.run(args.query, top_n=args.top_n)
+        if args.collapse_duplicates is None:
+            result = services.search.run(args.query, top_n=args.top_n)
+        else:
+            result = services.search.run(
+                args.query,
+                top_n=args.top_n,
+                collapse_duplicates=args.collapse_duplicates,
+            )
         response = SearchResponse.from_domain(result)
         if args.json:
             sys.stdout.write(response.model_dump_json() + "\n")
         else:
-            if response.hint:
-                sys.stdout.write(response.hint + "\n")
-            for item in response.results:
-                location = item.source.path
-                if item.passage.page_number is not None:
-                    location += f":{item.passage.page_number}"
-                if item.passage.heading_path:
-                    location += " — " + " > ".join(item.passage.heading_path)
-                sys.stdout.write(f"{location} (score {item.score:.3f})\n")
-                sys.stdout.write(item.passage.text + "\n\n")
+            sys.stdout.write(_format_search(response))
         return 0
     except DocgrepError as error:
         sys.stderr.write(_describe(error) + "\n")

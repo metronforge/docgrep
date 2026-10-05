@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from docgrep import __version__
 from docgrep.adapters.qdrant import local_passage_count, warn_if_local_mode_is_large
@@ -41,6 +41,8 @@ class SearchRequest(BaseModel):
 
     query: str
     top_n: int | None = None
+    # None applies the DOCGREP_COLLAPSE_DUPLICATES setting.
+    collapse_duplicates: bool | None = None
 
 
 class SourceResponse(BaseModel):
@@ -75,6 +77,28 @@ class PassageResponse(BaseModel):
     heading_path: tuple[str, ...]
 
 
+class DuplicateResponse(BaseModel):
+    """Where another copy of a collapsed passage's text was found."""
+
+    passage_id: str
+    source_id: str
+    path: str
+    file_type: FileType
+    page_number: int | None
+    heading_path: tuple[str, ...]
+
+    @classmethod
+    def from_domain(cls, item: RankedPassage) -> "DuplicateResponse":
+        return cls(
+            passage_id=item.passage.passage_id,
+            source_id=item.source.source_id,
+            path=item.source.path,
+            file_type=item.source.file_type,
+            page_number=item.passage.page_number,
+            heading_path=item.passage.heading_path,
+        )
+
+
 class RankedPassageResponse(BaseModel):
     """One passage with source metadata and retrieval scores."""
 
@@ -83,6 +107,10 @@ class RankedPassageResponse(BaseModel):
     score: float
     dense_score: float
     reranker_score: float | None
+    # Omitted when empty, so a response without duplicates keeps its old shape.
+    duplicates: tuple[DuplicateResponse, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
 
     @classmethod
     def from_domain(cls, item: RankedPassage) -> "RankedPassageResponse":
@@ -92,6 +120,10 @@ class RankedPassageResponse(BaseModel):
             score=item.score,
             dense_score=item.dense_score,
             reranker_score=item.reranker_score,
+            duplicates=tuple(
+                DuplicateResponse.from_domain(duplicate)
+                for duplicate in item.duplicates
+            ),
         )
 
 
@@ -105,6 +137,10 @@ class SearchResponse(BaseModel):
     rerank_skipped: bool
     rerank_skip_reason: str | None
     hint: str | None
+    # Omitted when collapsing is off, so the response keeps its old shape.
+    collapsed_duplicates: int | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @classmethod
     def from_domain(cls, result: SearchResult) -> "SearchResponse":
@@ -118,6 +154,7 @@ class SearchResponse(BaseModel):
             rerank_skipped=result.rerank_skipped,
             rerank_skip_reason=result.rerank_skip_reason,
             hint=result.hint,
+            collapsed_duplicates=result.collapsed_duplicates,
         )
 
 
@@ -303,7 +340,16 @@ def create_app(
 
     @app.post("/search", response_model=SearchResponse)
     def search(request: SearchRequest) -> SearchResponse:
-        result = operations().search.run(request.query, top_n=request.top_n)
+        search_operation = operations().search
+        # Pass the override only when given, as the CLI does.
+        if request.collapse_duplicates is None:
+            result = search_operation.run(request.query, top_n=request.top_n)
+        else:
+            result = search_operation.run(
+                request.query,
+                top_n=request.top_n,
+                collapse_duplicates=request.collapse_duplicates,
+            )
         return SearchResponse.from_domain(result)
 
     @app.post("/scans/discover")

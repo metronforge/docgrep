@@ -48,9 +48,15 @@ from docgrep.usecases.update_index import UpdateIndex, UpdatePlan, UpdateSummary
 
 
 class SearchOperation(Protocol):
-    """Run a search with an optional result limit."""
+    """Run a search with an optional result limit and duplicate handling."""
 
-    def run(self, query: str, *, top_n: int | None = None) -> SearchResult: ...
+    def run(
+        self,
+        query: str,
+        *,
+        top_n: int | None = None,
+        collapse_duplicates: bool | None = None,
+    ) -> SearchResult: ...
 
 
 class BuildOperation(Protocol):
@@ -312,6 +318,7 @@ def create_container(
             default_top_n=settings.top_n,
             top_n_max=settings.top_n_max,
             max_query_len=settings.max_query_len,
+            collapse_duplicates=settings.collapse_duplicates,
         ),
         build=BuildIndex(
             lock=lock,
