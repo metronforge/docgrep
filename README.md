@@ -420,10 +420,14 @@ uv run docgrep index
 
 Several corpora can share one server when each uses its own `DOCGREP_QDRANT_ALIAS` (default `docgrep`; letters, digits, `_` and `-`).
 
-With `DOCGREP_QDRANT_URL` set, nothing is stored in local mode, payload indexes take effect, and the CLI and the server can run at the same time. The data directory still holds the SQLite manifest. Tests that need a server are marked `qdrant_server` and run when `DOCGREP_TEST_QDRANT_URL` is set:
+With `DOCGREP_QDRANT_URL` set, nothing is stored in local mode, payload indexes take effect, and the CLI and the server can run at the same time. The data directory still holds the SQLite manifest. Tests that need a server are marked `qdrant_server` and run when `DOCGREP_TEST_QDRANT_URL` is set.
+
+**Warning: the server-mode tests create, replace and delete collections and aliases. Never point `DOCGREP_TEST_QDRANT_URL` at a server that holds a real index; give the tests a throwaway server of their own.** Before the first server-mode test runs, the suite lists the server and stops without deleting anything if it finds a collection or alias it does not own (this includes the default `docgrep` alias). Run them against a temporary container on another port and remove it afterwards:
 
 ```sh
-DOCGREP_TEST_QDRANT_URL=http://localhost:6333 uv run pytest -m qdrant_server
+docker run -d --rm --name docgrep-test-qdrant-$$ -p 127.0.0.1:6335:6333 qdrant/qdrant:v1.19.1
+DOCGREP_TEST_QDRANT_URL=http://localhost:6335 uv run pytest -m qdrant_server
+docker stop docgrep-test-qdrant-$$
 ```
 
 ## Tests

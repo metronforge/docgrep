@@ -12,6 +12,7 @@ from docgrep.adapters.parsers.page_policy import (
     GARBLED_DOCUMENT_SHARE,
     apply_page_policy,
 )
+from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import (
     GARBLED_TEXT_LAYER,
@@ -84,7 +85,12 @@ class PdfParser:
         except (OSError, RuntimeError, ValueError) as error:
             raise ParseError(
                 "PDF cannot be parsed",
-                details={"path": source.path, "reason": str(error)},
+                details={
+                    "path": source.path,
+                    "reason": scrub_tool_output(
+                        str(error), (self.corpus_root / source.path, self.corpus_root)
+                    ),
+                },
             ) from error
         garbled = quality.pages_garbled
         if quality.skip_reason == GARBLED_TEXT_LAYER:

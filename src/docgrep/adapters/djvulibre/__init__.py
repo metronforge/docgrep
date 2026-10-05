@@ -19,12 +19,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol
 
+from docgrep.adapters.tool_output import scrub_tool_output
+
 # Seconds one tool invocation may take before it is stopped.
 COMMAND_TIMEOUT_SECONDS = 300
 # Upper bound for the captured standard output of one invocation, like the
 # EPUB member cap.
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
-# Upper bound for captured standard error; only used in error details.
+# Upper bound for captured standard error; only used, scrubbed, in error messages.
 MAX_ERROR_BYTES = 64 * 1024
 _READ_BLOCK = 1024 * 1024
 
@@ -145,7 +147,11 @@ class DjvuError(Exception):
 
 
 def run_tool(runner: CommandRunner, args: Sequence[str]) -> bytes:
-    """Standard output of a successful call; every failure is a DjvuError."""
+    """Standard output of a successful call; every failure is a DjvuError.
+
+    The standard error of a failed call is scrubbed: the absolute paths among
+    the arguments become a placeholder and the text is shortened.
+    """
     try:
         result = runner.run(args)
     except ToolMissing as error:
@@ -161,7 +167,10 @@ def run_tool(runner: CommandRunner, args: Sequence[str]) -> bytes:
             OUTPUT_TOO_LARGE, f"{args[0]} wrote more than {MAX_OUTPUT_BYTES} bytes"
         ) from error
     if result.returncode != 0:
-        detail = " ".join(result.stderr.decode("utf-8", "replace").split())[:200]
+        detail = scrub_tool_output(
+            result.stderr.decode("utf-8", "replace"),
+            [arg for arg in args[1:] if Path(arg).is_absolute()],
+        )
         raise DjvuError(
             INVALID, f"{args[0]} exited with status {result.returncode}: {detail}"
         )

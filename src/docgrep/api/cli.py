@@ -1,7 +1,10 @@
 """Console transport for indexing, search, and the local HTTP server."""
 
 import argparse
+import errno
+import functools
 import json
+import os
 import signal
 import sys
 from collections.abc import Callable, Sequence
@@ -450,9 +453,67 @@ def _format_search(response: SearchResponse) -> str:
     return "".join(lines)
 
 
+def _is_closed_pipe(error: OSError) -> bool:
+    return isinstance(error, BrokenPipeError) or error.errno == errno.EPIPE
+
+
+def _discard_stdout() -> None:
+    """Send the rest of standard output, buffered or not, to the null device.
+
+    The reader has gone, so nothing more can be delivered; pointing the file
+    descriptor at the null device also keeps the final flush at interpreter
+    shutdown from failing again.
+    """
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        # Standard output without a file descriptor: replace it until exit.
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    finally:
+        os.close(devnull)
+
+
+def _emit(text: str) -> None:
+    """Write command output; if the reader closed the pipe, drop it silently.
+
+    A closed pipe never interrupts the running command: output that can no
+    longer be delivered is lost, and the command finishes and records its
+    result as it would have otherwise.
+    """
+    try:
+        sys.stdout.write(text)
+    except OSError as error:
+        if not _is_closed_pipe(error):
+            raise
+        _discard_stdout()
+
+
+def _flush_stdout() -> None:
+    try:
+        sys.stdout.flush()
+    except OSError as error:
+        if not _is_closed_pipe(error):
+            raise
+        _discard_stdout()
+
+
+def _tolerate_closed_stdout[**P](command: Callable[P, int]) -> Callable[P, int]:
+    """Flush command output at the end without failing on a closed pipe."""
+
+    @functools.wraps(command)
+    def run(*args: P.args, **kwargs: P.kwargs) -> int:
+        try:
+            return command(*args, **kwargs)
+        finally:
+            _flush_stdout()
+
+    return run
+
+
 def _plan_printer(plan: UpdatePlan) -> None:
-    sys.stdout.write(_format_plan(plan))
-    sys.stdout.flush()
+    _emit(_format_plan(plan))
+    _flush_stdout()
 
 
 def _warn_user(message: str) -> None:
@@ -465,6 +526,7 @@ def _describe(error: DocgrepError) -> str:
     return f"{text} (reason: {reason})" if reason else text
 
 
+@_tolerate_closed_stdout
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -500,9 +562,9 @@ def main(
                 offset=args.offset,
             )
             if args.json:
-                sys.stdout.write(json.dumps(report.as_dict(), indent=2) + "\n")
+                _emit(json.dumps(report.as_dict(), indent=2) + "\n")
             else:
-                sys.stdout.write(_format_dry_run(report.as_dict(with_files=False)))
+                _emit(_format_dry_run(report.as_dict(with_files=False)))
             return 0
 
         if args.command == "index" and args.no_retry_failed and not args.resume:
@@ -518,22 +580,22 @@ def main(
                 sys.stderr.write(_describe(error) + "\n")
                 return 2
             if args.json:
-                sys.stdout.write(json.dumps(discovery.as_dict(), indent=2) + "\n")
+                _emit(json.dumps(discovery.as_dict(), indent=2) + "\n")
             else:
-                sys.stdout.write(_format_discover_scans(discovery.as_dict()))
+                _emit(_format_discover_scans(discovery.as_dict()))
             return 0
 
         if args.command == "status":
             status_report = status_factory(settings).run().as_dict()
             if args.json:
-                sys.stdout.write(json.dumps(status_report, indent=2) + "\n")
+                _emit(json.dumps(status_report, indent=2) + "\n")
             else:
-                sys.stdout.write(_format_status(status_report))
+                _emit(_format_status(status_report))
             return 0
 
         if args.command == "cancel":
             text, status = _format_cancel(cancel_factory(settings).run())
-            sys.stdout.write(text)
+            _emit(text)
             return status
 
         services = container_factory(settings)
@@ -551,7 +613,7 @@ def main(
                 outcome = update.run(
                     retry_failed=not args.no_retry_failed, on_plan=_plan_printer
                 )
-            sys.stdout.write(_format_update(outcome))
+            _emit(_format_update(outcome))
             if outcome.cancelled:
                 return 2
             return 1 if outcome.failed else 0
@@ -569,7 +631,7 @@ def main(
                 else:
                     summary = services.build.run(refuse_resumable=not args.restart)
             if summary.cancelled:
-                sys.stdout.write(
+                _emit(
                     f"Build {summary.run_id} cancelled: {summary.indexed} indexed, "
                     f"{summary.skipped} skipped, {summary.failed} failed "
                     f"in {summary.elapsed_seconds:.2f}s. The live index is "
@@ -578,28 +640,26 @@ def main(
                 )
                 return 2
             if summary.recovered:
-                sys.stdout.write(
+                _emit(
                     f"Run {summary.run_id} had published its index but not "
                     f"committed its sources; finished it: {summary.indexed} "
                     f"indexed, {summary.skipped} skipped, {summary.failed} failed.\n"
                 )
                 return 1 if summary.failed else 0
             if summary.resumed_from is not None:
-                sys.stdout.write(
+                _emit(
                     f"Resumed run {summary.resumed_from} as run {summary.run_id}: "
                     f"{summary.carried_over} sources carried over, "
                     f"{summary.processed} processed ({summary.retried} retried), "
                     f"{summary.removed} removed.\n"
                 )
-            sys.stdout.write(
+            _emit(
                 f"Build {summary.run_id}: {summary.indexed} indexed, "
                 f"{summary.skipped} skipped, {summary.failed} failed "
                 f"in {summary.elapsed_seconds:.2f}s\n"
             )
             for failure in summary.failures:
-                sys.stdout.write(
-                    f"  {failure.path}: {failure.reason}: {failure.message}\n"
-                )
+                _emit(f"  {failure.path}: {failure.reason}: {failure.message}\n")
             return 1 if summary.failed else 0
 
         if args.collapse_duplicates is None:
@@ -612,9 +672,9 @@ def main(
             )
         response = SearchResponse.from_domain(result)
         if args.json:
-            sys.stdout.write(response.model_dump_json() + "\n")
+            _emit(response.model_dump_json() + "\n")
         else:
-            sys.stdout.write(_format_search(response))
+            _emit(_format_search(response))
         return 0
     except DocgrepError as error:
         sys.stderr.write(_describe(error) + "\n")
