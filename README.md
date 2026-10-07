@@ -170,7 +170,12 @@ uv run docgrep discover-scans --file-type pdf          # PDFs only (djvu for DjV
 uv run docgrep discover-scans --file-type djvu --json  # machine-readable report
 ```
 
-Files classified `scanned` have no usable text layer and need OCR (reason `low_text_density`, or `garbled_text_layer` when the layer is broken); `mixed_or_uncertain` files are worth a look by hand; `inspection_failed` files could not be read, and their reason says why (for example `djvu_tools_missing`). Native files are only counted. OCR itself is not part of this release. See [Scan discovery](#scan-discovery) for the thresholds and the JSON keys.
+Files classified `scanned` have no usable text layer and need OCR (reason `low_text_density`, or `garbled_text_layer` when the layer is broken); `mixed_or_uncertain` files are worth a look by hand; `inspection_failed` files could not be read, and their reason says why (for example `djvu_tools_missing`). Native files are only counted. See [Scan discovery](#scan-discovery) for the thresholds and the JSON keys, and [OCR](#ocr) to make these files searchable:
+
+```sh
+uv run docgrep ocr --all-discovered --plan   # what an OCR batch would do
+uv run docgrep ocr --all-discovered          # run it, then: uv run docgrep update
+```
 
 ### Troubleshooting
 
@@ -206,7 +211,7 @@ Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOC
 
 ## Exit codes
 
-`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
+`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). `docgrep ocr` differs: 0 when no file failed, 1 when a file failed or the batch was cancelled or aborted, 2 for usage errors (see [OCR](#ocr)). Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
 
 ## Logging
 
@@ -359,6 +364,80 @@ The JSON report has these keys (`schema_version` is 1):
 - `totals` and `by_file_type` (per requested type): `inspected`, `native`, `scanned`, `uncertain` and `inspection_failed`.
 - `include_already_processed` (whether `--include-processed`, or the HTTP field of the same name, was given) and `already_processed`: the number of originals left out because a live OCR output stands in for them. Without the option, OCR outputs and such originals are neither listed nor counted in `totals`.
 
+## OCR
+
+`docgrep ocr` makes the files that scan discovery lists searchable: scanned PDFs and DjVu files without a text layer, and PDFs whose text layer is garbage. It runs the system `ocrmypdf` command (with Tesseract) on each file and writes a new, searchable PDF next to the original; the original is never changed. Nothing is indexed by the command itself: run `docgrep update` afterwards. The design is recorded in [ADR-0017](docs/adr/0017-ocr-via-ocrmypdf-with-registry-and-delegation.md).
+
+Install the tools from the distribution (Debian; `djvulibre-bin` as well for DjVu files):
+
+```sh
+sudo apt install ocrmypdf tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus tesseract-ocr-ukr
+```
+
+Without them the command stops before any work with `ocr_tools_missing` and that install command; a requested language that Tesseract lacks is reported the same way, naming the language.
+
+### Workflow
+
+```sh
+uv run docgrep discover-scans                          # which files need OCR
+uv run docgrep ocr --all-discovered --plan             # the work plan, without OCR and without the lock
+uv run docgrep ocr 'books/one scan.pdf' books/old.djvu # a trial on one or two files
+uv run docgrep ocr --all-discovered                    # the full batch
+uv run docgrep update                                  # index the outputs
+```
+
+Name the files with exactly one of:
+
+- explicit paths, relative to the corpus root or absolute. Every path must be an existing `.pdf`, `.djvu` or `.djv` file inside the corpus root; a path outside it, or a file of another type, rejects the whole request (exit status 2);
+- `--path-glob PATTERN` (the glob rules of the include patterns); matching files of other types are left out and counted as `filtered`;
+- `--all-discovered`: every file scan discovery classifies as `scanned`; add `--include-uncertain` for the `mixed_or_uncertain` ones too.
+
+Options: `--languages rus+eng` (default `DOCGREP_OCR_LANGUAGES`), `--force` to process files that are already processed again (for example with other languages), `--plan` to print the plan and exit (status 0; it checks the tools but takes no lock and writes nothing), `--override-native` (explicit paths only) to process a file classified as native, for a text layer that is wrong although it looks fine, and `--json` for a machine-readable report at the end instead of the text output.
+
+### What happens to each file
+
+The plan checks every file, in this order: a file whose content is already registered with an existing output, and every OCR output itself, is `skipped:already_processed` (unless `--force`; outputs are never processed again); a file classified as native is `skipped:does_not_need_ocr` (unless `--override-native`); an encrypted file is `failed:encrypted`; a file that cannot be read is `failed:unreadable` (or `failed:djvu_tools_missing` for DjVu without the djvulibre tools). The rest is processed, sorted by file type and path:
+
+1. A DjVu file is converted into a temporary PDF of page images with `ddjvu -format=pdf`.
+2. `ocrmypdf` runs with the languages, `--output-type pdf --rotate-pages --deskew --optimize 1`, `--jobs N` when `DOCGREP_OCR_JOBS` is set, and one of two modes: `--skip-text` (keep pages that have text, recognise the others) for files without text or with too little, and `--force-ocr` (discard every page's text and recognise it again from the page image) for a garbled text layer and for `--override-native`.
+3. The result, written to a hidden `.<name>.docgrep-ocr-<random>.part` file in the same directory, must open with the input's page count; it is then renamed to `<stem>.ocr.pdf` next to the original (`books/scan.pdf` gives `books/scan.ocr.pdf`, `books/book.djvu` gives `books/book.ocr.pdf`). An existing file of that name that is not this original's earlier output is never overwritten.
+4. The output is registered in the manifest database together with a delegation: the original is from now on represented by its output. `docgrep update` then indexes the output as an added PDF, records the original as skipped with the reason `delegated_to_ocr` and removes the passages it had.
+
+Failures stay per file: `failed:djvu_conversion`, `failed:ocr_engine_error` (with a short message), `failed:timeout`, `failed:output_invalid`, `failed:output_collision` and `failed:registry_write` (the output is left on disk but not registered, so the next run processes the file again). Before each file at least three times its size must be free in its directory; otherwise, or when the engine reports a full disk, the file is `failed:disk_full` and the rest of the batch is aborted. Files completed before stay valid.
+
+To revert a file, delete its `.ocr.pdf`: the delegation ends, and the next `docgrep update` removes the output's passages and indexes the original again. Changing the original ends the delegation too.
+
+### Output, progress and time
+
+The plan is printed first (counts to process, to skip and to fail by reason and file type, total input size and pages), then one line per finished file and a summary:
+
+```text
+[1/3] processed book.djvu, 1 pages, 2s, ETA 6m 30s
+[2/3] processed garbled.pdf, 1 pages, 8s, ETA 10s
+[3/3] processed latin.pdf, 1 pages, 2s, ETA 0s
+OCR run 1 completed in 13s: 3 processed, 0 skipped, 0 failed, 0 cancelled, 0 not started.
+Run `docgrep update` so that the OCR outputs are indexed.
+```
+
+This is a run on three generated one-page files. The ETA extrapolates the input bytes processed so far, so it is rough while few files are done (above, a small DjVu file was followed by two larger PDFs). OCR takes several seconds per page on one core, so a batch of books can take hours; `DOCGREP_OCR_JOBS` lets ocrmypdf use more cores. The log gets INFO records `ocr_plan`, `ocr_file_started` (path, size, pages, mode) and `ocr_file_finished` (status, elapsed), and the tools' own output at DEBUG.
+
+### Cancel and resume
+
+Ctrl-C, SIGTERM or `docgrep cancel` from another shell stop the batch. With `DOCGREP_OCR_CANCEL_MODE=terminate` (the default) the running OCR is stopped (SIGTERM to its process group, SIGKILL after 10 seconds), its temporary files are removed and the file is reported `cancelled`; with `finish` the current file completes first. Completed files stay registered. There is no separate resume: run the same command again, and every completed file is skipped as `already_processed`. While a batch runs, `docgrep status` shows it as an active operation of kind `ocr`, and it holds the index lock, so builds and updates wait for it.
+
+### Settings
+
+- `DOCGREP_OCR_LANGUAGES`: Tesseract languages joined with `+`, default `rus+eng+ukr`.
+- `DOCGREP_OCR_TIMEOUT_SECONDS`: time limit per file (DjVu conversion and OCR together), default 0 for no limit; a file over the limit is `failed:timeout`.
+- `DOCGREP_OCR_JOBS`: passed to `ocrmypdf --jobs`; unset leaves ocrmypdf's default (all cores).
+- `DOCGREP_OCR_CANCEL_MODE`: `terminate` (default) or `finish`.
+
+### JSON
+
+`docgrep ocr --plan --json` prints the plan (`schema_version` 1): `languages`, `force`, `filtered`, `to_process`, `to_skip` and `to_fail` (counts by reason), `by_file_type` (per `pdf` and `djvu`: `to_process`, `to_skip`, `to_fail`), `input_bytes`, `pages` and `pages_unknown` (files to process whose page count is not known), and `files`, each with `path`, `file_type`, `size_bytes`, `page_count`, `classification` and `reason` (from scan discovery), `mode` (`skip-text` or `force-ocr`, null when not processed) and `status` (`to_process`, `skipped:<reason>` or `failed:<reason>`).
+
+`docgrep ocr --json` prints the final report (`schema_version` 1): `run_id`, `status` (`completed`, `cancelled` or `aborted`), `abort_reason` (`disk_full` or null), `plan` (the plan above without `files`), `totals` (`processed`, `skipped`, `failed`, `cancelled`, `not_started`), `skipped_by_reason`, `failed_by_reason`, `elapsed_seconds`, `files` (the plan's file keys with the final `status`, plus `output_path`, `message` and `elapsed_seconds`) and `hint`, the reminder to run `docgrep update`.
+
 ## Search
 
 ```sh
@@ -403,7 +482,7 @@ curl -X POST http://127.0.0.1:8000/search \
 
 The body of `POST /search` takes `query`, an optional `top_n` and an optional `collapse_duplicates` (see [Duplicate passages](#duplicate-passages)).
 
-`POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `GET /health` and `GET /info` provide basic service information.
+`POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information.
 
 When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
 

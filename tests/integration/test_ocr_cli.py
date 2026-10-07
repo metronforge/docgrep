@@ -354,3 +354,47 @@ def test_real_ocr_reads_cyrillic(
     _real(root, monkeypatch, "letter.pdf")
 
     assert "маяк" in pdf_text(root / "letter.ocr.pdf").lower()
+
+
+def _keys(value: object, found: set[str] | None = None) -> set[str]:
+    found = set() if found is None else found
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            found.add(key)
+            _keys(inner, found)
+    elif isinstance(value, list):
+        for inner in value:
+            _keys(inner, found)
+    return found
+
+
+def test_every_json_key_and_status_is_documented_in_the_readme(corpus: Path) -> None:
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text("utf-8")
+    plan = json.loads(_cli("--path-glob", "books/*", "--plan", "--json")[1])
+    (corpus / "books" / "scan.ocr.pdf").write_bytes(b"in the way")
+    report = json.loads(_cli("--path-glob", "books/*", "--json")[1])
+
+    keys = _keys(plan) | _keys(report)
+    keys -= {"pdf", "djvu"} | set(plan["to_skip"]) | set(report["failed_by_reason"])
+    assert {key for key in keys if f"`{key}`" not in readme} == set()
+    statuses = {f["status"] for f in report["files"]} | {report["status"]}
+    assert statuses == {
+        "completed",
+        "processed",
+        "skipped:does_not_need_ocr",
+        "failed:output_collision",
+        # The file planted in the way matches the glob and is no PDF.
+        "failed:unreadable",
+    }
+    assert {s for s in statuses if f"`{s}`" not in readme} == set()
+    for flag in (
+        "--path-glob",
+        "--all-discovered",
+        "--include-uncertain",
+        "--languages",
+        "--force",
+        "--plan",
+        "--override-native",
+        "--json",
+    ):
+        assert flag in readme
