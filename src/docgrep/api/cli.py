@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import sys
+from collections import Counter
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -18,7 +19,9 @@ from docgrep.api.container import (
     create_container,
     create_discover_scans,
     create_dry_run,
+    create_process_scans,
     create_status,
+    open_ocr_registry_view,
 )
 from docgrep.api.http import SearchResponse, create_app
 from docgrep.api.log_config import configure_logging
@@ -29,6 +32,14 @@ from docgrep.usecases.cancel_index import CancelIndex, CancelResult
 from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DEFAULT_LIMIT, DryRun
 from docgrep.usecases.inspect_status import InspectStatus
+from docgrep.usecases.process_scans import (
+    UPDATE_HINT,
+    OcrFileResult,
+    OcrPlan,
+    OcrRequest,
+    OcrSummary,
+    ProcessScans,
+)
 from docgrep.usecases.update_index import UpdatePlan, UpdateSummary
 
 
@@ -97,7 +108,48 @@ def _parser() -> argparse.ArgumentParser:
         choices=["pdf", "djvu"],
         help="Restrict to a file type; repeat for both (default: both)",
     )
+    discover.add_argument(
+        "--include-processed",
+        action="store_true",
+        help="Also list files already processed through OCR, and their outputs",
+    )
     discover.add_argument("--json", action="store_true")
+    ocr = commands.add_parser(
+        "ocr",
+        help="Make scanned PDF and DjVu files searchable through OCR",
+        description="Name the files with exactly one of: paths (relative to "
+        "the corpus root, or absolute), --path-glob or --all-discovered.",
+    )
+    ocr.add_argument("paths", nargs="*", help="PDF or DjVu files to process")
+    ocr.add_argument("--path-glob", dest="path_glob")
+    ocr.add_argument(
+        "--all-discovered",
+        action="store_true",
+        help="Process every file scan discovery classifies as scanned",
+    )
+    ocr.add_argument(
+        "--include-uncertain",
+        action="store_true",
+        help="With --all-discovered: also process mixed_or_uncertain files",
+    )
+    ocr.add_argument(
+        "--languages", help="Tesseract languages joined with + (rus+eng+ukr)"
+    )
+    ocr.add_argument(
+        "--force", action="store_true", help="Process files already processed again"
+    )
+    ocr.add_argument(
+        "--plan",
+        action="store_true",
+        help="Print the work plan and exit without OCR and without the lock",
+    )
+    ocr.add_argument(
+        "--override-native",
+        action="store_true",
+        help="With explicit paths: also process files classified as native, "
+        "rebuilding their text layer",
+    )
+    ocr.add_argument("--json", action="store_true")
     commands.add_parser(
         "cancel", help="Ask a running index build to stop after its current batch"
     )
@@ -237,6 +289,11 @@ def _format_discover_scans(report: dict[str, Any]) -> str:
             + ("  large file" if entry["large_file"] else "")
             + (f"  ({entry['hint']})" if entry["hint"] else "")
         )
+    if report["already_processed"]:
+        lines.append(
+            f"Already processed through OCR (not listed): "
+            f"{report['already_processed']}; use --include-processed to list them"
+        )
     for label, counts in [("Total", report["totals"])] + [
         (name, counts) for name, counts in report["by_file_type"].items()
     ]:
@@ -245,6 +302,95 @@ def _format_discover_scans(report: dict[str, Any]) -> str:
             f"{counts['scanned']} scanned, {counts['uncertain']} uncertain, "
             f"{counts['inspection_failed']} inspection failed"
         )
+    return "\n".join(lines) + "\n"
+
+
+def _counts(counts: dict[str, int]) -> str:
+    return ", ".join(f"{name} {count}" for name, count in counts.items())
+
+
+def _format_ocr_plan(plan: OcrPlan) -> str:
+    """The work plan as text: counts first, then one line per file."""
+    report = plan.as_dict()
+    work = plan.to_process
+    types = Counter(t.file_type.value for t in work)
+    skipped = sum(report["to_skip"].values())
+    failing = sum(report["to_fail"].values())
+    lines = [
+        f"OCR plan (languages {plan.languages}"
+        + (", force" if plan.force else "")
+        + f"): {report['to_process']} to process"
+        + (f" ({_counts(dict(sorted(types.items())))})" if work else "")
+        + f", {skipped} to skip"
+        + (f" ({_counts(report['to_skip'])})" if skipped else "")
+        + f", {failing} to fail"
+        + (f" ({_counts(report['to_fail'])})" if failing else ""),
+        f"Input: {_size(report['input_bytes'])}, {report['pages']} pages"
+        + (
+            f" ({report['pages_unknown']} files with an unknown page count)"
+            if report["pages_unknown"]
+            else ""
+        )
+        + (
+            f"; {report['filtered']} matched files are not PDF or DjVu"
+            if report["filtered"]
+            else ""
+        ),
+    ]
+    for target in plan.targets:
+        pages = target.page_count if target.page_count is not None else "?"
+        lines.append(
+            f"  {target.status}  {target.path}  {target.file_type.value}"
+            f"  {pages} pages  {_size(target.size)}"
+            + (f"  {target.mode}" if target.mode else "")
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _format_ocr_file(result: OcrFileResult) -> str:
+    pages = result.target.page_count if result.target.page_count is not None else "?"
+    return (
+        f"[{result.index}/{result.total}] {result.status} {result.target.path}, "
+        f"{pages} pages, {_duration(result.elapsed_seconds)}, ETA "
+        f"{_duration(result.eta_seconds)}"
+        + (f": {result.message}" if result.message else "")
+        + "\n"
+    )
+
+
+def _format_ocr_summary(summary: OcrSummary) -> str:
+    report = summary.as_dict()
+    totals = report["totals"]
+    status = summary.status + (
+        f" ({summary.abort_reason})" if summary.abort_reason else ""
+    )
+    lines = [
+        f"OCR run {summary.run_id} {status} in {_duration(summary.elapsed_seconds)}: "
+        f"{totals['processed']} processed, {totals['skipped']} skipped"
+        + (
+            f" ({_counts(report['skipped_by_reason'])})"
+            if report["skipped_by_reason"]
+            else ""
+        )
+        + f", {totals['failed']} failed"
+        + (
+            f" ({_counts(report['failed_by_reason'])})"
+            if report["failed_by_reason"]
+            else ""
+        )
+        + f", {totals['cancelled']} cancelled, {totals['not_started']} not started."
+    ]
+    lines.extend(
+        f"  {entry['path']}: {entry['status']}"
+        + (f": {entry['message']}" if entry["message"] else "")
+        for entry in report["files"]
+        if entry["status"].startswith("failed:")
+    )
+    if summary.status == "cancelled":
+        lines.append(
+            "Completed files stay registered; run the same command again to continue."
+        )
+    lines.append(UPDATE_HINT)
     return "\n".join(lines) + "\n"
 
 
@@ -260,6 +406,13 @@ def _format_cancel(result: CancelResult) -> tuple[str, int]:
         return (
             f"Cancel was already requested for run {result.run_id} at "
             f"{result.requested_at}: the operation is stopping.\n",
+            0,
+        )
+    if result.outcome == "interrupted" and result.kind == "ocr":
+        return (
+            f"OCR run {result.run_id} was interrupted: its process is gone and "
+            "nothing holds the index lock. Completed files stay registered; run "
+            "`docgrep ocr` again to continue.\n",
             0,
         )
     if result.outcome == "interrupted" and result.kind == "update":
@@ -314,6 +467,22 @@ def _format_status(report: dict[str, Any]) -> str:
     run = report["latest_run"]
     if run is None:
         lines.append("Latest run: none")
+    elif run["kind"] == "ocr":
+        totals = run["totals"]
+        lines.append(
+            f"Latest run: {run['run_id']} (ocr) {run['state']}, started "
+            f"{run['started_at']}, finished {run['finished_at'] or '-'}, "
+            + ", ".join(
+                f"{totals.get(key, 0)} {key.replace('_', ' ')}"
+                for key in (
+                    "processed",
+                    "skipped",
+                    "failed",
+                    "cancelled",
+                    "not_started",
+                )
+            )
+        )
     elif run["kind"] == "update":
         totals = run["totals"]
         lines.append(
@@ -403,7 +572,19 @@ def _format_plan(plan: UpdatePlan) -> str:
         f"{plan.unchanged} unchanged.\n"
         f"Modified by reason: {plan.newly_supported} newly supported, "
         f"{plan.content_changed} content changed, "
-        f"{plan.parser_changed} parser changed, {plan.retried} retried.\n"
+        f"{plan.parser_changed} parser changed, {plan.retried} retried"
+        # The OCR reasons are shown when they occur.
+        + (
+            f", {plan.delegated_to_ocr} delegated to OCR"
+            if plan.delegated_to_ocr
+            else ""
+        )
+        + (
+            f", {plan.delegation_ended} OCR delegation ended"
+            if plan.delegation_ended
+            else ""
+        )
+        + ".\n"
     )
 
 
@@ -526,6 +707,61 @@ def _describe(error: DocgrepError) -> str:
     return f"{text} (reason: {reason})" if reason else text
 
 
+def _ocr(args: argparse.Namespace, ocr: ProcessScans, register: Register) -> int:
+    """Run ``docgrep ocr``: 0 when nothing failed, 1 when a file failed or the
+    run was cancelled or aborted, 2 for usage errors."""
+    request = OcrRequest(
+        paths=tuple(args.paths),
+        path_glob=args.path_glob,
+        all_discovered=args.all_discovered,
+        include_uncertain=args.include_uncertain,
+        languages=args.languages,
+        force=args.force,
+        override_native=args.override_native,
+    )
+    try:
+        if args.plan:
+            plan = ocr.plan(request)
+            if args.json:
+                _emit(json.dumps(plan.as_dict(), indent=2) + "\n")
+            else:
+                _emit(_format_ocr_plan(plan))
+            return 0
+
+        def show_plan(plan: OcrPlan) -> None:
+            if not args.json:
+                _emit(_format_ocr_plan(plan))
+                _flush_stdout()
+
+        def show_file(result: OcrFileResult) -> None:
+            if not args.json:
+                _emit(_format_ocr_file(result))
+                _flush_stdout()
+
+        terminate = ocr.cancel_mode == "terminate"
+        with graceful_cancel(
+            ocr.request_cancel,
+            _warn_user,
+            register=register,
+            notice="Cancel requested: "
+            + (
+                "the running OCR is stopped and the batch ends."
+                if terminate
+                else "the batch ends when the current file is done."
+            )
+            + " Press Ctrl-C again to stop immediately.",
+        ):
+            summary = ocr.run(request, on_plan=show_plan, on_file=show_file)
+    except ValidationError as error:
+        sys.stderr.write(_describe(error) + "\n")
+        return 2
+    if args.json:
+        _emit(json.dumps(summary.as_dict(), indent=2) + "\n")
+    else:
+        _emit(_format_ocr_summary(summary))
+    return 0 if summary.status == "completed" and not summary.failed else 1
+
+
 @_tolerate_closed_stdout
 def main(
     argv: Sequence[str] | None = None,
@@ -535,6 +771,7 @@ def main(
     discover_factory: Callable[[Settings], DiscoverScans] = create_discover_scans,
     cancel_factory: Callable[[Settings], CancelIndex] = create_cancel,
     status_factory: Callable[[Settings], InspectStatus] = create_status,
+    ocr_factory: Callable[[Settings], ProcessScans] = create_process_scans,
     register_signal: Register = signal.signal,
 ) -> int:
     """Run one CLI command and return a process exit status.
@@ -574,7 +811,10 @@ def main(
         if args.command == "discover-scans":
             try:
                 discovery = discover_factory(settings).run(
-                    path_glob=args.path_glob, file_types=args.file_types
+                    path_glob=args.path_glob,
+                    file_types=args.file_types,
+                    include_already_processed=args.include_processed,
+                    registry=open_ocr_registry_view(settings),
                 )
             except ValidationError as error:
                 sys.stderr.write(_describe(error) + "\n")
@@ -584,6 +824,9 @@ def main(
             else:
                 _emit(_format_discover_scans(discovery.as_dict()))
             return 0
+
+        if args.command == "ocr":
+            return _ocr(args, ocr_factory(settings), register_signal)
 
         if args.command == "status":
             status_report = status_factory(settings).run().as_dict()
@@ -681,8 +924,9 @@ def main(
         return 1
     except SettingsValidationError as error:
         sys.stderr.write(f"invalid_settings: {error}\n")
-        # Scan discovery reports configuration errors with 2, like usage errors.
-        return 2 if args.command == "discover-scans" else 1
+        # Scan discovery and OCR report configuration errors with 2, like
+        # usage errors.
+        return 2 if args.command in ("discover-scans", "ocr") else 1
     except OSError as error:
         sys.stderr.write(f"io_error: {error}\n")
         return 1

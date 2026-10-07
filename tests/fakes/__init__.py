@@ -1,14 +1,21 @@
 """In-memory implementations of persistence and retrieval boundaries."""
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Literal
 
-from docgrep.domain.errors import StagingInconsistent, StoreUnavailable, ValidationError
+from docgrep.domain.errors import (
+    ManifestUnavailable,
+    StagingInconsistent,
+    StoreUnavailable,
+    ValidationError,
+)
 from docgrep.domain.models import (
     ManifestRunRecord,
     ManifestSourceRecord,
+    OcrDelegation,
+    OcrRecord,
     Passage,
     RetrievalCandidate,
     Source,
@@ -354,4 +361,63 @@ class InMemoryManifest:
             raise ValueError("invalid run status")
         self._runs[-1] = replace(
             self._runs[-1], status=status, totals=tuple(sorted(totals.items()))
+        )
+
+
+class InMemoryOcrRegistry:
+    """The OCR registry and delegations, with liveness read from callables.
+
+    ``exists`` says whether a corpus file exists and ``content_hash`` gives a
+    file's current content hash; by default every registered output exists
+    and an original's content never changes.
+    """
+
+    def __init__(
+        self,
+        *,
+        exists: Callable[[str], bool] | None = None,
+        content_hash: Callable[[str], str | None] | None = None,
+    ) -> None:
+        self.records: dict[str, OcrRecord] = {}
+        self.delegations: dict[str, OcrDelegation] = {}
+        self.exists = exists or (lambda path: True)
+        self.content_hash = content_hash
+        self.fail_writes = False
+
+    def find_by_input_hash(self, content_hash: str) -> OcrRecord | None:
+        for path in sorted(self.records):
+            record = self.records[path]
+            if record.input_hash == content_hash and self.exists(record.output_path):
+                return record
+        return None
+
+    def output_owner(self, output_path: str) -> str | None:
+        if not self.exists(output_path):
+            return None
+        owners = sorted(
+            r.input_path for r in self.records.values() if r.output_path == output_path
+        )
+        return owners[0] if owners else None
+
+    def live_delegation(
+        self, path: str, content_hash: str | None = None
+    ) -> OcrDelegation | None:
+        delegation = self.delegations.get(path)
+        if delegation is None or not self.exists(delegation.output_path):
+            return None
+        if content_hash is None:
+            content_hash = (
+                delegation.input_hash
+                if self.content_hash is None
+                else self.content_hash(path)
+            )
+        return delegation if content_hash == delegation.input_hash else None
+
+    def register(self, record: OcrRecord) -> None:
+        if self.fail_writes:
+            raise ManifestUnavailable("OCR registry write failed")
+        stamp = record.created_at or datetime.now(UTC).isoformat()
+        self.records[record.input_path] = replace(record, created_at=stamp)
+        self.delegations[record.input_path] = OcrDelegation(
+            record.input_path, record.input_hash, record.output_path, stamp
         )

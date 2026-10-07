@@ -13,7 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from docgrep import __version__
 from docgrep.adapters.qdrant import local_passage_count, warn_if_local_mode_is_large
-from docgrep.api.container import Services, create_container, create_discover_scans
+from docgrep.api.container import (
+    Services,
+    create_container,
+    create_discover_scans,
+    create_process_scans,
+    open_ocr_registry_view,
+)
 from docgrep.api.log_config import (
     configure_logging,
     log_server_start,
@@ -26,6 +32,7 @@ from docgrep.domain.errors import (
     IndexLockHeld,
     ManifestUnavailable,
     ModelUnavailable,
+    OcrToolsMissing,
     ParseError,
     ResumeAvailable,
     StoreUnavailable,
@@ -34,6 +41,7 @@ from docgrep.domain.errors import (
 from docgrep.domain.models import FileType, RankedPassage, SearchResult
 from docgrep.settings import Settings
 from docgrep.usecases.build_index import BuildSummary
+from docgrep.usecases.process_scans import OcrRequest
 
 
 class SearchRequest(BaseModel):
@@ -173,6 +181,18 @@ class DiscoverScansRequest(BaseModel):
 
     path_glob: str | None = None
     file_types: list[Literal["pdf", "djvu"]] | None = None
+    include_already_processed: bool = False
+
+
+class ProcessScansRequest(BaseModel):
+    """The files to process through OCR (exactly one of paths, path_glob and
+    all_discovered) and the options of the batch."""
+
+    paths: list[str] | None = None
+    path_glob: str | None = None
+    all_discovered: bool = False
+    languages: str | None = None
+    force: bool = False
 
 
 class BuildRequest(BaseModel):
@@ -212,7 +232,10 @@ def _error_status(error: DocgrepError) -> int:
         error, (IndexLockHeld, ConfigDrift, IndexIncomplete, ResumeAvailable)
     ):
         return 409
-    if isinstance(error, (ModelUnavailable, StoreUnavailable, ManifestUnavailable)):
+    if isinstance(
+        error,
+        (ModelUnavailable, StoreUnavailable, ManifestUnavailable, OcrToolsMissing),
+    ):
         return 503
     return 500
 
@@ -357,7 +380,25 @@ def create_app(
         """Read-only (UC-5): the same report as `docgrep discover-scans --json`."""
         body = request or DiscoverScansRequest()
         report = create_discover_scans(effective).run(
-            path_glob=body.path_glob, file_types=body.file_types
+            path_glob=body.path_glob,
+            file_types=body.file_types,
+            include_already_processed=body.include_already_processed,
+            registry=open_ocr_registry_view(effective),
+        )
+        return report.as_dict()
+
+    @app.post("/scans/process")
+    def process_scans(request: ProcessScansRequest) -> dict[str, Any]:
+        """OCR (UC-6), synchronous like a build: the same report as
+        `docgrep ocr --json`. `docgrep cancel` stops it."""
+        report = create_process_scans(effective).run(
+            OcrRequest(
+                paths=tuple(request.paths or ()),
+                path_glob=request.path_glob,
+                all_discovered=request.all_discovered,
+                languages=request.languages,
+                force=request.force,
+            )
         )
         return report.as_dict()
 

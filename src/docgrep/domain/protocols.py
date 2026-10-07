@@ -1,6 +1,6 @@
 """Ports implemented by adapters at the domain boundary."""
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager
 from typing import Literal, Protocol
 
@@ -8,6 +8,9 @@ from docgrep.domain.models import (
     FileType,
     ManifestRunRecord,
     ManifestSourceRecord,
+    OcrDelegation,
+    OcrMode,
+    OcrRecord,
     ParsedDocument,
     Passage,
     RankedPassage,
@@ -66,11 +69,13 @@ def parser_reprocess_reason(
     registered any more. A missing or empty version, recorded or declared,
     counts as version "1" (``effective_parser_version``), so sources recorded
     before versions existed are not reprocessed for that alone. Failed sources
-    are left to the retry rule.
+    are left to the retry rule, sources delegated to an OCR'd sibling to the
+    delegation rule.
     """
     if status == "skipped:unsupported":
         return "newly_supported" if registered else None
-    if status.startswith("failed:"):
+    if status.startswith("failed:") or status == "skipped:delegated_to_ocr":
+        # Delegated sources follow their delegation, not their parser.
         return None
     if not registered:
         return "parser_changed"
@@ -432,6 +437,148 @@ class ManifestWriter(Protocol):
 
 class Manifest(ManifestReader, ManifestWriter, Protocol):
     """Both sides of the manifest, for operations that read what they wrote."""
+
+
+class OcrDelegations(Protocol):
+    """Which originals are indexed through their OCR'd sibling.
+
+    A delegation is live while its output file exists and the original's
+    content hash equals the recorded one. Reads take no lock and never raise:
+    a missing or unreadable database reads as no delegation.
+    """
+
+    def live_delegation(
+        self, path: str, content_hash: str | None = None
+    ) -> OcrDelegation | None:
+        """The live delegation of the original at ``path``, or None.
+
+        ``content_hash`` is the original's current content hash when the
+        caller knows it; otherwise it is computed, and only when a delegation
+        is recorded for the path.
+        """
+        ...
+
+
+class OcrRegistryReader(OcrDelegations, Protocol):
+    """Read the OCR registry; the same read rules as ``OcrDelegations``.
+
+    A registry entry is live while its output file exists.
+    """
+
+    def find_by_input_hash(self, content_hash: str) -> OcrRecord | None:
+        """A live entry for an input with this content, or None; the first by
+        input path when several inputs have the same content."""
+        ...
+
+    def output_owner(self, output_path: str) -> str | None:
+        """The input path of the live entry whose output is ``output_path``."""
+        ...
+
+
+class OcrRegistry(OcrRegistryReader, Protocol):
+    """The OCR registry with its single write."""
+
+    def register(self, record: OcrRecord) -> None:
+        """Record a processed file and delegate its original to the output, in
+        one transaction.
+
+        Replaces the entry and the delegation recorded for the same input
+        path, so registering again (``--force``) never duplicates a row.
+        Raises ``ManifestUnavailable`` when the database cannot be written.
+        """
+        ...
+
+
+# Whether a running OCR step should stop now (a cancel in terminate mode).
+StopCheck = Callable[[], bool]
+
+
+class OcrEngine(Protocol):
+    """Make a searchable PDF from a PDF whose pages are images.
+
+    Paths are relative to the corpus root. ``deadline`` is a monotonic time
+    after which the run is stopped, None for no limit; ``should_stop`` is
+    polled while the engine runs. Failures raise ``OcrFailed`` with the
+    reason ``ocr_engine_error``, ``timeout``, ``disk_full``, ``encrypted`` or
+    ``cancelled``; the target may then be partly written.
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    def version(self) -> str:
+        """The engine version; raises ``OcrToolsMissing`` when not installed."""
+        ...
+
+    def languages(self) -> tuple[str, ...]:
+        """The installed language codes; raises ``OcrToolsMissing`` when the
+        engine or its language listing is not installed."""
+        ...
+
+    def run(
+        self,
+        source: str,
+        target: str,
+        *,
+        languages: str,
+        mode: OcrMode,
+        jobs: int | None,
+        deadline: float | None,
+        should_stop: StopCheck,
+    ) -> None: ...
+
+
+class DjvuPdfConverter(Protocol):
+    """Convert a DjVu file into a PDF of page images, without text.
+
+    The same path, deadline and stop rules as ``OcrEngine.run``. Failures
+    raise ``OcrFailed`` with the reason ``djvu_conversion``,
+    ``djvu_tools_missing``, ``timeout``, ``disk_full`` or ``cancelled``.
+    """
+
+    def convert(
+        self,
+        source: str,
+        target: str,
+        *,
+        deadline: float | None,
+        should_stop: StopCheck,
+    ) -> None: ...
+
+
+class OcrFiles(Protocol):
+    """The files OCR reads and writes, by path relative to the corpus root."""
+
+    def locate(self, path: str) -> str:
+        """The normalized relative path of a request path (relative to the
+        corpus root, or absolute). Raises ``ValidationError`` with
+        ``details["reason"]`` ``outside_corpus`` when it resolves outside the
+        corpus root, or ``not_found`` when it is not an existing file."""
+        ...
+
+    def exists(self, path: str) -> bool: ...
+
+    def size(self, path: str) -> int: ...
+
+    def content_hash(self, path: str) -> str: ...
+
+    def free_bytes(self, path: str) -> int:
+        """Free space in the directory that holds ``path``."""
+        ...
+
+    def temporary(self, near: str, label: str) -> str:
+        """A new, unused path in the directory of ``near`` whose name cannot be
+        taken for a document (hidden, without a document extension)."""
+        ...
+
+    def publish(self, temporary: str, final: str, *, replace: bool) -> None:
+        """Rename atomically; without ``replace`` an existing ``final`` is
+        never overwritten and ``FileExistsError`` is raised."""
+        ...
+
+    def remove(self, path: str) -> None:
+        """Delete a file if it exists."""
+        ...
 
 
 class CitationFormatter(Protocol):

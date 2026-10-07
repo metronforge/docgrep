@@ -19,6 +19,7 @@ from docgrep.domain.errors import (
     StoreUnavailable,
 )
 from docgrep.domain.models import (
+    DELEGATED_TO_OCR,
     FileType,
     ManifestRunRecord,
     ManifestSourceRecord,
@@ -33,6 +34,7 @@ from docgrep.domain.protocols import (
     EmbeddingProvider,
     IndexLock,
     Manifest,
+    OcrDelegations,
     PassageWriter,
     SparseEncoder,
     parser_version,
@@ -209,6 +211,19 @@ class SourceIndexing:
     sleep: Callable[[float], None]
     _cancel_event: threading.Event
     _cancel_persisted: bool
+    # Originals indexed through their OCR'd sibling; None: no OCR registry.
+    delegations: OcrDelegations | None = None
+
+    def is_delegated(self, source: Source) -> bool:
+        """Whether a PDF or DjVu source has a live delegation to its OCR'd
+        sibling, for its current content."""
+        if self.delegations is None or source.file_type not in (
+            FileType.PDF,
+            FileType.DJVU,
+        ):
+            return False
+        found = self.delegations.live_delegation(source.path, source.content_hash)
+        return found is not None
 
     def request_cancel(self) -> None:
         """Ask the running build to stop after its current batch.
@@ -253,7 +268,10 @@ class SourceIndexing:
         """Parse, chunk and embed one source; checks for a cancel between batches.
 
         A parser that declares a version stamps it on the source it returns.
+        A source delegated to its OCR'd sibling is skipped without parsing.
         """
+        if self.is_delegated(source):
+            return Prepared(source, f"skipped:{DELEGATED_TO_OCR}")
         parser = self.parsers.get(source.file_type)
         if parser is None:
             return Prepared(source, "skipped:unsupported")
@@ -361,6 +379,7 @@ class BuildIndex(SourceIndexing):
         progress_every_sources: int = 25,
         progress_every_seconds: float = 60.0,
         log_context: Mapping[str, str | int | float] | None = None,
+        delegations: OcrDelegations | None = None,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -370,6 +389,7 @@ class BuildIndex(SourceIndexing):
             raise ValueError("progress_every_sources must be positive")
         if progress_every_seconds <= 0:
             raise ValueError("progress_every_seconds must be positive")
+        self.delegations = delegations
         self.lock = lock
         self.enumerator = enumerator
         self.parsers = parsers

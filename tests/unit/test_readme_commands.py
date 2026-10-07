@@ -50,7 +50,7 @@ def test_readme_commands_use_real_subcommands_and_flags(
     invocations = _invocations()
     used = {subcommand for subcommand, _flags, _line in invocations}
     # Guard against a parser that silently finds nothing.
-    assert used >= {"index", "update", "search", "status", "serve", "dry-run"}
+    assert used >= {"index", "update", "search", "status", "serve", "dry-run", "ocr"}
 
     overview = _help(capsys)
     for subcommand, flags, line in invocations:

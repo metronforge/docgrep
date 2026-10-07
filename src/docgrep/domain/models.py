@@ -186,6 +186,8 @@ class ParsedSection:
 
 # The skip reason of a document whose text layer is unusable as text.
 GARBLED_TEXT_LAYER = "garbled_text_layer"
+# The skip status of an original whose text is indexed from its OCR'd sibling.
+DELEGATED_TO_OCR = "delegated_to_ocr"
 # The skip reason of a document that has no text layer at all (a scan), when
 # the parser says so explicitly.
 NO_TEXT_LAYER = "no_text_layer"
@@ -288,3 +290,45 @@ class StagingInfo:
     dimension: int | None
     passages: int
     published: bool = False
+
+
+# The OCR engine modes: keep pages that have text, or rebuild every page's text.
+OcrMode = Literal["skip-text", "force-ocr"]
+
+
+@dataclass(frozen=True, slots=True)
+class OcrRecord:
+    """One file processed through OCR and the searchable PDF made from it.
+
+    Paths are relative to the corpus root; hashes are content hashes of the
+    files as they were when the record was written.
+    """
+
+    input_path: str
+    input_format: Literal["pdf", "djvu"]
+    input_hash: str
+    output_path: str
+    output_hash: str
+    engine: str
+    engine_version: str
+    languages: str
+    mode: OcrMode
+    created_at: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.input_path or not self.output_path:
+            raise ValueError("input and output paths must not be empty")
+        if self.input_path == self.output_path:
+            raise ValueError("the output must differ from the input")
+        if not self.input_hash or not self.output_hash:
+            raise ValueError("content hashes must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class OcrDelegation:
+    """An original whose text is indexed from its OCR'd sibling instead."""
+
+    input_path: str
+    input_hash: str
+    output_path: str
+    created_at: str | None = None

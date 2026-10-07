@@ -8,7 +8,7 @@ from docgrep import __version__
 from docgrep.adapters.chunking import TokenChunker, WhitespaceTokenizer
 from docgrep.adapters.corpus import describe_source, enumerate_corpus, scan_corpus
 from docgrep.adapters.filelock import FileIndexLock
-from docgrep.adapters.manifest import SQLiteManifest
+from docgrep.adapters.manifest import SQLiteManifest, SQLiteOcrRegistry
 from docgrep.adapters.models.deterministic import (
     DeterministicEmbedder,
     LexicalReranker,
@@ -19,6 +19,7 @@ from docgrep.adapters.models.real import (
     load_tokenizer,
 )
 from docgrep.adapters.models.sparse import BM25SparseEncoder
+from docgrep.adapters.ocrmypdf import DdjvuConverter, LocalOcrFiles, OcrmypdfEngine
 from docgrep.adapters.parsers.djvu import DjvuParser
 from docgrep.adapters.parsers.epub import EpubParser
 from docgrep.adapters.parsers.markdown import MarkdownParser
@@ -44,6 +45,7 @@ from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DryRun
 from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
+from docgrep.usecases.process_scans import ProcessScans
 from docgrep.usecases.update_index import UpdateIndex, UpdatePlan, UpdateSummary
 
 
@@ -172,6 +174,8 @@ def create_discover_scans(settings: Settings) -> DiscoverScans:
 
     It needs only the corpus scan and a probe for PDF and DjVu pages: no
     index store, manifest, lock or model, and it creates nothing on disk.
+    The OCR status of the files comes from ``open_ocr_registry_view``,
+    passed to each run.
     """
     configure_logging(settings.log_level)
     return DiscoverScans(
@@ -179,6 +183,40 @@ def create_discover_scans(settings: Settings) -> DiscoverScans:
         probe=FileScanProbe(settings.corpus_root),
         density_lower=settings.scan_density_lower,
         density_upper=settings.scan_density_upper,
+    )
+
+
+def open_ocr_registry_view(settings: Settings) -> SQLiteOcrRegistry:
+    """A read-only view of the OCR registry for scan discovery.
+
+    It creates and migrates nothing; a missing manifest reads as nothing
+    processed.
+    """
+    return SQLiteOcrRegistry(settings.data_dir, settings.corpus_root, read_only=True)
+
+
+def create_process_scans(settings: Settings) -> ProcessScans:
+    """Wire OCR processing (UC-6).
+
+    It needs the corpus, the scan probe, the manifest database (runs and the
+    OCR registry), the index lock and the system OCR tools; no index store
+    and no model. Opening it creates or migrates the manifest database.
+    """
+    configure_logging(settings.log_level)
+    corpus = _CorpusEnumerator(settings)
+    return ProcessScans(
+        lock=FileIndexLock(settings.data_dir / "index.lock"),
+        manifest=SQLiteManifest(settings.data_dir),
+        scanner=corpus,
+        discovery=create_discover_scans(settings),
+        registry=SQLiteOcrRegistry(settings.data_dir, settings.corpus_root),
+        engine=OcrmypdfEngine(settings.corpus_root),
+        converter=DdjvuConverter(settings.corpus_root),
+        files=LocalOcrFiles(settings.corpus_root),
+        languages=settings.ocr_languages,
+        jobs=settings.ocr_jobs,
+        timeout_seconds=settings.ocr_timeout_seconds,
+        cancel_mode=settings.ocr_cancel_mode,
     )
 
 
@@ -300,6 +338,10 @@ def create_container(
         )
     )
     manifest = SQLiteManifest(settings.data_dir)
+    # The manifest above has created or migrated the OCR tables.
+    delegations = SQLiteOcrRegistry(
+        settings.data_dir, settings.corpus_root, read_only=True
+    )
     parsers = _parsers(settings)
     config = _vector_config(settings)
     lock = FileIndexLock(settings.data_dir / "index.lock")
@@ -334,6 +376,7 @@ def create_container(
             upsert_batch_size=settings.upsert_batch_size,
             refuse_resumable_by_default=refuse_resumable_by_default,
             log_context=log_context,
+            delegations=delegations,
         ),
         update=UpdateIndex(
             lock=lock,
@@ -347,5 +390,6 @@ def create_container(
             config=config,
             upsert_batch_size=settings.upsert_batch_size,
             log_context=log_context,
+            delegations=delegations,
         ),
     )
