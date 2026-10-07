@@ -57,12 +57,16 @@ def _files(root: Path, skipped_dir: Path | None = None) -> Iterator[Path]:
                 yield path
 
 
-def _content_hash(path: Path) -> str:
+def file_content_hash(path: Path) -> str:
+    """The BLAKE3 content hash of a file, as recorded for every source."""
     digest = blake3()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+_content_hash = file_content_hash
 
 
 def _skipped_data_dir(corpus_root: Path, data_dir: Path | None) -> Path | None:

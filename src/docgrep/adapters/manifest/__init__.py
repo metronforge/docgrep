@@ -1,6 +1,7 @@
 """SQLite-backed durable indexing manifest."""
 
 import json
+import logging
 import sqlite3
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
@@ -8,14 +9,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
+from docgrep.adapters.corpus import file_content_hash
 from docgrep.domain.errors import ManifestUnavailable
 from docgrep.domain.models import (
     FileType,
     ManifestRunRecord,
     ManifestSourceRecord,
+    OcrDelegation,
+    OcrMode,
+    OcrRecord,
     RunStatus,
     Source,
 )
+
+_LOG = logging.getLogger(__name__)
+
+# The kinds of run recorded in the runs table.
+RUN_KINDS = ("build", "update", "ocr")
 
 # Columns added to the runs table after the first schema; added when missing.
 _RUN_COLUMNS = (
@@ -106,6 +116,28 @@ class SQLiteManifest:
                     passages INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (run_id, path)
                 );
+                CREATE TABLE IF NOT EXISTS ocr_registry (
+                    input_path TEXT PRIMARY KEY,
+                    input_format TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    output_hash TEXT NOT NULL,
+                    engine TEXT NOT NULL,
+                    engine_version TEXT NOT NULL,
+                    languages TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ocr_registry_input_hash
+                    ON ocr_registry (input_hash);
+                CREATE INDEX IF NOT EXISTS ocr_registry_output_path
+                    ON ocr_registry (output_path);
+                CREATE TABLE IF NOT EXISTS ocr_delegations (
+                    input_path TEXT PRIMARY KEY,
+                    input_hash TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             existing = {
@@ -138,7 +170,7 @@ class SQLiteManifest:
         resumed_from: str | None = None,
         kind: str = "build",
     ) -> str:
-        if kind not in ("build", "update"):
+        if kind not in RUN_KINDS:
             raise ValueError("invalid run kind")
         snapshot = json.dumps(dict(config), sort_keys=True)
         with self._connection() as connection:
@@ -163,7 +195,9 @@ class SQLiteManifest:
         if status not in ("indexed", "removed") and not status.startswith(
             ("skipped:", "failed:")
         ):
-            raise ValueError("invalid source status")
+            # An OCR run journals its own outcomes for the progress report.
+            if run_id is None or status not in ("processed", "cancelled"):
+                raise ValueError("invalid source status")
         if status == "removed" and run_id is None:
             raise ValueError("a removal is journaled; use remove_source")
         indexed_at = (source.indexed_at or _now()) if status == "indexed" else None
@@ -402,3 +436,137 @@ class SQLiteManifest:
             carried_sources=cast(int | None, self._optional(row, "carried_sources"))
             or 0,
         )
+
+
+class SQLiteOcrRegistry:
+    """The OCR registry and the delegation table in the manifest database.
+
+    Liveness is checked on disk under the corpus root: an entry needs its
+    output file, a delegation also needs the original's unchanged content.
+    Reads never raise; they log at DEBUG and read as nothing found.
+    """
+
+    def __init__(
+        self, data_dir: Path, corpus_root: Path, *, read_only: bool = False
+    ) -> None:
+        """Open the registry; unless ``read_only``, create or migrate the
+        database first, exactly as the manifest does."""
+        self.path = data_dir / "manifest.sqlite3"
+        self.corpus_root = corpus_root
+        if not read_only:
+            SQLiteManifest(data_dir)
+
+    def _read(self, query: str, args: tuple[object, ...]) -> list[sqlite3.Row]:
+        if not self.path.is_file():
+            return []
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(self.path)
+            connection.row_factory = sqlite3.Row
+            return connection.execute(query, args).fetchall()
+        except sqlite3.Error:
+            _LOG.debug("ocr_registry_unreadable", exc_info=True)
+            return []
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _exists(self, path: str) -> bool:
+        try:
+            return (self.corpus_root / path).is_file()
+        except OSError:
+            return False
+
+    @staticmethod
+    def _record(row: sqlite3.Row) -> OcrRecord:
+        return OcrRecord(
+            input_path=cast(str, row["input_path"]),
+            input_format=cast(Literal["pdf", "djvu"], row["input_format"]),
+            input_hash=cast(str, row["input_hash"]),
+            output_path=cast(str, row["output_path"]),
+            output_hash=cast(str, row["output_hash"]),
+            engine=cast(str, row["engine"]),
+            engine_version=cast(str, row["engine_version"]),
+            languages=cast(str, row["languages"]),
+            mode=cast(OcrMode, row["mode"]),
+            created_at=cast(str, row["created_at"]),
+        )
+
+    def find_by_input_hash(self, content_hash: str) -> OcrRecord | None:
+        rows = self._read(
+            "SELECT * FROM ocr_registry WHERE input_hash=? ORDER BY input_path",
+            (content_hash,),
+        )
+        for row in rows:
+            if self._exists(cast(str, row["output_path"])):
+                return self._record(row)
+        return None
+
+    def output_owner(self, output_path: str) -> str | None:
+        rows = self._read(
+            "SELECT input_path FROM ocr_registry WHERE output_path=? "
+            "ORDER BY input_path",
+            (output_path,),
+        )
+        if not rows or not self._exists(output_path):
+            return None
+        return cast(str, rows[0]["input_path"])
+
+    def live_delegation(
+        self, path: str, content_hash: str | None = None
+    ) -> OcrDelegation | None:
+        rows = self._read("SELECT * FROM ocr_delegations WHERE input_path=?", (path,))
+        if not rows:
+            return None
+        row = rows[0]
+        delegation = OcrDelegation(
+            input_path=cast(str, row["input_path"]),
+            input_hash=cast(str, row["input_hash"]),
+            output_path=cast(str, row["output_path"]),
+            created_at=cast(str, row["created_at"]),
+        )
+        if not self._exists(delegation.output_path):
+            return None
+        if content_hash is None:
+            try:
+                content_hash = file_content_hash(self.corpus_root / path)
+            except OSError:
+                return None
+        return delegation if content_hash == delegation.input_hash else None
+
+    def register(self, record: OcrRecord) -> None:
+        created = record.created_at or _now()
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(self.path)
+            with connection:
+                connection.execute(
+                    "INSERT OR REPLACE INTO ocr_registry (input_path, input_format, "
+                    "input_hash, output_path, output_hash, engine, engine_version, "
+                    "languages, mode, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.input_path,
+                        record.input_format,
+                        record.input_hash,
+                        record.output_path,
+                        record.output_hash,
+                        record.engine,
+                        record.engine_version,
+                        record.languages,
+                        record.mode,
+                        created,
+                    ),
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO ocr_delegations (input_path, input_hash, "
+                    "output_path, created_at) VALUES (?, ?, ?, ?)",
+                    (record.input_path, record.input_hash, record.output_path, created),
+                )
+        except sqlite3.Error as exc:
+            raise ManifestUnavailable(
+                "OCR registry write failed", details={"path": str(self.path)}
+            ) from exc
+        finally:
+            if connection is not None:
+                connection.close()

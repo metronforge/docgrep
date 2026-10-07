@@ -8,6 +8,8 @@ from docgrep.domain.models import (
     FileType,
     ManifestRunRecord,
     ManifestSourceRecord,
+    OcrDelegation,
+    OcrRecord,
     ParsedDocument,
     Passage,
     RankedPassage,
@@ -432,6 +434,56 @@ class ManifestWriter(Protocol):
 
 class Manifest(ManifestReader, ManifestWriter, Protocol):
     """Both sides of the manifest, for operations that read what they wrote."""
+
+
+class OcrDelegations(Protocol):
+    """Which originals are indexed through their OCR'd sibling.
+
+    A delegation is live while its output file exists and the original's
+    content hash equals the recorded one. Reads take no lock and never raise:
+    a missing or unreadable database reads as no delegation.
+    """
+
+    def live_delegation(
+        self, path: str, content_hash: str | None = None
+    ) -> OcrDelegation | None:
+        """The live delegation of the original at ``path``, or None.
+
+        ``content_hash`` is the original's current content hash when the
+        caller knows it; otherwise it is computed, and only when a delegation
+        is recorded for the path.
+        """
+        ...
+
+
+class OcrRegistryReader(OcrDelegations, Protocol):
+    """Read the OCR registry; the same read rules as ``OcrDelegations``.
+
+    A registry entry is live while its output file exists.
+    """
+
+    def find_by_input_hash(self, content_hash: str) -> OcrRecord | None:
+        """A live entry for an input with this content, or None; the first by
+        input path when several inputs have the same content."""
+        ...
+
+    def output_owner(self, output_path: str) -> str | None:
+        """The input path of the live entry whose output is ``output_path``."""
+        ...
+
+
+class OcrRegistry(OcrRegistryReader, Protocol):
+    """The OCR registry with its single write."""
+
+    def register(self, record: OcrRecord) -> None:
+        """Record a processed file and delegate its original to the output, in
+        one transaction.
+
+        Replaces the entry and the delegation recorded for the same input
+        path, so registering again (``--force``) never duplicates a row.
+        Raises ``ManifestUnavailable`` when the database cannot be written.
+        """
+        ...
 
 
 class CitationFormatter(Protocol):
