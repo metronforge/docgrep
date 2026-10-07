@@ -425,7 +425,7 @@ class ProcessScans:
         wanted = (
             {SCANNED, MIXED_OR_UNCERTAIN} if request.include_uncertain else {SCANNED}
         )
-        report = self.discovery.run()
+        report = self.discovery.run(registry=self.registry)
         return [
             (entry.path, entry.size_bytes)
             for entry in report.entries

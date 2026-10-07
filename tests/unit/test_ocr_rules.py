@@ -72,3 +72,29 @@ def test_ocr_settings_defaults_and_validation(monkeypatch: pytest.MonkeyPatch) -
             patched.setenv(name, value)
             with pytest.raises(SettingsValidationError):
                 Settings()
+
+
+def test_delegated_sources_follow_the_delegation_not_the_parser() -> None:
+    from docgrep.domain.protocols import parser_reprocess_reason
+
+    assert (
+        parser_reprocess_reason(
+            "skipped:delegated_to_ocr", None, registered=True, declared_version="3"
+        )
+        is None
+    )
+
+
+def test_the_plan_line_shows_ocr_reasons_only_when_they_occur() -> None:
+    from docgrep.api.cli import _format_plan
+    from docgrep.usecases.update_index import UpdatePlan
+
+    plain = _format_plan(UpdatePlan(modified=1, content_changed=1))
+    ocr = _format_plan(
+        UpdatePlan(added=1, modified=2, delegated_to_ocr=1, delegation_ended=1)
+    )
+
+    assert "OCR" not in plain
+    assert ocr.splitlines()[1].endswith(
+        "0 retried, 1 delegated to OCR, 1 OCR delegation ended."
+    )

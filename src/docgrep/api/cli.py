@@ -21,6 +21,7 @@ from docgrep.api.container import (
     create_dry_run,
     create_process_scans,
     create_status,
+    open_ocr_registry_view,
 )
 from docgrep.api.http import SearchResponse, create_app
 from docgrep.api.log_config import configure_logging
@@ -106,6 +107,11 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         choices=["pdf", "djvu"],
         help="Restrict to a file type; repeat for both (default: both)",
+    )
+    discover.add_argument(
+        "--include-processed",
+        action="store_true",
+        help="Also list files already processed through OCR, and their outputs",
     )
     discover.add_argument("--json", action="store_true")
     ocr = commands.add_parser(
@@ -282,6 +288,11 @@ def _format_discover_scans(report: dict[str, Any]) -> str:
             f"  {entry['reason'] or '-'}  {pages} pages  {_size(entry['size_bytes'])}"
             + ("  large file" if entry["large_file"] else "")
             + (f"  ({entry['hint']})" if entry["hint"] else "")
+        )
+    if report["already_processed"]:
+        lines.append(
+            f"Already processed through OCR (not listed): "
+            f"{report['already_processed']}; use --include-processed to list them"
         )
     for label, counts in [("Total", report["totals"])] + [
         (name, counts) for name, counts in report["by_file_type"].items()
@@ -561,7 +572,19 @@ def _format_plan(plan: UpdatePlan) -> str:
         f"{plan.unchanged} unchanged.\n"
         f"Modified by reason: {plan.newly_supported} newly supported, "
         f"{plan.content_changed} content changed, "
-        f"{plan.parser_changed} parser changed, {plan.retried} retried.\n"
+        f"{plan.parser_changed} parser changed, {plan.retried} retried"
+        # The OCR reasons are shown when they occur.
+        + (
+            f", {plan.delegated_to_ocr} delegated to OCR"
+            if plan.delegated_to_ocr
+            else ""
+        )
+        + (
+            f", {plan.delegation_ended} OCR delegation ended"
+            if plan.delegation_ended
+            else ""
+        )
+        + ".\n"
     )
 
 
@@ -788,7 +811,10 @@ def main(
         if args.command == "discover-scans":
             try:
                 discovery = discover_factory(settings).run(
-                    path_glob=args.path_glob, file_types=args.file_types
+                    path_glob=args.path_glob,
+                    file_types=args.file_types,
+                    include_already_processed=args.include_processed,
+                    registry=open_ocr_registry_view(settings),
                 )
             except ValidationError as error:
                 sys.stderr.write(_describe(error) + "\n")

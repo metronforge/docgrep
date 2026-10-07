@@ -69,11 +69,13 @@ def parser_reprocess_reason(
     registered any more. A missing or empty version, recorded or declared,
     counts as version "1" (``effective_parser_version``), so sources recorded
     before versions existed are not reprocessed for that alone. Failed sources
-    are left to the retry rule.
+    are left to the retry rule, sources delegated to an OCR'd sibling to the
+    delegation rule.
     """
     if status == "skipped:unsupported":
         return "newly_supported" if registered else None
-    if status.startswith("failed:"):
+    if status.startswith("failed:") or status == "skipped:delegated_to_ocr":
+        # Delegated sources follow their delegation, not their parser.
         return None
     if not registered:
         return "parser_changed"

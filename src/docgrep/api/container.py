@@ -174,6 +174,8 @@ def create_discover_scans(settings: Settings) -> DiscoverScans:
 
     It needs only the corpus scan and a probe for PDF and DjVu pages: no
     index store, manifest, lock or model, and it creates nothing on disk.
+    The OCR status of the files comes from ``open_ocr_registry_view``,
+    passed to each run.
     """
     configure_logging(settings.log_level)
     return DiscoverScans(
@@ -182,6 +184,15 @@ def create_discover_scans(settings: Settings) -> DiscoverScans:
         density_lower=settings.scan_density_lower,
         density_upper=settings.scan_density_upper,
     )
+
+
+def open_ocr_registry_view(settings: Settings) -> SQLiteOcrRegistry:
+    """A read-only view of the OCR registry for scan discovery.
+
+    It creates and migrates nothing; a missing manifest reads as nothing
+    processed.
+    """
+    return SQLiteOcrRegistry(settings.data_dir, settings.corpus_root, read_only=True)
 
 
 def create_process_scans(settings: Settings) -> ProcessScans:
@@ -327,6 +338,10 @@ def create_container(
         )
     )
     manifest = SQLiteManifest(settings.data_dir)
+    # The manifest above has created or migrated the OCR tables.
+    delegations = SQLiteOcrRegistry(
+        settings.data_dir, settings.corpus_root, read_only=True
+    )
     parsers = _parsers(settings)
     config = _vector_config(settings)
     lock = FileIndexLock(settings.data_dir / "index.lock")
@@ -361,6 +376,7 @@ def create_container(
             upsert_batch_size=settings.upsert_batch_size,
             refuse_resumable_by_default=refuse_resumable_by_default,
             log_context=log_context,
+            delegations=delegations,
         ),
         update=UpdateIndex(
             lock=lock,
@@ -374,5 +390,6 @@ def create_container(
             config=config,
             upsert_batch_size=settings.upsert_batch_size,
             log_context=log_context,
+            delegations=delegations,
         ),
     )

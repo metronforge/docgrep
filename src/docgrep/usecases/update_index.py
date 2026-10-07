@@ -15,7 +15,12 @@ from docgrep.domain.errors import (
     IndexIncomplete,
     ResumeAvailable,
 )
-from docgrep.domain.models import FileType, ManifestSourceRecord, Source
+from docgrep.domain.models import (
+    DELEGATED_TO_OCR,
+    FileType,
+    ManifestSourceRecord,
+    Source,
+)
 from docgrep.domain.protocols import (
     Chunker,
     CorpusReader,
@@ -24,6 +29,7 @@ from docgrep.domain.protocols import (
     IndexLock,
     LiveIndexWriter,
     Manifest,
+    OcrDelegations,
     SparseEncoder,
     parser_reprocess_reason,
     parser_version,
@@ -47,7 +53,13 @@ _LOG = logging.getLogger(__name__)
 
 ChangeKind = Literal["removed", "modified", "retried", "added"]
 # Why a recorded source is processed again (the retried ones aside).
-ModifiedReason = Literal["content_changed", "parser_changed", "newly_supported"]
+ModifiedReason = Literal[
+    "content_changed",
+    "parser_changed",
+    "newly_supported",
+    "delegated_to_ocr",
+    "delegation_ended",
+]
 _ORDER: tuple[ChangeKind, ...] = ("removed", "modified", "retried", "added")
 
 
@@ -63,7 +75,10 @@ class UpdatePlan:
     ``modified`` is the sum of the reasons: ``content_changed`` (the content
     hash differs), ``parser_changed`` (the registered parser's version differs
     from the recorded one, or the parser is gone) and ``newly_supported``
-    (skipped as unsupported before, a parser exists now).
+    (skipped as unsupported before, a parser exists now), and for OCR
+    ``delegated_to_ocr`` (an original now delegated to its OCR'd sibling,
+    whose passages are removed) and ``delegation_ended`` (a delegated
+    original whose output was removed: it is indexed again).
     """
 
     added: int = 0
@@ -75,6 +90,8 @@ class UpdatePlan:
     content_changed: int = 0
     parser_changed: int = 0
     newly_supported: int = 0
+    delegated_to_ocr: int = 0
+    delegation_ended: int = 0
 
     @property
     def changes(self) -> int:
@@ -148,6 +165,7 @@ class UpdateIndex(SourceIndexing):
         progress_every_sources: int = 25,
         progress_every_seconds: float = 60.0,
         log_context: Mapping[str, str | int | float] | None = None,
+        delegations: OcrDelegations | None = None,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -157,6 +175,7 @@ class UpdateIndex(SourceIndexing):
             raise ValueError("progress_every_sources must be positive")
         if progress_every_seconds <= 0:
             raise ValueError("progress_every_seconds must be positive")
+        self.delegations = delegations
         self.lock = lock
         self.corpus = corpus
         self.parsers = parsers
@@ -255,6 +274,8 @@ class UpdateIndex(SourceIndexing):
             "content_changed": 0,
             "parser_changed": 0,
             "newly_supported": 0,
+            "delegated_to_ocr": 0,
+            "delegation_ended": 0,
         }
         seen: set[str] = set()
         unchanged = 0
@@ -288,6 +309,15 @@ class UpdateIndex(SourceIndexing):
                     fresh, record.status, record.error, record.embedding_model
                 )
                 refreshed += 1
+            delegation = self._delegation_reason(record, current or old)
+            if delegation is not None:
+                current = current or self.corpus.describe(item.path)
+                found["modified"].append(_Change("modified", current, record))
+                reasons[delegation] += 1
+                continue
+            if record.status == f"skipped:{DELEGATED_TO_OCR}":
+                unchanged += 1
+                continue
             reason = self._parser_reason(record)
             if reason is not None:
                 current = current or self.corpus.describe(item.path)
@@ -317,6 +347,19 @@ class UpdateIndex(SourceIndexing):
             **reasons,
         )
         return changes, plan
+
+    def _delegation_reason(
+        self, record: ManifestSourceRecord, source: Source
+    ) -> ModifiedReason | None:
+        """Whether a recorded source with unchanged content became delegated
+        to its OCR'd sibling, or stopped being so."""
+        delegated = record.status == f"skipped:{DELEGATED_TO_OCR}"
+        live = self.is_delegated(source)
+        if live and not delegated:
+            return "delegated_to_ocr"
+        if delegated and not live:
+            return "delegation_ended"
+        return None
 
     def _parser_reason(self, record: ManifestSourceRecord) -> ModifiedReason | None:
         """Why the registered parser would treat the source differently, if so.
@@ -367,6 +410,8 @@ class UpdateIndex(SourceIndexing):
                     "content_changed": plan.content_changed,
                     "parser_changed": plan.parser_changed,
                     "newly_supported": plan.newly_supported,
+                    "delegated_to_ocr": plan.delegated_to_ocr,
+                    "delegation_ended": plan.delegation_ended,
                 },
             )
             if on_plan is not None:

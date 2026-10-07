@@ -81,6 +81,8 @@ class StatusWarning:
 
 # The skip reasons reported by name; any other reason counts as "other".
 SKIP_REASONS = ("requires_ocr", "garbled_text_layer", "unsupported")
+# Reported by name too, but only when a source has it (keeps older reports).
+OPTIONAL_SKIP_REASONS = ("delegated_to_ocr",)
 # At most this many extensions and failed sources are listed.
 SKIPPED_EXTENSIONS_LIMIT = 10
 FAILED_SOURCES_LIMIT = 20

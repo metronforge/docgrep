@@ -22,6 +22,9 @@ SCANNED = "scanned"
 MIXED_OR_UNCERTAIN = "mixed_or_uncertain"
 INSPECTION_FAILED = "inspection_failed"
 NOT_PROCESSED = "not_processed"
+# An OCR output, and an original whose text is indexed from its OCR output.
+PROCESSED = "processed"
+PROCESSED_VIA_OCR_PDF = "processed_via_ocr_pdf"
 
 LOW_TEXT_DENSITY = "low_text_density"
 UNCERTAIN_TEXT_DENSITY = "uncertain_text_density"

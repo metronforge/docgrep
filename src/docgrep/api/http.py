@@ -18,6 +18,7 @@ from docgrep.api.container import (
     create_container,
     create_discover_scans,
     create_process_scans,
+    open_ocr_registry_view,
 )
 from docgrep.api.log_config import (
     configure_logging,
@@ -180,6 +181,7 @@ class DiscoverScansRequest(BaseModel):
 
     path_glob: str | None = None
     file_types: list[Literal["pdf", "djvu"]] | None = None
+    include_already_processed: bool = False
 
 
 class ProcessScansRequest(BaseModel):
@@ -378,7 +380,10 @@ def create_app(
         """Read-only (UC-5): the same report as `docgrep discover-scans --json`."""
         body = request or DiscoverScansRequest()
         report = create_discover_scans(effective).run(
-            path_glob=body.path_glob, file_types=body.file_types
+            path_glob=body.path_glob,
+            file_types=body.file_types,
+            include_already_processed=body.include_already_processed,
+            registry=open_ocr_registry_view(effective),
         )
         return report.as_dict()
 

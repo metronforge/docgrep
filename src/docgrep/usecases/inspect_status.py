@@ -23,6 +23,7 @@ from docgrep.domain.run_state import (
 )
 from docgrep.domain.status import (
     FAILED_SOURCES_LIMIT,
+    OPTIONAL_SKIP_REASONS,
     SKIP_REASONS,
     SKIPPED_EXTENSIONS_LIMIT,
     ActiveOperation,
@@ -259,6 +260,7 @@ class InspectStatus:
             return None
         states = {"indexed": 0, "skipped": 0, "failed": 0}
         reasons = dict.fromkeys((*SKIP_REASONS, "other"), 0)
+        optional = dict.fromkeys(OPTIONAL_SKIP_REASONS, 0)
         extensions: Counter[str] = Counter()
         failed: list[FailedSourceView] = []
         versions = self.parser_versions
@@ -272,7 +274,10 @@ class InspectStatus:
                 # reason code in the error column.
                 if detail == "requires_ocr" and record.error == GARBLED_TEXT_LAYER:
                     detail = GARBLED_TEXT_LAYER
-                reasons[detail if detail in SKIP_REASONS else "other"] += 1
+                if detail in optional:
+                    optional[detail] += 1
+                else:
+                    reasons[detail if detail in SKIP_REASONS else "other"] += 1
                 suffix = PurePosixPath(record.source.path).suffix.lower()
                 extensions[suffix or "(none)"] += 1
             elif state == "failed" and len(failed) < FAILED_SOURCES_LIMIT:
@@ -292,6 +297,7 @@ class InspectStatus:
                     declared_version=versions.get(file_type),
                 )
                 changed += reason == "parser_changed"
+        reasons.update({name: count for name, count in optional.items() if count})
         top = sorted(extensions.items(), key=lambda item: (-item[1], item[0]))
         return SourcesView(
             total=len(records),

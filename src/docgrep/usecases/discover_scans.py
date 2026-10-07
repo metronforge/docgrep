@@ -8,13 +8,13 @@ cannot be inspected is reported, never raised.
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from docgrep.domain.errors import InspectionFailed, ValidationError
 from docgrep.domain.globs import matching_pattern
 from docgrep.domain.models import FileType
-from docgrep.domain.protocols import CorpusScanner, ScanProbe
+from docgrep.domain.protocols import CorpusScanner, OcrRegistryReader, ScanProbe
 from docgrep.domain.scans import (
     INSPECTION_FAILED,
     LARGE_FILE_BYTES,
@@ -22,6 +22,8 @@ from docgrep.domain.scans import (
     MIXED_OR_UNCERTAIN,
     NATIVE,
     NOT_PROCESSED,
+    PROCESSED,
+    PROCESSED_VIA_OCR_PDF,
     SCANNED,
     UNSAMPLABLE,
     classify,
@@ -57,6 +59,7 @@ class ScanEntry:
     hint: str | None
     text_density: float | None
     sampled_pages: tuple[int, ...]
+    ocr_status: str = NOT_PROCESSED
 
     @property
     def large_file(self) -> bool:
@@ -73,7 +76,7 @@ class ScanEntry:
             "classification": self.classification,
             "reason": self.reason,
             "hint": self.hint,
-            "ocr_status": NOT_PROCESSED,
+            "ocr_status": self.ocr_status,
             "large_file": self.large_file,
             "text_density": self.text_density,
             "sampled_pages": list(self.sampled_pages),
@@ -96,6 +99,9 @@ class ScanDiscoveryReport:
     density_lower: float
     density_upper: float
     entries: tuple[ScanEntry, ...]
+    include_already_processed: bool = False
+    # Originals with a live delegation left out of the entries.
+    already_processed: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         """The JSON form; its key names are stable and documented."""
@@ -110,6 +116,8 @@ class ScanDiscoveryReport:
                 "density_lower": self.density_lower,
                 "density_upper": self.density_upper,
             },
+            "include_already_processed": self.include_already_processed,
+            "already_processed": self.already_processed,
             "files": [e.as_dict() for e in listed],
             "totals": _counts(self.entries),
             "by_file_type": {
@@ -145,9 +153,17 @@ class DiscoverScans:
         *,
         path_glob: str | None = None,
         file_types: Sequence[str] | None = None,
+        include_already_processed: bool = False,
+        registry: OcrRegistryReader | None = None,
     ) -> ScanDiscoveryReport:
         """Inspect the matching files; raises only for invalid filters or an
-        inaccessible corpus."""
+        inaccessible corpus.
+
+        OCR outputs and originals with a live delegation to their output are
+        left out unless ``include_already_processed``; the left-out originals
+        are counted as ``already_processed``. ``registry`` gives the OCR status
+        of each file; without it every file is ``not_processed``.
+        """
         types = self._types(file_types)
         if path_glob is not None and not path_glob.strip():
             raise ValidationError(
@@ -155,6 +171,7 @@ class DiscoverScans:
             )
         wanted = {FILE_TYPES[name] for name in types}
         entries = []
+        skipped = 0
         for item in self.scanner.scan():
             if item.excluded_by is not None or item.file_type not in wanted:
                 continue
@@ -164,7 +181,12 @@ class DiscoverScans:
             ):
                 continue
             assert item.file_type is not None
-            entries.append(self._inspect(item.path, item.file_type, item.size))
+            status = self._ocr_status(item.path, registry)
+            if status != NOT_PROCESSED and not include_already_processed:
+                skipped += status == PROCESSED_VIA_OCR_PDF
+                continue
+            entry = self._inspect(item.path, item.file_type, item.size)
+            entries.append(replace(entry, ocr_status=status))
         entries.sort(key=lambda e: (e.file_type, e.path))
         return ScanDiscoveryReport(
             path_glob=path_glob,
@@ -172,7 +194,21 @@ class DiscoverScans:
             density_lower=self.density_lower,
             density_upper=self.density_upper,
             entries=tuple(entries),
+            include_already_processed=include_already_processed,
+            already_processed=skipped,
         )
+
+    @staticmethod
+    def _ocr_status(path: str, registry: OcrRegistryReader | None) -> str:
+        """``processed`` for an OCR output, ``processed_via_ocr_pdf`` for an
+        original delegated to its output, else ``not_processed``."""
+        if registry is None:
+            return NOT_PROCESSED
+        if registry.output_owner(path) is not None:
+            return PROCESSED
+        if registry.live_delegation(path) is not None:
+            return PROCESSED_VIA_OCR_PDF
+        return NOT_PROCESSED
 
     @staticmethod
     def _types(file_types: Sequence[str] | None) -> tuple[str, ...]:
