@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v1.12.0 (2026-10-07)
+
+### Documentation
+
+- Record the OCR decision and document the ocr command
+  ([`42b8f4a`](https://github.com/metronforge/docgrep/commit/42b8f4a1c8850e702012fde22a4060b6ee6e2799))
+
+### Features
+
+- **adapters**: Add the OCR registry and sibling delegation tables
+  ([`be7ad2d`](https://github.com/metronforge/docgrep/commit/be7ad2d74652cc5a0138fc42120e1f8a2804af42))
+
+- **usecases**: Index OCR outputs instead of their delegated originals
+  ([`ebf9c99`](https://github.com/metronforge/docgrep/commit/ebf9c996d2544c42a973f2e48aa0aa5f00bb1858))
+
+- **usecases**: Process selected scans through OCR with ocrmypdf
+  ([`f2995a8`](https://github.com/metronforge/docgrep/commit/f2995a8480138c71b959efd7fabd89de50d7f459))
+
+
 ## v1.11.1 (2026-10-07)
 
 ### Bug Fixes
