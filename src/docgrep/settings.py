@@ -6,6 +6,8 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from docgrep.domain.ocr import parse_languages
+
 
 class Settings(BaseSettings):
     """Configuration loaded from ``DOCGREP_`` environment variables."""
@@ -48,6 +50,14 @@ class Settings(BaseSettings):
     # which a PDF or DjVu file counts as scanned, and above which as native.
     scan_density_lower: float = Field(default=100.0, ge=0)
     scan_density_upper: float = Field(default=500.0, gt=0)
+    # OCR (`docgrep ocr`): Tesseract languages joined with "+", the time limit
+    # per file in seconds (0: none), the number of cores ocrmypdf may use
+    # (unset: its default) and whether a cancel stops the running file
+    # (terminate) or lets it complete (finish).
+    ocr_languages: str = "rus+eng+ukr"
+    ocr_timeout_seconds: float = Field(default=0, ge=0)
+    ocr_jobs: int | None = Field(default=None, gt=0)
+    ocr_cancel_mode: Literal["terminate", "finish"] = "terminate"
     # Extra host names accepted in the Host and Origin headers, as a
     # comma-separated list in the environment (for container deployments).
     allowed_hosts: Annotated[tuple[str, ...], NoDecode] = ()
@@ -56,6 +66,12 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_log_level(cls, value: object) -> object:
         return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("ocr_languages")
+    @classmethod
+    def check_ocr_languages(cls, value: str) -> str:
+        parse_languages(value)
+        return value.strip()
 
     @field_validator("allowed_hosts", mode="before")
     @classmethod

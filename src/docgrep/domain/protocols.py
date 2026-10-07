@@ -1,6 +1,6 @@
 """Ports implemented by adapters at the domain boundary."""
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager
 from typing import Literal, Protocol
 
@@ -9,6 +9,7 @@ from docgrep.domain.models import (
     ManifestRunRecord,
     ManifestSourceRecord,
     OcrDelegation,
+    OcrMode,
     OcrRecord,
     ParsedDocument,
     Passage,
@@ -483,6 +484,98 @@ class OcrRegistry(OcrRegistryReader, Protocol):
         path, so registering again (``--force``) never duplicates a row.
         Raises ``ManifestUnavailable`` when the database cannot be written.
         """
+        ...
+
+
+# Whether a running OCR step should stop now (a cancel in terminate mode).
+StopCheck = Callable[[], bool]
+
+
+class OcrEngine(Protocol):
+    """Make a searchable PDF from a PDF whose pages are images.
+
+    Paths are relative to the corpus root. ``deadline`` is a monotonic time
+    after which the run is stopped, None for no limit; ``should_stop`` is
+    polled while the engine runs. Failures raise ``OcrFailed`` with the
+    reason ``ocr_engine_error``, ``timeout``, ``disk_full``, ``encrypted`` or
+    ``cancelled``; the target may then be partly written.
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    def version(self) -> str:
+        """The engine version; raises ``OcrToolsMissing`` when not installed."""
+        ...
+
+    def languages(self) -> tuple[str, ...]:
+        """The installed language codes; raises ``OcrToolsMissing`` when the
+        engine or its language listing is not installed."""
+        ...
+
+    def run(
+        self,
+        source: str,
+        target: str,
+        *,
+        languages: str,
+        mode: OcrMode,
+        jobs: int | None,
+        deadline: float | None,
+        should_stop: StopCheck,
+    ) -> None: ...
+
+
+class DjvuPdfConverter(Protocol):
+    """Convert a DjVu file into a PDF of page images, without text.
+
+    The same path, deadline and stop rules as ``OcrEngine.run``. Failures
+    raise ``OcrFailed`` with the reason ``djvu_conversion``,
+    ``djvu_tools_missing``, ``timeout``, ``disk_full`` or ``cancelled``.
+    """
+
+    def convert(
+        self,
+        source: str,
+        target: str,
+        *,
+        deadline: float | None,
+        should_stop: StopCheck,
+    ) -> None: ...
+
+
+class OcrFiles(Protocol):
+    """The files OCR reads and writes, by path relative to the corpus root."""
+
+    def locate(self, path: str) -> str:
+        """The normalized relative path of a request path (relative to the
+        corpus root, or absolute). Raises ``ValidationError`` with
+        ``details["reason"]`` ``outside_corpus`` when it resolves outside the
+        corpus root, or ``not_found`` when it is not an existing file."""
+        ...
+
+    def exists(self, path: str) -> bool: ...
+
+    def size(self, path: str) -> int: ...
+
+    def content_hash(self, path: str) -> str: ...
+
+    def free_bytes(self, path: str) -> int:
+        """Free space in the directory that holds ``path``."""
+        ...
+
+    def temporary(self, near: str, label: str) -> str:
+        """A new, unused path in the directory of ``near`` whose name cannot be
+        taken for a document (hidden, without a document extension)."""
+        ...
+
+    def publish(self, temporary: str, final: str, *, replace: bool) -> None:
+        """Rename atomically; without ``replace`` an existing ``final`` is
+        never overwritten and ``FileExistsError`` is raised."""
+        ...
+
+    def remove(self, path: str) -> None:
+        """Delete a file if it exists."""
         ...
 
 

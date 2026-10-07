@@ -98,3 +98,20 @@ class CorpusDrift(DocgrepError):
     """The corpus changed too much since the run for a resume to make sense."""
 
     category = "corpus_drift"
+
+
+class OcrToolsMissing(DocgrepError):
+    """The OCR engine or a requested language is not installed."""
+
+    category = "ocr_tools_missing"
+
+
+class OcrFailed(DocgrepError):
+    """OCR of one file did not produce an output; ``details["reason"]`` says
+    why (for example ``ocr_engine_error``, ``timeout`` or ``cancelled``)."""
+
+    category = "ocr_failed"
+
+    @property
+    def reason(self) -> str:
+        return str(self.details.get("reason", "ocr_engine_error"))

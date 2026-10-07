@@ -20,8 +20,11 @@ def graceful_cancel(
     register: Register = signal.signal,
     raise_signal: Callable[[int], None] = signal.raise_signal,
     operation: str = "build",
+    notice: str | None = None,
 ) -> Iterator[None]:
     """Route SIGINT and SIGTERM to ``request_cancel`` for the managed block.
+
+    ``notice`` replaces the message shown on the first signal.
 
     The first signal requests the cancel and says so; the second restores the
     previous handlers and delivers the signal again, so the default behaviour
@@ -39,8 +42,9 @@ def graceful_cancel(
         state["signals"] += 1
         if state["signals"] == 1:
             notify(
-                f"Cancel requested: the {operation} stops after the current batch. "
-                "Press Ctrl-C again to stop immediately."
+                notice
+                or f"Cancel requested: the {operation} stops after the current "
+                "batch. Press Ctrl-C again to stop immediately."
             )
             request_cancel()
             return

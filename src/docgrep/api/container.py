@@ -8,7 +8,7 @@ from docgrep import __version__
 from docgrep.adapters.chunking import TokenChunker, WhitespaceTokenizer
 from docgrep.adapters.corpus import describe_source, enumerate_corpus, scan_corpus
 from docgrep.adapters.filelock import FileIndexLock
-from docgrep.adapters.manifest import SQLiteManifest
+from docgrep.adapters.manifest import SQLiteManifest, SQLiteOcrRegistry
 from docgrep.adapters.models.deterministic import (
     DeterministicEmbedder,
     LexicalReranker,
@@ -19,6 +19,7 @@ from docgrep.adapters.models.real import (
     load_tokenizer,
 )
 from docgrep.adapters.models.sparse import BM25SparseEncoder
+from docgrep.adapters.ocrmypdf import DdjvuConverter, LocalOcrFiles, OcrmypdfEngine
 from docgrep.adapters.parsers.djvu import DjvuParser
 from docgrep.adapters.parsers.epub import EpubParser
 from docgrep.adapters.parsers.markdown import MarkdownParser
@@ -44,6 +45,7 @@ from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DryRun
 from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
+from docgrep.usecases.process_scans import ProcessScans
 from docgrep.usecases.update_index import UpdateIndex, UpdatePlan, UpdateSummary
 
 
@@ -179,6 +181,31 @@ def create_discover_scans(settings: Settings) -> DiscoverScans:
         probe=FileScanProbe(settings.corpus_root),
         density_lower=settings.scan_density_lower,
         density_upper=settings.scan_density_upper,
+    )
+
+
+def create_process_scans(settings: Settings) -> ProcessScans:
+    """Wire OCR processing (UC-6).
+
+    It needs the corpus, the scan probe, the manifest database (runs and the
+    OCR registry), the index lock and the system OCR tools; no index store
+    and no model. Opening it creates or migrates the manifest database.
+    """
+    configure_logging(settings.log_level)
+    corpus = _CorpusEnumerator(settings)
+    return ProcessScans(
+        lock=FileIndexLock(settings.data_dir / "index.lock"),
+        manifest=SQLiteManifest(settings.data_dir),
+        scanner=corpus,
+        discovery=create_discover_scans(settings),
+        registry=SQLiteOcrRegistry(settings.data_dir, settings.corpus_root),
+        engine=OcrmypdfEngine(settings.corpus_root),
+        converter=DdjvuConverter(settings.corpus_root),
+        files=LocalOcrFiles(settings.corpus_root),
+        languages=settings.ocr_languages,
+        jobs=settings.ocr_jobs,
+        timeout_seconds=settings.ocr_timeout_seconds,
+        cancel_mode=settings.ocr_cancel_mode,
     )
 
 

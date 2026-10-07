@@ -395,8 +395,8 @@ class InspectStatus:
             )
         )
         return ActiveOperation(
-            kind="update"
-            if run.kind == "update"
+            kind=run.kind
+            if run.kind in ("update", "ocr")
             else ("resume" if run.resumed_from else "build"),
             run_id=run.run_id,
             started_at=run.started_at,

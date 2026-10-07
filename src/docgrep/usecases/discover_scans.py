@@ -186,6 +186,11 @@ class DiscoverScans:
             )
         return tuple(sorted(set(file_types)))
 
+    def inspect(self, path: str, file_type: FileType, size: int) -> ScanEntry:
+        """Classify one file exactly as a discovery does; never raises for the
+        file itself (a failure is an ``inspection_failed`` entry)."""
+        return self._inspect(path, file_type, size)
+
     def _inspect(self, path: str, file_type: FileType, size: int) -> ScanEntry:
         def failed(
             reason: str, count: int | None, hint: str | None = None
