@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v1.11.1 (2026-10-07)
+
+### Bug Fixes
+
+- **adapters**: Keep absolute paths and raw tool output out of failure messages
+  ([`89dca7c`](https://github.com/metronforge/docgrep/commit/89dca7c77015b91fa9957224e9690c680ae3067b))
+
+- **cli**: Ignore a standard output pipe closed by its reader
+  ([`ef96e55`](https://github.com/metronforge/docgrep/commit/ef96e55da619240fd9b42514a83451147a182504))
+
+### Documentation
+
+- Point the server-mode test example at a throwaway Qdrant container
+  ([`449f41e`](https://github.com/metronforge/docgrep/commit/449f41ebcf320c00223967313d6cb03d809d7679))
+
+### Testing
+
+- Refuse server-mode tests on a Qdrant server holding other data
+  ([`b8503cb`](https://github.com/metronforge/docgrep/commit/b8503cbdd08228b407e028f0c7be32b0fea90eba))
+
+
 ## v1.11.0 (2026-10-05)
 
 ### Documentation
