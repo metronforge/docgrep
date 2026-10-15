@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v1.14.0 (2026-10-15)
+
+### Build System
+
+- **deps**: Add the MCP Python SDK
+  ([`9d3b1e2`](https://github.com/metronforge/docgrep/commit/9d3b1e2f22b351a4336b9a19d5d3d909ac609b08))
+
+### Documentation
+
+- Record the MCP front-end decision and document the MCP server
+  ([`27adf71`](https://github.com/metronforge/docgrep/commit/27adf71062f3b1e8f1e67f409e62f95d8fbf8b1a))
+
+### Features
+
+- **api**: Serve read-only MCP tools over stdio and streamable HTTP
+  ([`44b7d00`](https://github.com/metronforge/docgrep/commit/44b7d0014a58c10c98985768a3e1cdd2c9d46848))
+
+
 ## v1.13.1 (2026-10-15)
 
 ### Bug Fixes

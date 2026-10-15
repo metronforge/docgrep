@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 resolution-markers = [
     "extra != 'extra-7-docgrep-cpu' and extra == 'extra-7-docgrep-cu130'",
@@ -264,7 +264,7 @@ nvtx = [
 
 [[package]]
 name = "docgrep"
-version = "1.13.1"
+version = "1.14.0"
 source = { editable = "." }
 dependencies = [
     { name = "blake3" },
