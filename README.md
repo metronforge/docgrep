@@ -487,6 +487,49 @@ The body of `POST /search` takes `query`, an optional `top_n` and an optional `c
 
 When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
 
+## MCP server
+
+docgrep offers its search to MCP clients, such as Claude Code, as read-only tools over the same use cases as the command line and the HTTP API. Results are verbatim passages from your own documents, never summaries; clients are told to cite the path, the heading path and, when the passage has one, the page. Passage text is data from your documents, not instructions for the client. The design is recorded in [ADR-0019](docs/adr/0019-mcp-server-as-api-front-end.md).
+
+- `find_passages`: ranked verbatim passages for `query`, with an optional `top_n` (default 10, at most `DOCGREP_MCP_MAX_TOP_N`) and `collapse_duplicates`; the structured result is the body of `POST /search`, and DOCX and EPUB passages have a null page number.
+- `get_index_status`: the report of `docgrep status --json`, including the failed sources and their errors.
+
+No tool indexes, runs OCR, changes the configuration or cancels anything. A missing or empty index, an invalid argument and every other failure come back as a tool error with a category, a message and details.
+
+There are two transports. `docgrep serve` serves the tools over streamable HTTP at `/mcp`, next to the REST API; this is the one to use day to day, because one process holds the models for every client. `docgrep mcp` serves them on standard input and output for a client that starts the server itself; each such process loads its own models on the first search.
+
+Settings:
+
+- `DOCGREP_MCP_HTTP_ENABLED`: serve `/mcp` from `docgrep serve` (default `true`).
+- `DOCGREP_MCP_MAX_TOP_N`: the largest `top_n` a tool accepts (default 25, never more than `DOCGREP_TOP_N_MAX`); a larger value is an error, not cut down.
+
+The `/mcp` endpoint accepts the same Host and Origin values as the REST API: 127.0.0.1, localhost, ::1, the bind host and `DOCGREP_ALLOWED_HOSTS`.
+
+To connect Claude Code to a running `docgrep serve` (the address is `DOCGREP_HOST` and `DOCGREP_PORT`, by default 127.0.0.1 and 8000):
+
+```shell
+claude mcp add --transport http docgrep http://127.0.0.1:8000/mcp
+```
+
+A stdio server does not inherit your shell profile, so start it through a small script that loads your settings first, for example `~/bin/docgrep-mcp`:
+
+```sh
+#!/bin/sh
+set -a
+. "$HOME/.config/docgrep/env"   # DOCGREP_CORPUS_ROOT, DOCGREP_DATA_DIR, ...
+set +a
+PATH="/path/to/docgrep/.venv/bin:$PATH"
+exec docgrep mcp
+```
+
+Make it executable and register it; everything after `--` is the server command:
+
+```shell
+claude mcp add --transport stdio docgrep -- "$HOME/bin/docgrep-mcp"
+```
+
+`claude mcp add` stores the server in the `local` scope by default (this project, only for you); `--scope project` shares it with the repository through `.mcp.json`, and `--scope user` makes it available in all your projects.
+
 ## Running with a Qdrant server
 
 Without further configuration the index is stored in Qdrant's embedded local mode under the data directory. Local mode is intended for tests and small corpora: search time grows with the collection size, Qdrant advises against it beyond about 20,000 points, and only one process can open the store, so `docgrep index` and `docgrep search` fail while `docgrep serve` is running. docgrep logs a warning when a local collection holds more than 20,000 passages.
