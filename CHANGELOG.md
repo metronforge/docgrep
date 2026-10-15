@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.13.0 (2026-10-15)
+
+### Documentation
+
+- Add ADR for DOCX parsing
+  ([`60d199b`](https://github.com/metronforge/docgrep/commit/60d199b002f8101a1fafaf1ed0a6ac2123b1eb2d))
+
+### Features
+
+- **adapters**: Add DOCX parser
+  ([`cf5c4a2`](https://github.com/metronforge/docgrep/commit/cf5c4a2ff1ec2e2e02cfcd60a065a49aee3d890f))
+
+
 ## v1.12.0 (2026-10-07)
 
 ### Documentation
