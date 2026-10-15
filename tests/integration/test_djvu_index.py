@@ -151,14 +151,14 @@ def test_missing_tools_in_an_update_keep_the_source_for_the_next_update(
     assert [(f.path, f.reason) for f in first.failures] == [
         ("book.djvu", "parse_error")
     ]
-    # A recorded source that fails in an update keeps its row (ADR-0013), so
-    # the next update finds it again as newly supported.
+    # A recorded source that fails in an update is recorded as failed, so
+    # the next update retries it.
     record = SQLiteManifest(settings.data_dir).get_source("book.djvu")
-    assert record is not None and record.status == "skipped:unsupported"
+    assert record is not None and record.status == "failed:parse_error"
 
     second = _update(settings, _runner())
 
-    assert second.plan.newly_supported == 1 and second.indexed == 1
+    assert second.plan.retried == 1 and second.indexed == 1
 
 
 def test_the_dry_run_lists_djvu_as_supported(tmp_path: Path) -> None:

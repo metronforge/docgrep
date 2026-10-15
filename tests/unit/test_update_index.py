@@ -286,7 +286,6 @@ def test_a_modified_source_that_fails_keeps_its_passages_and_record(
     harness: Harness,
 ) -> None:
     before = harness.passages("b.txt")
-    record = harness.manifest.get_source("b.txt")
     harness.corpus.files["b.txt"] = ("six seven changed", 2.0)
     harness.parser.failing.add("b.txt")
 
@@ -294,7 +293,8 @@ def test_a_modified_source_that_fails_keeps_its_passages_and_record(
 
     assert summary.failed == 1 and summary.failures[0].reason == "parse_error"
     assert harness.passages("b.txt") == before
-    assert harness.manifest.get_source("b.txt") == record
+    failed = harness.manifest.get_source("b.txt")
+    assert failed is not None and failed.status == "failed:parse_error"
     run = harness.manifest.latest_run()
     assert run is not None and run.status == "completed"
     (journaled,) = harness.manifest.run_sources(run.run_id)
@@ -303,7 +303,7 @@ def test_a_modified_source_that_fails_keeps_its_passages_and_record(
     harness.parser.failing.clear()
     again = harness.update().run()
 
-    assert again.plan.modified == 1 and again.indexed == 1
+    assert again.plan.retried == 1 and again.indexed == 1
 
 
 def test_a_store_failure_while_writing_keeps_the_record(harness: Harness) -> None:
