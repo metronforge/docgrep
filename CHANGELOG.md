@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.13.1 (2026-10-15)
+
+### Bug Fixes
+
+- **usecases**: Persist parse failures in the manifest
+  ([`aec1681`](https://github.com/metronforge/docgrep/commit/aec16818985fccb7baffa3be001c9ea5c866c0f5))
+
+### Documentation
+
+- Note how an update records failed sources in ADR-0013
+  ([`7a8efa0`](https://github.com/metronforge/docgrep/commit/7a8efa07a19cf3a0f5ad03b902679e1b618a48af))
+
+
 ## v1.13.0 (2026-10-15)
 
 ### Documentation
