@@ -158,6 +158,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     status.add_argument("--json", action="store_true")
     commands.add_parser("serve", help="Start the local HTTP API")
+    commands.add_parser(
+        "mcp",
+        help="Serve the read-only MCP tools on standard input and output",
+    )
     return parser
 
 
@@ -762,6 +766,25 @@ def _ocr(args: argparse.Namespace, ocr: ProcessScans, register: Register) -> int
     return 0 if summary.status == "completed" and not summary.failed else 1
 
 
+MCP_INSTALL_HINT = "uv pip install mcp"
+
+
+def _mcp(settings: Settings) -> int:
+    """Serve MCP on standard input and output; nothing else is written there."""
+    try:
+        from docgrep.api.mcp import run_stdio
+    except ImportError as error:
+        if error.name is None or error.name.split(".")[0] != "mcp":
+            raise
+        sys.stderr.write(
+            "docgrep mcp needs the MCP Python SDK (package `mcp`); "
+            f"install it with: {MCP_INSTALL_HINT}\n"
+        )
+        return 2
+    run_stdio(settings)
+    return 0
+
+
 @_tolerate_closed_stdout
 def main(
     argv: Sequence[str] | None = None,
@@ -789,6 +812,9 @@ def main(
 
             uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
             return 0
+
+        if args.command == "mcp":
+            return _mcp(settings)
 
         if args.command == "dry-run":
             report = dry_run_factory(settings).run(
@@ -924,9 +950,9 @@ def main(
         return 1
     except SettingsValidationError as error:
         sys.stderr.write(f"invalid_settings: {error}\n")
-        # Scan discovery and OCR report configuration errors with 2, like
-        # usage errors.
-        return 2 if args.command in ("discover-scans", "ocr") else 1
+        # Scan discovery, OCR and MCP report configuration errors with 2,
+        # like usage errors.
+        return 2 if args.command in ("discover-scans", "ocr", "mcp") else 1
     except OSError as error:
         sys.stderr.write(f"io_error: {error}\n")
         return 1

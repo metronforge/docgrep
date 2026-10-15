@@ -1,7 +1,9 @@
 """FastAPI transport for local search and full index builds."""
 
+import importlib.util
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from threading import Lock
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -10,6 +12,8 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from docgrep import __version__
 from docgrep.adapters.qdrant import local_passage_count, warn_if_local_mode_is_large
@@ -240,6 +244,35 @@ def _error_status(error: DocgrepError) -> int:
     return 500
 
 
+_LOG = logging.getLogger(__name__)
+
+
+class McpEndpoint:
+    """The ``/mcp`` route, served by the MCP server that the app's lifespan
+    started (see ``docgrep.api.mcp``); outside a lifespan it answers 503."""
+
+    def __init__(self) -> None:
+        self.app: ASGIApp | None = None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self.app is None:
+            response = JSONResponse(
+                status_code=503,
+                content={
+                    "category": "mcp_unavailable",
+                    "message": "The MCP server is not running",
+                    "details": {},
+                },
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+def _mcp_sdk_available() -> bool:
+    return importlib.util.find_spec("mcp") is not None
+
+
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
@@ -278,6 +311,11 @@ def create_app(
     effective = settings or Settings()
     configure_logging(effective.log_level)
     initialized = services
+    # The MCP tools share this app's operations, so one process holds the
+    # models for REST and MCP clients alike.
+    mcp_endpoint = (
+        McpEndpoint() if effective.mcp_http_enabled and _mcp_sdk_available() else None
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -290,7 +328,15 @@ def create_app(
             )
             if count is not None:
                 warn_if_local_mode_is_large(count)
-        yield
+        async with AsyncExitStack() as stack:
+            if mcp_endpoint is not None:
+                await stack.enter_async_context(_serve_mcp(mcp_endpoint))
+            elif effective.mcp_http_enabled:
+                _LOG.warning(
+                    "mcp_http_unavailable",
+                    extra={"reason": "the mcp package cannot be imported"},
+                )
+            yield
         # Release a container created on demand so its models can be freed even
         # while the framework still caches the endpoint functions.
         if services is None:
@@ -308,6 +354,25 @@ def create_app(
                         effective, refuse_resumable_by_default=True
                     )
         return initialized
+
+    @asynccontextmanager
+    async def _serve_mcp(endpoint: McpEndpoint) -> AsyncIterator[None]:
+        # Imported here, at startup: the module imports this one.
+        from docgrep.api.mcp import create_mcp_server
+
+        server = create_mcp_server(effective, services=operations)
+        mcp_app = server.streamable_http_app()
+        async with server.session_manager.run():
+            endpoint.app = mcp_app
+            try:
+                yield
+            finally:
+                endpoint.app = None
+
+    if mcp_endpoint is not None:
+        app.router.routes.append(
+            Route("/mcp", endpoint=mcp_endpoint, methods=["GET", "POST", "DELETE"])
+        )
 
     allowed = frozenset(
         name.lower()

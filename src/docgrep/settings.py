@@ -8,6 +8,11 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from docgrep.domain.ocr import parse_languages
 
+# The MCP tools return this many passages by default, and at most
+# DOCGREP_MCP_MAX_TOP_N (default MCP_MAX_TOP_N), within DOCGREP_TOP_N_MAX.
+MCP_DEFAULT_TOP_N = 10
+MCP_MAX_TOP_N = 25
+
 
 class Settings(BaseSettings):
     """Configuration loaded from ``DOCGREP_`` environment variables."""
@@ -61,6 +66,10 @@ class Settings(BaseSettings):
     # Extra host names accepted in the Host and Origin headers, as a
     # comma-separated list in the environment (for container deployments).
     allowed_hosts: Annotated[tuple[str, ...], NoDecode] = ()
+    # MCP: serve the read-only tools over streamable HTTP at /mcp of
+    # `docgrep serve`, and the largest number of passages one call may ask for.
+    mcp_http_enabled: bool = True
+    mcp_max_top_n: int = Field(default=MCP_MAX_TOP_N, gt=0)
 
     @field_validator("log_level", mode="before")
     @classmethod
