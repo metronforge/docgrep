@@ -337,7 +337,7 @@ def test_skipped_unsupported_sources_are_indexed_once_a_parser_exists(
     record = manifest.get_source("books/one.epub")
     assert record is not None and record.status == "indexed"
     assert record.source.title == "One"
-    docx = manifest.get_source("misc/letter.docx")
+    docx = manifest.get_source("misc/letter.doc")
     assert docx is not None and docx.status == "skipped:unsupported"
 
 

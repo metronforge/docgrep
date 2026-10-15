@@ -182,12 +182,12 @@ def test_the_report_matches_the_tree(setup: tuple[Path, Path]) -> None:
     ]
     types = {t["type"]: t for t in report["types"]}
     assert set(types) == {"txt", "markdown", "docx"}
-    assert types["docx"]["status"] == "recognised_without_parser"
+    assert types["docx"]["status"] == "supported"
     assert report["unsupported"]["extensions"] == [
         {"extension": "(none)", "files": 1},
         {"extension": ".bin", "files": 1},
     ]
-    assert report["would_be_indexed"]["files"] == 2
+    assert report["would_be_indexed"]["files"] == 3
 
 
 def test_the_text_report_is_readable_and_has_no_file_list_or_content(
@@ -197,7 +197,8 @@ def test_the_text_report_is_readable_and_has_no_file_list_or_content(
 
     assert code == 0 and err == ""
     assert "Corpus dry run (read-only" in out
-    assert "recognised_without_parser" in out and "notes/private/: 1" in out
+    assert "Recognised without a parser: 0 files" in out
+    assert "notes/private/: 1" in out
     assert "estimate" in out and "extrapolated" in out
     assert SECRET not in out
     assert "a.txt" not in out and "books/old.docx" not in out
