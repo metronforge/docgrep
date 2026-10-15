@@ -24,7 +24,7 @@ def _corpus(root: Path) -> None:
     write_pdf(root / "clean.pdf", pdf_bytes([prose(1)]))
     write_pdf(root / "layer.pdf", pdf_bytes([broken(1), broken(2), prose(2)]))
     write_pdf(root / "scan.pdf", pdf_bytes([None]))
-    (root / "letter.docx").write_bytes(b"not parsed yet")
+    (root / "letter.doc").write_bytes(b"not parsed yet")
     write_epub(
         root / "locked.epub",
         epub_bytes([("a.xhtml", xhtml("<p>x</p>"))], encryption=encryption_xml(AES)),
@@ -73,7 +73,7 @@ def test_the_block_describes_the_sources_table(built: Any) -> None:
     }
     assert sources["skipped_by_extension"] == [
         {"extension": ".pdf", "sources": 2},
-        {"extension": ".docx", "sources": 1},
+        {"extension": ".doc", "sources": 1},
     ]
     (failed,) = sources["failed"]
     assert (failed["path"], failed["category"]) == ("locked.epub", "parse_error")

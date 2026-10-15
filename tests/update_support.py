@@ -65,7 +65,7 @@ INITIAL: dict[str, tuple[bytes, int]] = {
     "notes/b.md": (_note(21), OLD),
     "books/one.epub": (_book(30, "One"), OLD),
     "books/two.epub": (_book(31, "Two"), OLD),
-    "misc/letter.docx": (b"not parsed yet", OLD),
+    "misc/letter.doc": (b"not parsed yet", OLD),
 }
 
 # The final corpus: two removed, two edited, one touched (same content, new

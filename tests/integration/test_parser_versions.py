@@ -84,7 +84,7 @@ def test_a_build_records_the_declared_versions(tmp_path: Path) -> None:
         record.source.path: (record.status, record.source.parser_version)
         for record in SQLiteManifest(settings.data_dir).committed_sources()
     }
-    assert versions.pop("misc/letter.docx") == ("skipped:unsupported", None)
+    assert versions.pop("misc/letter.doc") == ("skipped:unsupported", None)
     assert set(versions.values()) == {("indexed", "1")}
     assert {point[1]["parser_version"] for point in dump_points(settings)} == {"1"}
 
