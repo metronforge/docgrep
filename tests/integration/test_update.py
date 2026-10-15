@@ -413,7 +413,8 @@ def test_a_modified_source_that_fails_stays_searchable(tmp_path: Path) -> None:
     assert hits[0].passage.text.startswith("marker1 ")
     close(services)
     manifest = SQLiteManifest(settings.data_dir)
-    assert manifest.get_source("doc01.txt") == old_hash
+    failed = manifest.get_source("doc01.txt")
+    assert failed is not None and failed.status == "failed:parse_error"
     run = manifest.latest_run()
     assert run is not None
     (journaled,) = [
@@ -423,7 +424,7 @@ def test_a_modified_source_that_fails_stays_searchable(tmp_path: Path) -> None:
 
     again = _update(settings)
 
-    assert again.plan.modified == 1 and again.failed == 0
+    assert again.plan.retried == 1 and again.failed == 0
     record = manifest.get_source("doc01.txt")
     assert record is not None and record.source.content_hash != (
         old_hash.source.content_hash if old_hash else None

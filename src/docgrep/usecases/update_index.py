@@ -531,13 +531,14 @@ class UpdateIndex(SourceIndexing):
             failure = self._record_failure(
                 prepared.source, reason, prepared.error, run_id
             )
-            if change.record is None:
-                # An added source is recorded as failed, as a build would.
-                self.manifest.record_source(
-                    prepared.source, prepared.status, str(prepared.error)
-                )
-            # A recorded source keeps its passages and its record, so the next
-            # update finds it again.
+            # Whatever the record said before (added, indexed, skipped or
+            # failed), it now says failed, as after a build: status counts the
+            # source as failed and the next update retries it. Passages of a
+            # previously indexed source are kept, so it stays searchable until
+            # an update succeeds or the file is removed.
+            self.manifest.record_source(
+                prepared.source, prepared.status, str(prepared.error)
+            )
             return "failed", failure, 0, 0
         try:
             pruned = self._write(prepared)
