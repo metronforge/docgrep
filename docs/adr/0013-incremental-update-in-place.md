@@ -20,3 +20,7 @@ A full build writes into a staging collection and publishes it by alias swap. An
 ## Consequences
 
 During an update a query may see a mix of old and new sources, and briefly both versions of one source. An update cannot change the embedding model or chunking; that needs a full rebuild.
+
+## Note (2026-10-15)
+
+Point 3 applies to failures while writing points (`store_error`). A source that cannot be prepared, because parsing or embedding failed, is recorded as `failed:<reason>` with the error message, whatever its row said before: added, indexed, skipped (including as unsupported) or failed. Status then counts it as failed, and the next update retries it instead of planning it as modified again. The points of a previously indexed source are not removed, so its old content stays searchable, as point 3 promises, until an update succeeds or the file is removed.
