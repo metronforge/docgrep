@@ -1,6 +1,7 @@
 """Immutable values shared by indexing and retrieval."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
@@ -151,6 +152,10 @@ class SearchResult:
 
     ``collapsed_duplicates`` counts the candidates removed from the ranking as
     duplicates of another one; None when duplicates were not collapsed.
+    ``applied_filters`` is the canonical source filter, empty when none was
+    applied. ``sources_excluded_for_missing_metadata`` counts the sources left
+    out only because a filtered author or year is null; None unless the
+    filter sets an author or a year bound.
     """
 
     results: tuple[RankedPassage, ...]
@@ -161,6 +166,8 @@ class SearchResult:
     rerank_skip_reason: str | None = None
     hint: str | None = None
     collapsed_duplicates: int | None = None
+    applied_filters: Mapping[str, list[str] | int] = field(default_factory=dict)
+    sources_excluded_for_missing_metadata: int | None = None
 
     def __post_init__(self) -> None:
         if self.total_hits < len(self.results):
@@ -173,6 +180,11 @@ class SearchResult:
             raise ValueError("took_ms must be finite and non-negative")
         if self.rerank_skip_reason is not None and not self.rerank_skipped:
             raise ValueError("rerank_skip_reason requires rerank_skipped")
+        if (
+            self.sources_excluded_for_missing_metadata is not None
+            and self.sources_excluded_for_missing_metadata < 0
+        ):
+            raise ValueError("sources_excluded_for_missing_metadata must be >= 0")
 
 
 @dataclass(frozen=True, slots=True)
