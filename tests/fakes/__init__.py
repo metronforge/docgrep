@@ -126,9 +126,12 @@ class InMemoryPassageStore:
         dense_vector: Sequence[float],
         sparse_vector: Mapping[int, float],
         top_k: int,
+        source_ids: Collection[str] | None = None,
     ) -> tuple[RetrievalCandidate, ...]:
         scored: list[tuple[float, RetrievalCandidate]] = []
         for passage, source, stored_dense, stored_sparse in self._items.values():
+            if source_ids is not None and source.source_id not in source_ids:
+                continue
             dense_score = sum(
                 a * b for a, b in zip(dense_vector, stored_dense, strict=True)
             )

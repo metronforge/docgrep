@@ -48,6 +48,22 @@ _PASSAGE_FILTER = models.Filter(
 )
 
 
+def _allowed_passages_filter(source_ids: Collection[str] | None) -> models.Filter:
+    """Passages only, and only of the allowed sources when a list is given."""
+    if source_ids is None:
+        return _PASSAGE_FILTER
+    return models.Filter(
+        must=[
+            models.FieldCondition(
+                key="record_type", match=models.MatchValue(value="passage")
+            ),
+            models.FieldCondition(
+                key="source_id", match=models.MatchAny(any=sorted(source_ids))
+            ),
+        ]
+    )
+
+
 def _source_filter(source_id: str) -> models.Filter:
     return models.Filter(
         must=[
@@ -659,15 +675,21 @@ class QdrantPassageStore:
         dense_vector: Sequence[float],
         sparse_vector: Mapping[int, float],
         top_k: int,
+        source_ids: Collection[str] | None = None,
     ) -> tuple[RetrievalCandidate, ...]:
         if self._active_collection() is None or top_k <= 0:
             return ()
+        if source_ids is not None and not source_ids:
+            return ()
+        # The allow-list sits in every stage of the query, so the candidates
+        # are the best of the allowed sources, not a remainder of the best.
+        allowed = _allowed_passages_filter(source_ids)
         prefetch = [
             models.Prefetch(
                 query=list(dense_vector),
                 using="dense",
                 limit=top_k,
-                filter=_PASSAGE_FILTER,
+                filter=allowed,
             )
         ]
         if sparse_vector:
@@ -680,14 +702,14 @@ class QdrantPassageStore:
                     ),
                     using="sparse",
                     limit=top_k,
-                    filter=_PASSAGE_FILTER,
+                    filter=allowed,
                 )
             )
         fused = self._client.query_points(
             self._alias,
             prefetch=prefetch,
             query=models.FusionQuery(fusion=models.Fusion.RRF),
-            query_filter=_PASSAGE_FILTER,
+            query_filter=allowed,
             limit=top_k,
             with_payload=True,
             with_vectors=["dense"],
