@@ -16,6 +16,7 @@ from qdrant_client import QdrantClient, models
 
 from docgrep.domain.errors import (
     DocgrepError,
+    IndexIncomplete,
     StagingInconsistent,
     StoreUnavailable,
     ValidationError,
@@ -641,6 +642,15 @@ class QdrantPassageStore:
             return 0
         return self._client.count(
             self._alias, count_filter=_PASSAGE_FILTER, exact=True
+        ).count
+
+    @_domain_errors
+    def count_source_passages(self, source_id: str) -> int:
+        """The exact passage count of one source in the published collection."""
+        if self._active_collection() is None:
+            raise IndexIncomplete("No index is published")
+        return self._client.count(
+            self._alias, count_filter=_source_filter(source_id), exact=True
         ).count
 
     @_domain_errors

@@ -332,7 +332,27 @@ class StatusStore(PassageRetriever, Protocol):
     def close(self) -> None: ...
 
 
-class ManifestReader(Protocol):
+class SourcePassageCounter(Protocol):
+    """Count the passages of one source in the published index, read-only."""
+
+    def count_source_passages(self, source_id: str) -> int:
+        """The exact number of passages of the source; 0 when it has none.
+
+        Raises ``IndexIncomplete`` when no index is published and
+        ``StoreUnavailable`` when the store cannot be read.
+        """
+        ...
+
+
+class CommittedSourceReader(Protocol):
+    """Read the committed source outcomes of the manifest."""
+
+    def committed_sources(self) -> tuple[ManifestSourceRecord, ...]:
+        """Every committed source outcome, in path order."""
+        ...
+
+
+class ManifestReader(CommittedSourceReader, Protocol):
     """Read committed source outcomes and the most recent indexing run."""
 
     def get_source(self, path: str) -> ManifestSourceRecord | None: ...
@@ -341,10 +361,6 @@ class ManifestReader(Protocol):
 
     def latest_run_of_kind(self, kind: str) -> ManifestRunRecord | None:
         """The most recent run of one kind (``build`` or ``update``), or None."""
-        ...
-
-    def committed_sources(self) -> tuple[ManifestSourceRecord, ...]:
-        """Every committed source outcome, in path order."""
         ...
 
     def run_sources(self, run_id: str) -> tuple[ManifestSourceRecord, ...]:
@@ -459,7 +475,18 @@ class OcrDelegations(Protocol):
         ...
 
 
-class OcrRegistryReader(OcrDelegations, Protocol):
+class OcrOutputOwners(Protocol):
+    """Which file an OCR output was made from; reads never raise.
+
+    A registry entry is live while its output file exists.
+    """
+
+    def output_owner(self, output_path: str) -> str | None:
+        """The input path of the live entry whose output is ``output_path``."""
+        ...
+
+
+class OcrRegistryReader(OcrDelegations, OcrOutputOwners, Protocol):
     """Read the OCR registry; the same read rules as ``OcrDelegations``.
 
     A registry entry is live while its output file exists.
@@ -468,10 +495,6 @@ class OcrRegistryReader(OcrDelegations, Protocol):
     def find_by_input_hash(self, content_hash: str) -> OcrRecord | None:
         """A live entry for an input with this content, or None; the first by
         input path when several inputs have the same content."""
-        ...
-
-    def output_owner(self, output_path: str) -> str | None:
-        """The input path of the live entry whose output is ``output_path``."""
         ...
 
 
