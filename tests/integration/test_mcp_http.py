@@ -77,7 +77,7 @@ def test_serve_answers_mcp_and_rest_with_the_same_results(tmp_path: Path) -> Non
             for arguments in _SEARCHES
         ]
 
-    assert seen["tools"] == ["find_passages", "get_index_status"]
+    assert seen["tools"] == ["find_passages", "get_index_status", "browse_sources"]
     for result, response in zip(seen["finds"], rest, strict=True):
         assert not result.isError and response.status_code == 200
         assert without_timing(structured(result)) == without_timing(response.json())

@@ -1,6 +1,7 @@
 """Composition root for local indexing and retrieval."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -29,8 +30,16 @@ from docgrep.adapters.parsers.text import TextParser
 from docgrep.adapters.qdrant import QdrantPassageStore
 from docgrep.adapters.scans import FileScanProbe
 from docgrep.api.log_config import configure_logging
-from docgrep.domain.models import FileType, ScannedFile, SearchResult, Source
+from docgrep.domain.errors import IndexIncomplete
+from docgrep.domain.models import (
+    FileType,
+    ManifestSourceRecord,
+    ScannedFile,
+    SearchResult,
+    Source,
+)
 from docgrep.domain.protocols import (
+    CommittedSourceReader,
     DocumentParser,
     EmbeddingProvider,
     ManifestReader,
@@ -39,7 +48,9 @@ from docgrep.domain.protocols import (
     TokenSpanTokenizer,
     parser_version,
 )
+from docgrep.domain.sources import BrowseRequest, BrowseResult
 from docgrep.settings import Settings
+from docgrep.usecases.browse_sources import BrowseSources
 from docgrep.usecases.build_index import BuildIndex, BuildSummary
 from docgrep.usecases.cancel_index import CancelIndex
 from docgrep.usecases.discover_scans import DiscoverScans
@@ -85,6 +96,12 @@ class UpdateOperation(Protocol):
     def request_cancel(self) -> None: ...
 
 
+class BrowseOperation(Protocol):
+    """List one page of indexed sources."""
+
+    def run(self, request: BrowseRequest) -> BrowseResult: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Services:
     """Operations exposed to HTTP and CLI transports."""
@@ -92,6 +109,7 @@ class Services:
     search: SearchOperation
     build: BuildOperation
     update: UpdateOperation | None = None
+    browse: BrowseOperation | None = None
 
 
 class _CorpusEnumerator:
@@ -287,6 +305,86 @@ def create_status(settings: Settings) -> InspectStatus:
     )
 
 
+def index_missing(settings: Settings) -> bool:
+    """Whether no index was ever built for this data directory.
+
+    Checked before the composition root is created, because opening it would
+    create the data directory and an empty store.
+    """
+    if not (settings.data_dir / "manifest.sqlite3").is_file():
+        return True
+    return not settings.qdrant_url and not (settings.data_dir / "qdrant").is_dir()
+
+
+class _NoSources:
+    """The committed sources of a data directory without a manifest."""
+
+    def committed_sources(self) -> tuple[ManifestSourceRecord, ...]:
+        return ()
+
+
+class _BrowseStore:
+    """Open the store on the first count, and only then.
+
+    A local store that does not exist is not created: it has no published
+    index. A store that cannot be opened fails every count the same way.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._store: QdrantPassageStore | None = None
+        self._failure: Exception | None = None
+
+    def count_source_passages(self, source_id: str) -> int:
+        if self._failure is not None:
+            raise self._failure
+        if self._store is None:
+            settings = self._settings
+            local = settings.data_dir / "qdrant"
+            if not settings.qdrant_url and not local.is_dir():
+                raise IndexIncomplete("No index is published")
+            try:
+                self._store = (
+                    QdrantPassageStore(
+                        url=settings.qdrant_url, alias=settings.qdrant_alias
+                    )
+                    if settings.qdrant_url
+                    else QdrantPassageStore(local, alias=settings.qdrant_alias)
+                )
+            except Exception as error:
+                self._failure = error
+                raise
+        return self._store.count_source_passages(source_id)
+
+    def close(self) -> None:
+        if self._store is not None:
+            self._store.close()
+            self._store = None
+
+
+@contextmanager
+def open_browse(settings: Settings) -> Iterator[BrowseSources]:
+    """Wire source browsing (UC-08) for a process of its own, such as the CLI.
+
+    It loads no model, takes no lock and creates nothing: the manifest and
+    the OCR registry are opened read-only, and the store only when a count
+    is needed. The store is closed on exit.
+    """
+    configure_logging(settings.log_level)
+    manifest: CommittedSourceReader = (
+        SQLiteManifest(settings.data_dir, read_only=True)
+        if (settings.data_dir / "manifest.sqlite3").is_file()
+        else _NoSources()
+    )
+    store = _BrowseStore(settings)
+    try:
+        yield BrowseSources(
+            manifest=manifest, store=store, ocr=open_ocr_registry_view(settings)
+        )
+    finally:
+        store.close()
+
+
 def create_cancel(settings: Settings) -> CancelIndex:
     """Wire the cancel request.
 
@@ -394,4 +492,6 @@ def create_container(
             log_context=log_context,
             delegations=delegations,
         ),
+        # The search store is shared, so a local store is never opened twice.
+        browse=BrowseSources(manifest=manifest, store=store, ocr=delegations),
     )

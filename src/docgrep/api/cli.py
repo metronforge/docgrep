@@ -9,11 +9,13 @@ import signal
 import sys
 from collections import Counter
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
 from typing import Any
 
 from pydantic import ValidationError as SettingsValidationError
 
 from docgrep.api.container import (
+    BrowseOperation,
     Services,
     create_cancel,
     create_container,
@@ -21,12 +23,20 @@ from docgrep.api.container import (
     create_dry_run,
     create_process_scans,
     create_status,
+    open_browse,
     open_ocr_registry_view,
 )
-from docgrep.api.http import SearchResponse, create_app
+from docgrep.api.http import (
+    BrowseSourcesRequest,
+    BrowseSourcesResponse,
+    SearchResponse,
+    create_app,
+    validation_problems,
+)
 from docgrep.api.log_config import configure_logging
 from docgrep.api.signals import Register, graceful_cancel
 from docgrep.domain.errors import DocgrepError, ValidationError
+from docgrep.domain.sources import HAS_METADATA_VALUES, SORT_KEYS
 from docgrep.settings import Settings
 from docgrep.usecases.cancel_index import CancelIndex, CancelResult
 from docgrep.usecases.discover_scans import DiscoverScans
@@ -150,6 +160,51 @@ def _parser() -> argparse.ArgumentParser:
         "rebuilding their text layer",
     )
     ocr.add_argument("--json", action="store_true")
+    sources = commands.add_parser(
+        "sources",
+        help="List the indexed sources with their metadata (read-only)",
+        description="Filters combine with AND; repeated values of one option "
+        "combine with OR. A source without the filtered metadata never matches.",
+    )
+    sources.add_argument(
+        "--author",
+        dest="authors",
+        action="append",
+        help="Author substring, case-insensitive; repeatable",
+    )
+    sources.add_argument("--year-from", dest="year_from", type=int)
+    sources.add_argument("--year-to", dest="year_to", type=int)
+    sources.add_argument(
+        "--type",
+        dest="file_types",
+        action="append",
+        help="File type (pdf, markdown, txt, epub, docx, djvu); repeatable",
+    )
+    sources.add_argument(
+        "--path-prefix",
+        dest="path_prefixes",
+        action="append",
+        help="Path prefix relative to the corpus root, case-sensitive; repeatable",
+    )
+    sources.add_argument(
+        "--glob",
+        dest="path_globs",
+        action="append",
+        help="Path glob, as in DOCGREP_INCLUDE_GLOBS; repeatable",
+    )
+    sources.add_argument(
+        "--source-id", dest="source_ids", action="append", help="Repeatable"
+    )
+    sources.add_argument(
+        "--has-metadata", dest="has_metadata", choices=HAS_METADATA_VALUES
+    )
+    sources.add_argument("--sort", dest="sort_by", choices=SORT_KEYS)
+    sources.add_argument("--desc", action="store_true", help="Sort in descending order")
+    sources.add_argument("--page", type=int)
+    sources.add_argument("--page-size", dest="page_size", type=int)
+    sources.add_argument(
+        "--json", action="store_true", help="Print the body of POST /sources/browse"
+    )
     commands.add_parser(
         "cancel", help="Ask a running index build to stop after its current batch"
     )
@@ -567,6 +622,115 @@ def _format_status(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Column widths of the source table; longer values end with an ellipsis.
+_SOURCE_COLUMNS = (
+    ("PATH", 48),
+    ("TYPE", 8),
+    ("YEAR", 4),
+    ("AUTHOR", 24),
+    ("TITLE", 36),
+)
+
+
+def _cell(value: object, width: int) -> str:
+    text = "-" if value is None else " ".join(str(value).split())
+    if len(text) > width:
+        text = text[: width - 1] + "…"
+    return text.ljust(width)
+
+
+def _format_sources(response: BrowseSourcesResponse) -> str:
+    """Render a source listing as a table with one line per source."""
+    count = len(response.sources)
+    pages = -(-response.total_hits // response.page_size)
+    if count:
+        first = (response.page - 1) * response.page_size + 1
+        summary = (
+            f"Sources {first}-{first + count - 1} of {response.total_hits} "
+            f"(page {response.page} of {pages})"
+        )
+    elif response.total_hits:
+        summary = (
+            f"No sources on page {response.page}; {response.total_hits} match "
+            f"({pages} pages)"
+        )
+    else:
+        summary = "No indexed sources match"
+    types = response.aggregates.by_file_type
+    if types:
+        summary += "; " + ", ".join(f"{name} {n}" for name, n in types.items())
+    lines = []
+    if count:
+        lines.append(
+            "  ".join(_cell(name, width) for name, width in _SOURCE_COLUMNS)
+            + "  PASSAGES"
+        )
+        for item in response.sources:
+            values = (
+                item.path,
+                item.file_type.value,
+                item.year,
+                item.author,
+                item.title,
+            )
+            passages = "?" if item.passage_count is None else str(item.passage_count)
+            lines.append(
+                "  ".join(
+                    _cell(value, width)
+                    for value, (_, width) in zip(values, _SOURCE_COLUMNS, strict=True)
+                )
+                + f"  {passages:>8}"
+            )
+    lines.append(summary)
+    if any(item.degraded for item in response.sources):
+        lines.append("? the passage count could not be read")
+    return "\n".join(lines) + "\n"
+
+
+def _sources(args: argparse.Namespace, browse: BrowseOperation) -> int:
+    """Run ``docgrep sources``: 0 on success, also when nothing matches, and
+    2 for invalid arguments."""
+    names = (
+        "source_ids",
+        "authors",
+        "year_from",
+        "year_to",
+        "file_types",
+        "path_prefixes",
+        "path_globs",
+        "has_metadata",
+        "page",
+        "page_size",
+        "sort_by",
+    )
+    body: dict[str, Any] = {
+        name: getattr(args, name) for name in names if getattr(args, name) is not None
+    }
+    if args.desc:
+        body["sort_order"] = "desc"
+    try:
+        request = BrowseSourcesRequest.model_validate(body)
+    except SettingsValidationError as error:
+        for problem in validation_problems(error.errors()):
+            location = problem["location"]
+            where = (
+                ".".join(str(part) for part in location)
+                if isinstance(location, list)
+                else ""
+            )
+            sys.stderr.write(
+                f"validation_error: {where + ': ' if where else ''}"
+                f"{problem['message']}\n"
+            )
+        return 2
+    response = BrowseSourcesResponse.from_domain(browse.run(request.to_domain()))
+    if args.json:
+        _emit(response.model_dump_json(indent=2) + "\n")
+    else:
+        _emit(_format_sources(response))
+    return 0
+
+
 def _format_plan(plan: UpdatePlan) -> str:
     if plan.changes == 0:
         return f"No changes detected ({plan.unchanged} sources unchanged).\n"
@@ -795,6 +959,9 @@ def main(
     cancel_factory: Callable[[Settings], CancelIndex] = create_cancel,
     status_factory: Callable[[Settings], InspectStatus] = create_status,
     ocr_factory: Callable[[Settings], ProcessScans] = create_process_scans,
+    browse_factory: Callable[
+        [Settings], AbstractContextManager[BrowseOperation]
+    ] = open_browse,
     register_signal: Register = signal.signal,
 ) -> int:
     """Run one CLI command and return a process exit status.
@@ -861,6 +1028,10 @@ def main(
             else:
                 _emit(_format_status(status_report))
             return 0
+
+        if args.command == "sources":
+            with browse_factory(settings) as browse:
+                return _sources(args, browse)
 
         if args.command == "cancel":
             text, status = _format_cancel(cancel_factory(settings).run())
@@ -950,9 +1121,9 @@ def main(
         return 1
     except SettingsValidationError as error:
         sys.stderr.write(f"invalid_settings: {error}\n")
-        # Scan discovery, OCR and MCP report configuration errors with 2,
-        # like usage errors.
-        return 2 if args.command in ("discover-scans", "ocr", "mcp") else 1
+        # Scan discovery, OCR, MCP and source browsing report configuration
+        # errors with 2, like usage errors.
+        return 2 if args.command in ("discover-scans", "ocr", "mcp", "sources") else 1
     except OSError as error:
         sys.stderr.write(f"io_error: {error}\n")
         return 1

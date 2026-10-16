@@ -7,11 +7,15 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from docgrep.domain.ocr import parse_languages
+from docgrep.domain.sources import MAX_PAGE_SIZE
 
 # The MCP tools return this many passages by default, and at most
 # DOCGREP_MCP_MAX_TOP_N (default MCP_MAX_TOP_N), within DOCGREP_TOP_N_MAX.
 MCP_DEFAULT_TOP_N = 10
 MCP_MAX_TOP_N = 25
+# The browse_sources tool returns at most DOCGREP_MCP_MAX_PAGE_SIZE sources
+# per page (default MCP_MAX_PAGE_SIZE), never more than MAX_PAGE_SIZE.
+MCP_MAX_PAGE_SIZE = 100
 
 
 class Settings(BaseSettings):
@@ -70,6 +74,7 @@ class Settings(BaseSettings):
     # `docgrep serve`, and the largest number of passages one call may ask for.
     mcp_http_enabled: bool = True
     mcp_max_top_n: int = Field(default=MCP_MAX_TOP_N, gt=0)
+    mcp_max_page_size: int = Field(default=MCP_MAX_PAGE_SIZE, gt=0, le=MAX_PAGE_SIZE)
 
     @field_validator("log_level", mode="before")
     @classmethod

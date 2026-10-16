@@ -59,8 +59,8 @@ def normalize_path(path: str) -> str:
     return path.replace("\\", "/")
 
 
-def _texts(name: str, values: Iterable[str]) -> tuple[str, ...]:
-    """Distinct non-blank values, sorted."""
+def distinct_texts(name: str, values: Iterable[str]) -> tuple[str, ...]:
+    """Distinct non-blank values of a filter field, sorted."""
     found = set()
     for value in values:
         if not isinstance(value, str) or not value.strip():
@@ -107,11 +107,11 @@ class SourceFilter:
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
-        set_(self, "source_ids", _texts("source_ids", self.source_ids))
-        set_(self, "authors", _texts("authors", self.authors))
+        set_(self, "source_ids", distinct_texts("source_ids", self.source_ids))
+        set_(self, "authors", distinct_texts("authors", self.authors))
         set_(self, "file_types", parse_file_types(self.file_types))
         for name in ("path_prefixes", "path_globs"):
-            values = _texts(name, getattr(self, name))
+            values = distinct_texts(name, getattr(self, name))
             set_(self, name, tuple(sorted({normalize_path(v) for v in values})))
         for name in ("year_from", "year_to"):
             value = getattr(self, name)
