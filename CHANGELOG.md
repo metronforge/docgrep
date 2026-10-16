@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v1.15.0 (2026-10-16)
+
+### Documentation
+
+- Describe source browsing and the shared filter
+  ([`5123b3c`](https://github.com/metronforge/docgrep/commit/5123b3c486c0397cd6a3f40bd9a4bdf69fd106c7))
+
+### Features
+
+- **api**: Browse sources over HTTP, MCP and the CLI
+  ([`499900d`](https://github.com/metronforge/docgrep/commit/499900da5094f7b76b2379e14d374479330c22d2))
+
+- **domain**: Add the shared source filter and browse models
+  ([`25839cd`](https://github.com/metronforge/docgrep/commit/25839cd04ed9a7d0d9732a707e380e7269cd2b80))
+
+- **usecases**: Browse indexed sources
+  ([`9b87ccd`](https://github.com/metronforge/docgrep/commit/9b87ccdb168ebc260e7d36bc613acf03febadae0))
+
+
 ## v1.14.1 (2026-10-16)
 
 ### Bug Fixes
