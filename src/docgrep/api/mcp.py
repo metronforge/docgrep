@@ -19,11 +19,13 @@ from typing import Annotated, Any
 import anyio
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
+from docgrep import __version__
 from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.api.container import Services, create_container, create_status
 from docgrep.api.http import SearchResponse
@@ -286,6 +288,8 @@ def create_mcp_server(
     # its own handler (log_config), so the root logger is put back as it was.
     root.handlers[:] = root_state[0]
     root.setLevel(root_state[1])
+    # Reported as serverInfo.version on initialize, over both transports.
+    lowlevel_server(server).version = __version__
 
     async def guarded(work: Callable[[], CallToolResult]) -> CallToolResult:
         try:
@@ -382,6 +386,18 @@ def _scrub_report(report: dict[str, Any], paths: tuple[Path, ...]) -> dict[str, 
     return report
 
 
+def lowlevel_server(server: FastMCP) -> Server[Any, Any]:
+    """The SDK's low-level server behind ``server``: the only access to a
+    private SDK attribute in docgrep.
+
+    Checked against mcp 1.30.0, where FastMCP offers no public way to set the
+    server version or to run the stdio transport on given streams.
+    tests/unit/test_mcp_sdk_contract.py fails if an SDK upgrade changes it.
+    """
+    lowlevel: Server[Any, Any] = server._mcp_server
+    return lowlevel
+
+
 class _LazyServices:
     """Create the composition root on first use, once, for every thread."""
 
@@ -419,7 +435,7 @@ async def _serve_stdio(server: FastMCP, protocol_fd: int) -> None:
     )
     # FastMCP.run_stdio_async always writes to sys.stdout; the low-level server
     # is used directly to give it the protocol descriptor instead.
-    lowlevel = server._mcp_server
+    lowlevel = lowlevel_server(server)
     async with stdio_server(stdout=stdout) as (read_stream, write_stream):
         await lowlevel.run(
             read_stream, write_stream, lowlevel.create_initialization_options()
