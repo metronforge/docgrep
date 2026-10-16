@@ -19,14 +19,18 @@ from typing import Annotated, Any
 import anyio
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.tools import Tool
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import ValidationError as ArgumentsInvalid
 
+from docgrep import __version__
 from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.api.container import Services, create_container, create_status
-from docgrep.api.http import SearchResponse
+from docgrep.api.http import SearchResponse, validation_problems
 from docgrep.domain.errors import DocgrepError, IndexIncomplete, ValidationError
 from docgrep.settings import MCP_DEFAULT_TOP_N, Settings
 from docgrep.usecases.inspect_status import InspectStatus
@@ -72,6 +76,49 @@ _STATUS_DESCRIPTION = (
     "by state (indexed, skipped, failed) with the failed sources and their "
     "error text. Read-only; changes nothing."
 )
+
+
+class ToolErrorBody(BaseModel):
+    """The body of a tool error: the fields of an HTTP error body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: str
+    message: str
+    details: dict[str, Any]
+
+
+class IndexStatusBody(BaseModel):
+    """The status report of ``docgrep status --json``: its stable top-level
+    fields; the nested objects are left open."""
+
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: int
+    index_state: str
+    latest_run: dict[str, Any] | None
+    active_operation: dict[str, Any] | None
+    vector_store: dict[str, Any]
+    collection: dict[str, Any] | None
+    drift: list[dict[str, Any]]
+    warnings: list[dict[str, Any]]
+    sources: dict[str, Any] | None = None
+
+
+# The declared output schemas accept a success body or an error body: the SDK
+# checks every structured result, error results included, against them.
+# "type": "object" keeps the root an object schema, as tool output schemas
+# must be.
+class FindPassagesOutput(RootModel[SearchResponse | ToolErrorBody]):
+    """A search body, or an error body when isError is set."""
+
+    model_config = ConfigDict(json_schema_extra={"type": "object"})
+
+
+class IndexStatusOutput(RootModel[IndexStatusBody | ToolErrorBody]):
+    """A status body, or an error body when isError is set."""
+
+    model_config = ConfigDict(json_schema_extra={"type": "object"})
 
 
 def _scrub(value: object, paths: tuple[Path, ...]) -> object:
@@ -228,21 +275,6 @@ def create_mcp_server(
             for form in (f"{scheme}://{host}", f"{scheme}://{host}:*")
         ],
     )
-    root = logging.getLogger()
-    root_state = (list(root.handlers), root.level)
-    server = FastMCP(
-        SERVER_NAME,
-        instructions=INSTRUCTIONS,
-        host=settings.host,
-        port=settings.port,
-        streamable_http_path="/mcp",
-        transport_security=security,
-        log_level=settings.log_level,
-    )
-    # The SDK configures the root logger on construction; docgrep logs through
-    # its own handler (log_config), so the root logger is put back as it was.
-    root.handlers[:] = root_state[0]
-    root.setLevel(root_state[1])
 
     async def guarded(work: Callable[[], CallToolResult]) -> CallToolResult:
         try:
@@ -285,12 +317,6 @@ def create_mcp_server(
             structuredContent=structured,
         )
 
-    @server.tool(
-        name="find_passages",
-        title="Find passages",
-        description=_FIND_DESCRIPTION,
-        annotations=_READ_ONLY,
-    )
     async def find_passages(
         query: Annotated[str, Field(description="What to look for, in any language.")],
         top_n: Annotated[
@@ -307,9 +333,7 @@ def create_mcp_server(
                 "omit for the server default."
             ),
         ] = None,
-    ) -> CallToolResult:
-        # No output schema is declared: the SDK would validate error results
-        # against it too. Success results carry the SearchResponse body.
+    ) -> Annotated[CallToolResult, FindPassagesOutput]:
         return await guarded(lambda: search(query, top_n, collapse_duplicates))
 
     def index_status() -> CallToolResult:
@@ -319,16 +343,76 @@ def create_mcp_server(
             structuredContent=_scrub_report(report, paths),
         )
 
-    @server.tool(
-        name="get_index_status",
-        title="Index status",
-        description=_STATUS_DESCRIPTION,
-        annotations=_READ_ONLY,
-    )
-    async def get_index_status() -> CallToolResult:
+    async def get_index_status() -> Annotated[CallToolResult, IndexStatusOutput]:
         return await guarded(index_status)
 
+    tools = [
+        _ArgumentCheckedTool.from_function(
+            find_passages,
+            name="find_passages",
+            title="Find passages",
+            description=_FIND_DESCRIPTION,
+            annotations=_READ_ONLY,
+        ).model_copy(update={"scrubbed_paths": paths}),
+        _ArgumentCheckedTool.from_function(
+            get_index_status,
+            name="get_index_status",
+            title="Index status",
+            description=_STATUS_DESCRIPTION,
+            annotations=_READ_ONLY,
+        ).model_copy(update={"scrubbed_paths": paths}),
+    ]
+    root = logging.getLogger()
+    root_state = (list(root.handlers), root.level)
+    server = FastMCP(
+        SERVER_NAME,
+        instructions=INSTRUCTIONS,
+        host=settings.host,
+        port=settings.port,
+        streamable_http_path="/mcp",
+        transport_security=security,
+        log_level=settings.log_level,
+        tools=tools,
+    )
+    # The SDK configures the root logger on construction; docgrep logs through
+    # its own handler (log_config), so the root logger is put back as it was.
+    root.handlers[:] = root_state[0]
+    root.setLevel(root_state[1])
+    # Reported as serverInfo.version on initialize, over both transports.
+    lowlevel_server(server).version = __version__
+
     return server
+
+
+class _ArgumentCheckedTool(Tool):
+    """A tool whose malformed arguments come back as a tool error with the
+    body of an HTTP validation error, instead of the SDK's plain error text.
+
+    The arguments are checked against the tool's own argument model, the one
+    its published input schema comes from, before the SDK runs the tool.
+    """
+
+    scrubbed_paths: tuple[Path, ...] = Field(default=(), exclude=True)
+
+    async def run(
+        self,
+        arguments: dict[str, Any],
+        context: Any = None,
+        convert_result: bool = False,
+    ) -> Any:
+        metadata = self.fn_metadata
+        try:
+            metadata.arg_model.model_validate(metadata.pre_parse_json(arguments))
+        except ArgumentsInvalid as error:
+            return _error_result(
+                "validation_error",
+                "Invalid tool arguments",
+                {"errors": validation_problems(error.errors())},
+                self.scrubbed_paths,
+            )
+        return await super().run(
+            arguments, context=context, convert_result=convert_result
+        )
 
 
 def _scrub_report(report: dict[str, Any], paths: tuple[Path, ...]) -> dict[str, Any]:
@@ -339,6 +423,18 @@ def _scrub_report(report: dict[str, Any], paths: tuple[Path, ...]) -> dict[str, 
     if store["reason"] is not None:
         store["reason"] = scrub_tool_output(store["reason"], paths)
     return report
+
+
+def lowlevel_server(server: FastMCP) -> Server[Any, Any]:
+    """The SDK's low-level server behind ``server``: the only access to a
+    private SDK attribute in docgrep.
+
+    Checked against mcp 1.30.0, where FastMCP offers no public way to set the
+    server version or to run the stdio transport on given streams.
+    tests/unit/test_mcp_sdk_contract.py fails if an SDK upgrade changes it.
+    """
+    lowlevel: Server[Any, Any] = server._mcp_server
+    return lowlevel
 
 
 class _LazyServices:
@@ -378,7 +474,7 @@ async def _serve_stdio(server: FastMCP, protocol_fd: int) -> None:
     )
     # FastMCP.run_stdio_async always writes to sys.stdout; the low-level server
     # is used directly to give it the protocol descriptor instead.
-    lowlevel = server._mcp_server
+    lowlevel = lowlevel_server(server)
     async with stdio_server(stdout=stdout) as (read_stream, write_stream):
         await lowlevel.run(
             read_stream, write_stream, lowlevel.create_initialization_options()

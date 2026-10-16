@@ -498,6 +498,8 @@ No tool indexes, runs OCR, changes the configuration or cancels anything. A miss
 
 There are two transports. `docgrep serve` serves the tools over streamable HTTP at `/mcp`, next to the REST API; this is the one to use day to day, because one process holds the models for every client. `docgrep mcp` serves them on standard input and output for a client that starts the server itself; each such process loads its own models on the first search.
 
+With a local-mode index (no `DOCGREP_QDRANT_URL`), `get_index_status` can report the vector store as busy right after a search in the same server process; a Qdrant server (`DOCGREP_QDRANT_URL`) avoids it.
+
 Settings:
 
 - `DOCGREP_MCP_HTTP_ENABLED`: serve `/mcp` from `docgrep serve` (default `true`).
