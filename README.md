@@ -212,7 +212,7 @@ Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOC
 
 ## Exit codes
 
-`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). `docgrep ocr` differs: 0 when no file failed, 1 when a file failed or the batch was cancelled or aborted, 2 for usage errors (see [OCR](#ocr)). Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
+`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). `docgrep ocr` differs: 0 when no file failed, 1 when a file failed or the batch was cancelled or aborted, 2 for usage errors (see [OCR](#ocr)). `docgrep sources` exits with 0 also when nothing matches and with 2 for invalid arguments or settings. Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
 
 ## Logging
 
@@ -467,6 +467,32 @@ also in: downloads/comet (1).pdf (page 12)
 
 Collapsing is controlled by `DOCGREP_COLLAPSE_DUPLICATES` (default `true`), by the request field `collapse_duplicates` of `POST /search` (`true`, `false`, or `null` for the setting) and by `docgrep search --no-collapse-duplicates`. With collapsing off, results and response are exactly those of release 1.10.0: no `duplicates` and no `collapsed_duplicates` keys. Collapsing works at query time on the stored passages; it changes nothing in the index and needs no rebuild.
 
+## Browse sources
+
+List what is indexed, with each source's path, file type, title, author, year, passage count, index time, content hash and OCR origin. Browsing is read-only: it reads the manifest, the vector store and the OCR registry, never the corpus, and takes no lock. Only indexed sources are listed; skipped and failed ones are in `docgrep status`.
+
+```sh
+uv run docgrep sources --author arnold --year-from 1960 --type pdf --sort year --desc
+uv run docgrep sources --glob 'Books/**/*.djvu' --has-metadata without_any --json
+```
+
+```sh
+curl -X POST http://127.0.0.1:8000/sources/browse \
+  -H 'Content-Type: application/json' \
+  -d '{"authors":["arnold"],"file_types":["pdf"],"page":1,"page_size":50}'
+```
+
+The MCP tool `browse_sources` takes the same fields as the JSON body, for example `{"path_prefixes": ["Books/Math/"], "sort_by": "passage_count", "sort_order": "desc"}`.
+
+Filters (`source_ids`, `authors`, `year_from`, `year_to`, `file_types`, `path_prefixes`, `path_globs`; on the command line `--source-id`, `--author`, `--year-from`, `--year-to`, `--type`, `--path-prefix`, `--glob`, each list option repeatable):
+
+- Different filters combine with AND; several values of one filter combine with OR. A source without the filtered metadata (no author, no year) never matches that filter.
+- Authors match as case-insensitive substrings; file types are `pdf`, `markdown`, `txt`, `epub`, `docx` and `djvu`, in any case; source ids match exactly.
+- Paths are matched as stored and shown in results: relative to the corpus root with `/` separators. A prefix is a case-sensitive string prefix (`Books/Math/`); a glob follows the [include and exclude pattern](#include-and-exclude-patterns) rules.
+- `has_metadata` keeps sources with a year (`with_year`), an author (`with_author`), both (`with_both`) or neither (`without_any`); the default `any` keeps all.
+
+The response holds the page (`sources`), `total_hits`, `page`, `page_size`, `aggregates` (`total_sources` and `by_file_type`, over every match) and the canonical `applied_filters`. Pages start at 1 and hold 1 to 500 sources (default 50); `sort_by` is `path` (default), `indexed_at`, `passage_count`, `year` or `title`, with ties broken by source id and missing values last. Passage counts are counted in the index at query time for the page only; sorting by `passage_count` counts every match and is the slow case. A count that fails gives that source `passage_count: null` and `degraded: true`. Unknown fields are rejected. The design is recorded in [ADR-0020](docs/adr/0020-shared-source-filter-and-browse.md).
+
 ## HTTP API
 
 ```sh
@@ -483,7 +509,7 @@ curl -X POST http://127.0.0.1:8000/search \
 
 The body of `POST /search` takes `query`, an optional `top_n` and an optional `collapse_duplicates` (see [Duplicate passages](#duplicate-passages)).
 
-`POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information.
+`POST /sources/browse` lists the indexed sources (see [Browse sources](#browse-sources)). `POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information.
 
 When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
 
@@ -493,8 +519,9 @@ docgrep offers its search to MCP clients, such as Claude Code, as read-only tool
 
 - `find_passages`: ranked verbatim passages for `query`, with an optional `top_n` (default 10, at most `DOCGREP_MCP_MAX_TOP_N`) and `collapse_duplicates`; the structured result is the body of `POST /search`, and DOCX and EPUB passages have a null page number.
 - `get_index_status`: the report of `docgrep status --json`, including the failed sources and their errors.
+- `browse_sources`: one page of indexed sources with their metadata and passage counts, filtered and sorted as described in [Browse sources](#browse-sources) (`page_size` default 50, at most `DOCGREP_MCP_MAX_PAGE_SIZE`); the structured result is the body of `POST /sources/browse`. A page too large for one tool result keeps its first sources and says so in `hint`.
 
-No tool indexes, runs OCR, changes the configuration or cancels anything. A missing or empty index, an invalid argument and every other failure come back as a tool error with a category, a message and details.
+No tool indexes, runs OCR, changes the configuration or cancels anything. A missing or empty index, an invalid argument and every other failure come back as a tool error with a category, a message and details; only `browse_sources` answers a missing index with an empty listing, as `POST /sources/browse` does.
 
 There are two transports. `docgrep serve` serves the tools over streamable HTTP at `/mcp`, next to the REST API; this is the one to use day to day, because one process holds the models for every client. `docgrep mcp` serves them on standard input and output for a client that starts the server itself; each such process loads its own models on the first search.
 
@@ -504,6 +531,7 @@ Settings:
 
 - `DOCGREP_MCP_HTTP_ENABLED`: serve `/mcp` from `docgrep serve` (default `true`).
 - `DOCGREP_MCP_MAX_TOP_N`: the largest `top_n` a tool accepts (default 25, never more than `DOCGREP_TOP_N_MAX`); a larger value is an error, not cut down.
+- `DOCGREP_MCP_MAX_PAGE_SIZE`: the largest `page_size` `browse_sources` accepts (default 100, at most 500); a larger value is an error, not cut down.
 
 The `/mcp` endpoint accepts the same Host and Origin values as the REST API: 127.0.0.1, localhost, ::1, the bind host and `DOCGREP_ALLOWED_HOSTS`.
 
