@@ -19,16 +19,18 @@ from typing import Annotated, Any
 import anyio
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.tools import Tool
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import ValidationError as ArgumentsInvalid
 
 from docgrep import __version__
 from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.api.container import Services, create_container, create_status
-from docgrep.api.http import SearchResponse
+from docgrep.api.http import SearchResponse, validation_problems
 from docgrep.domain.errors import DocgrepError, IndexIncomplete, ValidationError
 from docgrep.settings import MCP_DEFAULT_TOP_N, Settings
 from docgrep.usecases.inspect_status import InspectStatus
@@ -273,23 +275,6 @@ def create_mcp_server(
             for form in (f"{scheme}://{host}", f"{scheme}://{host}:*")
         ],
     )
-    root = logging.getLogger()
-    root_state = (list(root.handlers), root.level)
-    server = FastMCP(
-        SERVER_NAME,
-        instructions=INSTRUCTIONS,
-        host=settings.host,
-        port=settings.port,
-        streamable_http_path="/mcp",
-        transport_security=security,
-        log_level=settings.log_level,
-    )
-    # The SDK configures the root logger on construction; docgrep logs through
-    # its own handler (log_config), so the root logger is put back as it was.
-    root.handlers[:] = root_state[0]
-    root.setLevel(root_state[1])
-    # Reported as serverInfo.version on initialize, over both transports.
-    lowlevel_server(server).version = __version__
 
     async def guarded(work: Callable[[], CallToolResult]) -> CallToolResult:
         try:
@@ -332,12 +317,6 @@ def create_mcp_server(
             structuredContent=structured,
         )
 
-    @server.tool(
-        name="find_passages",
-        title="Find passages",
-        description=_FIND_DESCRIPTION,
-        annotations=_READ_ONLY,
-    )
     async def find_passages(
         query: Annotated[str, Field(description="What to look for, in any language.")],
         top_n: Annotated[
@@ -364,16 +343,76 @@ def create_mcp_server(
             structuredContent=_scrub_report(report, paths),
         )
 
-    @server.tool(
-        name="get_index_status",
-        title="Index status",
-        description=_STATUS_DESCRIPTION,
-        annotations=_READ_ONLY,
-    )
     async def get_index_status() -> Annotated[CallToolResult, IndexStatusOutput]:
         return await guarded(index_status)
 
+    tools = [
+        _ArgumentCheckedTool.from_function(
+            find_passages,
+            name="find_passages",
+            title="Find passages",
+            description=_FIND_DESCRIPTION,
+            annotations=_READ_ONLY,
+        ).model_copy(update={"scrubbed_paths": paths}),
+        _ArgumentCheckedTool.from_function(
+            get_index_status,
+            name="get_index_status",
+            title="Index status",
+            description=_STATUS_DESCRIPTION,
+            annotations=_READ_ONLY,
+        ).model_copy(update={"scrubbed_paths": paths}),
+    ]
+    root = logging.getLogger()
+    root_state = (list(root.handlers), root.level)
+    server = FastMCP(
+        SERVER_NAME,
+        instructions=INSTRUCTIONS,
+        host=settings.host,
+        port=settings.port,
+        streamable_http_path="/mcp",
+        transport_security=security,
+        log_level=settings.log_level,
+        tools=tools,
+    )
+    # The SDK configures the root logger on construction; docgrep logs through
+    # its own handler (log_config), so the root logger is put back as it was.
+    root.handlers[:] = root_state[0]
+    root.setLevel(root_state[1])
+    # Reported as serverInfo.version on initialize, over both transports.
+    lowlevel_server(server).version = __version__
+
     return server
+
+
+class _ArgumentCheckedTool(Tool):
+    """A tool whose malformed arguments come back as a tool error with the
+    body of an HTTP validation error, instead of the SDK's plain error text.
+
+    The arguments are checked against the tool's own argument model, the one
+    its published input schema comes from, before the SDK runs the tool.
+    """
+
+    scrubbed_paths: tuple[Path, ...] = Field(default=(), exclude=True)
+
+    async def run(
+        self,
+        arguments: dict[str, Any],
+        context: Any = None,
+        convert_result: bool = False,
+    ) -> Any:
+        metadata = self.fn_metadata
+        try:
+            metadata.arg_model.model_validate(metadata.pre_parse_json(arguments))
+        except ArgumentsInvalid as error:
+            return _error_result(
+                "validation_error",
+                "Invalid tool arguments",
+                {"errors": validation_problems(error.errors())},
+                self.scrubbed_paths,
+            )
+        return await super().run(
+            arguments, context=context, convert_result=convert_result
+        )
 
 
 def _scrub_report(report: dict[str, Any], paths: tuple[Path, ...]) -> dict[str, Any]:
