@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v1.14.1 (2026-10-16)
+
+### Bug Fixes
+
+- **api**: Declare output schemas for the MCP tools
+  ([`74f2b8e`](https://github.com/metronforge/docgrep/commit/74f2b8e2f441c859dc289c2eeb76452490fcdbd7))
+
+- **api**: Report invalid settings with the documented exit status
+  ([`3e145f9`](https://github.com/metronforge/docgrep/commit/3e145f99c11e9bbebb3e110c6b08d94cc0c2799a))
+
+- **api**: Report the docgrep version as the MCP server version
+  ([`0e023a8`](https://github.com/metronforge/docgrep/commit/0e023a82765c209b394daa3ea681eed6d25c4a96))
+
+- **api**: Return malformed MCP tool arguments as validation error bodies
+  ([`f8071c5`](https://github.com/metronforge/docgrep/commit/f8071c5993f6bb0203d5fdd1255ffa78ede42c37))
+
+### Documentation
+
+- Note that local-mode status can report the store as busy after a search
+  ([`8dca1b6`](https://github.com/metronforge/docgrep/commit/8dca1b616c25d670087b2ca4bdf04db93b88ad76))
+
+
 ## v1.14.0 (2026-10-15)
 
 ### Build System
