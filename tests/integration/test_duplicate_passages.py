@@ -85,6 +85,8 @@ _PREVIOUS_RELEASE: dict[str, Any] = {
     ],
     "total_hits": 4,
 }
+# Release 1.16.0 adds applied_filters, {} for an unfiltered search (UC-02).
+_UNFILTERED = {**_PREVIOUS_RELEASE, "applied_filters": {}}
 
 
 def _corpus(root: Path, files: dict[str, str] = _FILES) -> Path:
@@ -135,8 +137,8 @@ def test_collapsing_off_returns_the_response_of_the_previous_release(
     )
     (by_setting,) = _search(_settings(tmp_path, collapse_duplicates=False), _QUERY)
 
-    assert by_request == _PREVIOUS_RELEASE
-    assert by_setting == _PREVIOUS_RELEASE
+    assert by_request == _UNFILTERED
+    assert by_setting == _UNFILTERED
     # The new keys are absent, not merely empty.
     assert "collapsed_duplicates" not in by_request
     assert all("duplicates" not in item for item in by_request["results"])
@@ -173,7 +175,7 @@ def test_http_collapses_identical_text_by_default(tmp_path: Path) -> None:
     assert all("duplicates" not in item for item in default["results"][1:])
     assert default["total_hits"] == 4
     assert default["collapsed_duplicates"] == 1
-    assert set(default) == set(_PREVIOUS_RELEASE) | {"collapsed_duplicates"}
+    assert set(default) == set(_UNFILTERED) | {"collapsed_duplicates"}
 
 
 def test_the_request_field_overrides_the_setting_both_ways(tmp_path: Path) -> None:
@@ -186,7 +188,7 @@ def test_the_request_field_overrides_the_setting_both_ways(tmp_path: Path) -> No
 
     assert on["collapsed_duplicates"] == 1
     assert len(on["results"][0]["duplicates"]) == 1
-    assert off == _PREVIOUS_RELEASE
+    assert off == _UNFILTERED
 
 
 def test_collapse_setting_is_read_from_the_environment(
@@ -326,7 +328,7 @@ def test_cli_json_carries_the_new_fields(
         )
     )
 
-    assert off == _PREVIOUS_RELEASE
+    assert off == _UNFILTERED
     assert on["collapsed_duplicates"] == 1
     assert on["results"][0]["duplicates"][0]["path"] == "a.txt"
     assert on["total_hits"] == 4

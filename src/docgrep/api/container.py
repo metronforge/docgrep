@@ -48,7 +48,7 @@ from docgrep.domain.protocols import (
     TokenSpanTokenizer,
     parser_version,
 )
-from docgrep.domain.sources import BrowseRequest, BrowseResult
+from docgrep.domain.sources import BrowseRequest, BrowseResult, SourceFilter
 from docgrep.settings import Settings
 from docgrep.usecases.browse_sources import BrowseSources
 from docgrep.usecases.build_index import BuildIndex, BuildSummary
@@ -70,6 +70,7 @@ class SearchOperation(Protocol):
         *,
         top_n: int | None = None,
         collapse_duplicates: bool | None = None,
+        source_filter: SourceFilter | None = None,
     ) -> SearchResult: ...
 
 
@@ -461,6 +462,7 @@ def create_container(
             top_n_max=settings.top_n_max,
             max_query_len=settings.max_query_len,
             collapse_duplicates=settings.collapse_duplicates,
+            manifest=manifest,
         ),
         build=BuildIndex(
             lock=lock,

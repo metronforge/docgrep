@@ -2,10 +2,10 @@
 
 import importlib.util
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from threading import Lock
-from typing import Any, Literal
+from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
@@ -25,6 +25,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from docgrep import __version__
 from docgrep.adapters.qdrant import local_passage_count, warn_if_local_mode_is_large
 from docgrep.api.container import (
+    SearchOperation,
     Services,
     create_container,
     create_discover_scans,
@@ -68,15 +69,6 @@ from docgrep.domain.sources import (
 from docgrep.settings import Settings
 from docgrep.usecases.build_index import BuildSummary
 from docgrep.usecases.process_scans import OcrRequest
-
-
-class SearchRequest(BaseModel):
-    """Validated search parameters."""
-
-    query: str
-    top_n: int | None = None
-    # None applies the DOCGREP_COLLAPSE_DUPLICATES setting.
-    collapse_duplicates: bool | None = None
 
 
 class SourceResponse(BaseModel):
@@ -175,6 +167,13 @@ class SearchResponse(BaseModel):
     collapsed_duplicates: int | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # The canonical source filter; {} for an unfiltered search.
+    applied_filters: dict[str, list[str] | int] = Field(default_factory=dict)
+    # Present only when the filter sets an author or a year bound: the
+    # sources left out only because that metadata is null.
+    sources_excluded_for_missing_metadata: int | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @classmethod
     def from_domain(cls, result: SearchResult) -> "SearchResponse":
@@ -189,6 +188,10 @@ class SearchResponse(BaseModel):
             rerank_skip_reason=result.rerank_skip_reason,
             hint=result.hint,
             collapsed_duplicates=result.collapsed_duplicates,
+            applied_filters=dict(result.applied_filters),
+            sources_excluded_for_missing_metadata=(
+                result.sources_excluded_for_missing_metadata
+            ),
         )
 
 
@@ -200,12 +203,11 @@ def _checked[T](check: Callable[[], T]) -> T:
         raise ValueError(str(error)) from error
 
 
-class BrowseSourcesRequest(BaseModel):
-    """The filter, metadata rule, page and order of a source listing.
+class SourceFilterBody(BaseModel):
+    """The seven fields of the shared source filter, for browsing and search.
 
     Unknown fields are rejected. The values are checked by the domain's
-    ``SourceFilter`` and ``BrowseRequest``, so every front applies the same
-    rules.
+    ``SourceFilter``, so every front applies the same rules.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -217,11 +219,6 @@ class BrowseSourcesRequest(BaseModel):
     file_types: list[str] | None = None
     path_prefixes: list[str] | None = None
     path_globs: list[str] | None = None
-    has_metadata: HasMetadata = "any"
-    page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
-    sort_by: SortKey = "path"
-    sort_order: SortOrder = "asc"
 
     @field_validator("source_ids", "authors", "path_prefixes", "path_globs")
     @classmethod
@@ -240,21 +237,51 @@ class BrowseSourcesRequest(BaseModel):
         return values
 
     @model_validator(mode="after")
-    def check_years(self) -> "BrowseSourcesRequest":
+    def check_years(self) -> Self:
         _checked(lambda: SourceFilter(year_from=self.year_from, year_to=self.year_to))
         return self
 
+    def source_filter(self) -> SourceFilter:
+        return SourceFilter(
+            source_ids=tuple(self.source_ids or ()),
+            authors=tuple(self.authors or ()),
+            year_from=self.year_from,
+            year_to=self.year_to,
+            file_types=parse_file_types(self.file_types or ()),
+            path_prefixes=tuple(self.path_prefixes or ()),
+            path_globs=tuple(self.path_globs or ()),
+        )
+
+
+class SearchRequest(SourceFilterBody):
+    """Validated search parameters and an optional source filter (UC-02).
+
+    Unknown fields are rejected, so a misspelt filter is never ignored.
+    """
+
+    query: str
+    top_n: int | None = None
+    # None applies the DOCGREP_COLLAPSE_DUPLICATES setting.
+    collapse_duplicates: bool | None = None
+
+
+class BrowseSourcesRequest(SourceFilterBody):
+    """The filter, metadata rule, page and order of a source listing.
+
+    Unknown fields are rejected. The values are checked by the domain's
+    ``SourceFilter`` and ``BrowseRequest``, so every front applies the same
+    rules.
+    """
+
+    has_metadata: HasMetadata = "any"
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
+    sort_by: SortKey = "path"
+    sort_order: SortOrder = "asc"
+
     def to_domain(self) -> BrowseRequest:
         return BrowseRequest(
-            SourceFilter(
-                source_ids=tuple(self.source_ids or ()),
-                authors=tuple(self.authors or ()),
-                year_from=self.year_from,
-                year_to=self.year_to,
-                file_types=parse_file_types(self.file_types or ()),
-                path_prefixes=tuple(self.path_prefixes or ()),
-                path_globs=tuple(self.path_globs or ()),
-            ),
+            self.source_filter(),
             has_metadata=self.has_metadata,
             page=self.page,
             page_size=self.page_size,
@@ -332,6 +359,29 @@ class BrowseSourcesResponse(BaseModel):
             ),
             applied_filters=dict(result.applied_filters),
         )
+
+
+def format_filters(applied: Mapping[str, object]) -> str:
+    """The applied filters on one line, as ``key=value`` pairs."""
+    return "; ".join(f"{key}={value}" for key, value in applied.items())
+
+
+def run_search(
+    operation: SearchOperation,
+    query: str,
+    *,
+    top_n: int | None,
+    collapse_duplicates: bool | None,
+    source_filter: SourceFilter,
+) -> SearchResult:
+    """Run a search, passing the optional arguments only when they are set,
+    so every front calls the operation the same way."""
+    options: dict[str, Any] = {"top_n": top_n}
+    if collapse_duplicates is not None:
+        options["collapse_duplicates"] = collapse_duplicates
+    if source_filter.applied():
+        options["source_filter"] = source_filter
+    return operation.run(query, **options)
 
 
 def browse_sources(
@@ -610,17 +660,15 @@ def create_app(
 
     @app.post("/search", response_model=SearchResponse)
     def search(request: SearchRequest) -> SearchResponse:
-        search_operation = operations().search
-        # Pass the override only when given, as the CLI does.
-        if request.collapse_duplicates is None:
-            result = search_operation.run(request.query, top_n=request.top_n)
-        else:
-            result = search_operation.run(
+        return SearchResponse.from_domain(
+            run_search(
+                operations().search,
                 request.query,
                 top_n=request.top_n,
                 collapse_duplicates=request.collapse_duplicates,
+                source_filter=request.source_filter(),
             )
-        return SearchResponse.from_domain(result)
+        )
 
     @app.post("/sources/browse", response_model=BrowseSourcesResponse)
     def browse(request: BrowseSourcesRequest | None = None) -> BrowseSourcesResponse:

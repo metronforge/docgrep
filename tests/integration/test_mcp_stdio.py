@@ -66,7 +66,19 @@ def test_tools_are_listed_read_only_with_their_input_schemas(tmp_path: Path) -> 
         assert tool.annotations.openWorldHint is False
     find = tools["find_passages"].inputSchema
     assert find["required"] == ["query"]
-    assert set(find["properties"]) == {"query", "top_n", "collapse_duplicates"}
+    assert set(find["properties"]) == {
+        "query",
+        "top_n",
+        "collapse_duplicates",
+        # The source filter (UC-02).
+        "source_ids",
+        "authors",
+        "year_from",
+        "year_to",
+        "file_types",
+        "path_prefixes",
+        "path_globs",
+    }
     assert find["properties"]["top_n"]["default"] == MCP_DEFAULT_TOP_N
     assert find["properties"]["top_n"]["maximum"] == MCP_MAX_TOP_N
     assert find["properties"]["top_n"]["minimum"] == 1
