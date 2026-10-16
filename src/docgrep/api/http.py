@@ -488,4 +488,21 @@ def create_app(
     return app
 
 
-app = create_app()
+_default_app: FastAPI | None = None
+_default_app_lock = Lock()
+
+
+def __getattr__(name: str) -> FastAPI:
+    """Build ``app`` (for ``docgrep.api.http:app``) on first access, once.
+
+    Importing this module never reads the settings, so the CLI can report
+    invalid settings with its own exit status.
+    """
+    global _default_app
+    if name != "app":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if _default_app is None:
+        with _default_app_lock:
+            if _default_app is None:
+                _default_app = create_app()
+    return _default_app
