@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from docgrep.domain.errors import (
+    IndexIncomplete,
     ManifestUnavailable,
     StagingInconsistent,
     StoreUnavailable,
@@ -155,6 +156,11 @@ class InMemoryPassageStore:
 
     def count_passages(self) -> int:
         return len(self._items)
+
+    def count_source_passages(self, source_id: str) -> int:
+        if self._completion is None:
+            raise IndexIncomplete("No index is published")
+        return sum(item[1].source_id == source_id for item in self._items.values())
 
     def write_completion_metadata(
         self, metadata: Mapping[str, str | int | float]

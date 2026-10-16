@@ -11,7 +11,14 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -22,6 +29,7 @@ from docgrep.api.container import (
     create_container,
     create_discover_scans,
     create_process_scans,
+    index_missing,
     open_ocr_registry_view,
 )
 from docgrep.api.log_config import (
@@ -43,6 +51,20 @@ from docgrep.domain.errors import (
     ValidationError,
 )
 from docgrep.domain.models import FileType, RankedPassage, SearchResult
+from docgrep.domain.sources import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    BrowsedSource,
+    BrowseRequest,
+    BrowseResult,
+    HasMetadata,
+    OcrStatus,
+    SortKey,
+    SortOrder,
+    SourceFilter,
+    distinct_texts,
+    parse_file_types,
+)
 from docgrep.settings import Settings
 from docgrep.usecases.build_index import BuildSummary
 from docgrep.usecases.process_scans import OcrRequest
@@ -168,6 +190,164 @@ class SearchResponse(BaseModel):
             hint=result.hint,
             collapsed_duplicates=result.collapsed_duplicates,
         )
+
+
+def _checked[T](check: Callable[[], T]) -> T:
+    """Run a domain check; its validation error becomes a pydantic one."""
+    try:
+        return check()
+    except ValidationError as error:
+        raise ValueError(str(error)) from error
+
+
+class BrowseSourcesRequest(BaseModel):
+    """The filter, metadata rule, page and order of a source listing.
+
+    Unknown fields are rejected. The values are checked by the domain's
+    ``SourceFilter`` and ``BrowseRequest``, so every front applies the same
+    rules.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_ids: list[str] | None = None
+    authors: list[str] | None = None
+    year_from: int | None = None
+    year_to: int | None = None
+    file_types: list[str] | None = None
+    path_prefixes: list[str] | None = None
+    path_globs: list[str] | None = None
+    has_metadata: HasMetadata = "any"
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
+    sort_by: SortKey = "path"
+    sort_order: SortOrder = "asc"
+
+    @field_validator("source_ids", "authors", "path_prefixes", "path_globs")
+    @classmethod
+    def check_texts(
+        cls, values: list[str] | None, info: ValidationInfo
+    ) -> list[str] | None:
+        if values is not None:
+            _checked(lambda: distinct_texts(info.field_name or "", values))
+        return values
+
+    @field_validator("file_types")
+    @classmethod
+    def check_file_types(cls, values: list[str] | None) -> list[str] | None:
+        if values is not None:
+            _checked(lambda: parse_file_types(values))
+        return values
+
+    @model_validator(mode="after")
+    def check_years(self) -> "BrowseSourcesRequest":
+        _checked(lambda: SourceFilter(year_from=self.year_from, year_to=self.year_to))
+        return self
+
+    def to_domain(self) -> BrowseRequest:
+        return BrowseRequest(
+            SourceFilter(
+                source_ids=tuple(self.source_ids or ()),
+                authors=tuple(self.authors or ()),
+                year_from=self.year_from,
+                year_to=self.year_to,
+                file_types=parse_file_types(self.file_types or ()),
+                path_prefixes=tuple(self.path_prefixes or ()),
+                path_globs=tuple(self.path_globs or ()),
+            ),
+            has_metadata=self.has_metadata,
+            page=self.page,
+            page_size=self.page_size,
+            sort_by=self.sort_by,
+            sort_order=self.sort_order,
+        )
+
+
+class BrowsedSourceResponse(BaseModel):
+    """One indexed source with its passage count and OCR origin."""
+
+    source_id: str
+    path: str
+    file_type: FileType
+    title: str | None
+    author: str | None
+    year: int | None
+    # Null when the count failed; the entry is then marked degraded.
+    passage_count: int | None
+    indexed_at: str | None
+    content_hash: str | None
+    ocr_status: OcrStatus
+    # Present, and true, only when the passage count failed.
+    degraded: bool = Field(default=False, exclude_if=lambda value: not value)
+
+    @classmethod
+    def from_domain(cls, item: BrowsedSource) -> "BrowsedSourceResponse":
+        source = item.source
+        return cls(
+            source_id=source.source_id,
+            path=source.path,
+            file_type=source.file_type,
+            title=source.title,
+            author=source.author,
+            year=source.year,
+            passage_count=item.passage_count,
+            indexed_at=source.indexed_at,
+            content_hash=source.content_hash,
+            ocr_status=item.ocr_status,
+            degraded=item.degraded,
+        )
+
+
+class BrowseAggregatesResponse(BaseModel):
+    """Counts over every matching source, not only the page."""
+
+    total_sources: int
+    by_file_type: dict[str, int]
+
+
+class BrowseSourcesResponse(BaseModel):
+    """One page of indexed sources, aggregates and the applied filters."""
+
+    sources: tuple[BrowsedSourceResponse, ...]
+    total_hits: int
+    page: int
+    page_size: int
+    aggregates: BrowseAggregatesResponse
+    applied_filters: dict[str, list[str] | int | str]
+    # Set only when an MCP result left sources out to stay small.
+    hint: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @classmethod
+    def from_domain(cls, result: BrowseResult) -> "BrowseSourcesResponse":
+        return cls(
+            sources=tuple(
+                BrowsedSourceResponse.from_domain(item) for item in result.sources
+            ),
+            total_hits=result.total_hits,
+            page=result.page,
+            page_size=result.page_size,
+            aggregates=BrowseAggregatesResponse(
+                total_sources=result.total_hits,
+                by_file_type=dict(result.by_file_type),
+            ),
+            applied_filters=dict(result.applied_filters),
+        )
+
+
+def browse_sources(
+    settings: Settings, services: Callable[[], Services], request: BrowseRequest
+) -> BrowseSourcesResponse:
+    """Run a source listing through the shared composition root.
+
+    A data directory without an index gives an empty listing without
+    creating the composition root, which would create an empty store.
+    """
+    if index_missing(settings):
+        return BrowseSourcesResponse.from_domain(BrowseResult.empty(request))
+    operation = services().browse
+    if operation is None:
+        raise ValidationError("Source browsing is not available in this configuration")
+    return BrowseSourcesResponse.from_domain(operation.run(request))
 
 
 class BuildFailureResponse(BaseModel):
@@ -441,6 +621,12 @@ def create_app(
                 collapse_duplicates=request.collapse_duplicates,
             )
         return SearchResponse.from_domain(result)
+
+    @app.post("/sources/browse", response_model=BrowseSourcesResponse)
+    def browse(request: BrowseSourcesRequest | None = None) -> BrowseSourcesResponse:
+        """Read-only (UC-08): one page of indexed sources; no lock is taken."""
+        body = request or BrowseSourcesRequest()
+        return browse_sources(effective, operations, body.to_domain())
 
     @app.post("/scans/discover")
     def discover_scans(request: DiscoverScansRequest | None = None) -> dict[str, Any]:
