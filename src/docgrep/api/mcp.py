@@ -22,7 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.api.container import Services, create_container, create_status
@@ -72,6 +72,49 @@ _STATUS_DESCRIPTION = (
     "by state (indexed, skipped, failed) with the failed sources and their "
     "error text. Read-only; changes nothing."
 )
+
+
+class ToolErrorBody(BaseModel):
+    """The body of a tool error: the fields of an HTTP error body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: str
+    message: str
+    details: dict[str, Any]
+
+
+class IndexStatusBody(BaseModel):
+    """The status report of ``docgrep status --json``: its stable top-level
+    fields; the nested objects are left open."""
+
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: int
+    index_state: str
+    latest_run: dict[str, Any] | None
+    active_operation: dict[str, Any] | None
+    vector_store: dict[str, Any]
+    collection: dict[str, Any] | None
+    drift: list[dict[str, Any]]
+    warnings: list[dict[str, Any]]
+    sources: dict[str, Any] | None = None
+
+
+# The declared output schemas accept a success body or an error body: the SDK
+# checks every structured result, error results included, against them.
+# "type": "object" keeps the root an object schema, as tool output schemas
+# must be.
+class FindPassagesOutput(RootModel[SearchResponse | ToolErrorBody]):
+    """A search body, or an error body when isError is set."""
+
+    model_config = ConfigDict(json_schema_extra={"type": "object"})
+
+
+class IndexStatusOutput(RootModel[IndexStatusBody | ToolErrorBody]):
+    """A status body, or an error body when isError is set."""
+
+    model_config = ConfigDict(json_schema_extra={"type": "object"})
 
 
 def _scrub(value: object, paths: tuple[Path, ...]) -> object:
@@ -307,9 +350,7 @@ def create_mcp_server(
                 "omit for the server default."
             ),
         ] = None,
-    ) -> CallToolResult:
-        # No output schema is declared: the SDK would validate error results
-        # against it too. Success results carry the SearchResponse body.
+    ) -> Annotated[CallToolResult, FindPassagesOutput]:
         return await guarded(lambda: search(query, top_n, collapse_duplicates))
 
     def index_status() -> CallToolResult:
@@ -325,7 +366,7 @@ def create_mcp_server(
         description=_STATUS_DESCRIPTION,
         annotations=_READ_ONLY,
     )
-    async def get_index_status() -> CallToolResult:
+    async def get_index_status() -> Annotated[CallToolResult, IndexStatusOutput]:
         return await guarded(index_status)
 
     return server
