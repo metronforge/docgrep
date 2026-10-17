@@ -107,10 +107,13 @@ def _paths(body: dict[str, Any]) -> list[str]:
 
 
 def test_filtering_happens_before_the_first_stage(mode_settings: Settings) -> None:
-    services = create_container(mode_settings)
+    # The setup relies on the reranker seeing exactly the top_k candidates;
+    # the default pool of 1.22.0 is larger (ADR-0026).
+    settings = mode_settings.model_copy(update={"rerank_pool": TOP_K})
+    services = create_container(settings)
     try:
         api = TestClient(
-            create_app(mode_settings, services=services), base_url="http://127.0.0.1"
+            create_app(settings, services=services), base_url="http://127.0.0.1"
         )
         unfiltered = api.post("/search", json={"query": QUERY}).json()
         filtered = api.post(
