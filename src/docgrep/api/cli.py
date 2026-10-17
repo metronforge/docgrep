@@ -16,6 +16,7 @@ from pydantic import ValidationError as SettingsValidationError
 
 from docgrep.api.container import (
     BrowseOperation,
+    ContextOperation,
     Services,
     create_cancel,
     create_container,
@@ -24,11 +25,18 @@ from docgrep.api.container import (
     create_process_scans,
     create_status,
     open_browse,
+    open_context,
     open_ocr_registry_view,
 )
 from docgrep.api.http import (
     BrowseSourcesRequest,
     BrowseSourcesResponse,
+    ContextLocationResponse,
+    PassageContextOk,
+    PassageContextRequest,
+    PassageContextResponse,
+    PassageSourceModified,
+    PassageSourceRemoved,
     SearchResponse,
     create_app,
     format_filters,
@@ -192,6 +200,27 @@ def _parser() -> argparse.ArgumentParser:
     sources.add_argument("--page-size", dest="page_size", type=int)
     sources.add_argument(
         "--json", action="store_true", help="Print the body of POST /sources/browse"
+    )
+    context = commands.add_parser(
+        "context",
+        help="Show passages with the text around them in their source (read-only)",
+        description="Each window adds whole neighbouring passages on each side "
+        "while their tokens fit, and always the nearest one.",
+    )
+    context.add_argument(
+        "passage_ids",
+        nargs="+",
+        metavar="PASSAGE_ID",
+        help="Passage ids from search or browse results",
+    )
+    context.add_argument(
+        "--window",
+        dest="window_tokens",
+        type=int,
+        help="Tokens of context on each side (default DOCGREP_CONTEXT_WINDOW_TOKENS)",
+    )
+    context.add_argument(
+        "--json", action="store_true", help="Print the body of POST /passages/context"
     )
     commands.add_parser(
         "cancel", help="Ask a running index build to stop after its current batch"
@@ -767,6 +796,83 @@ def _sources(args: argparse.Namespace, browse: BrowseOperation) -> int:
     return 0
 
 
+def _pages(locations: Sequence[ContextLocationResponse]) -> str:
+    pages = [item.page_number for item in locations if item.page_number is not None]
+    if not pages:
+        return ""
+    first, last = min(pages), max(pages)
+    return f", page {first}" if first == last else f", pages {first}-{last}"
+
+
+def _format_context(response: PassageContextResponse) -> str:
+    """Render passage contexts: the source, the text before, the passage
+    between clear markers and the text after, all verbatim."""
+    lines: list[str] = []
+    for item in response.results:
+        lines.append(f"== {item.passage_id} [{item.status}]")
+        if not isinstance(item, PassageContextOk):
+            if isinstance(item, PassageSourceRemoved | PassageSourceModified):
+                lines.append(f"Source: {item.path}")
+            if isinstance(item, PassageSourceModified):
+                lines.append(
+                    f"Indexed content hash: {item.indexed_content_hash}; "
+                    f"current: {item.current_content_hash}"
+                )
+            lines.append(item.hint)
+            lines.append("")
+            continue
+        source = item.source
+        location = source.path
+        if item.passage.page_number is not None:
+            location += f":{item.passage.page_number}"
+        if item.passage.heading_path:
+            location += " — " + " > ".join(item.passage.heading_path)
+        if source.title:
+            location += f" ({source.title})"
+        lines.append(f"Source: {location}")
+        start = "start of source" if item.at_source_start else "more before"
+        lines.append(
+            f"-- before ({item.window_tokens_used.before} tokens"
+            f"{_pages(item.before_locations)}; {start}) --"
+        )
+        lines.append(item.context_before.strip("\n"))
+        lines.append(">>>>> passage >>>>>")
+        lines.append(item.passage.text)
+        lines.append("<<<<< passage <<<<<")
+        end = "end of source" if item.at_source_end else "more after"
+        lines.append(
+            f"-- after ({item.window_tokens_used.after} tokens"
+            f"{_pages(item.after_locations)}; {end}) --"
+        )
+        lines.append(item.context_after.strip("\n"))
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _context(args: argparse.Namespace, context: ContextOperation) -> int:
+    """Run ``docgrep context``: 0 on success, also when entries fail with a
+    per-id status, and 2 for invalid arguments."""
+    body: dict[str, Any] = {"passage_ids": args.passage_ids}
+    if args.window_tokens is not None:
+        body["window_tokens"] = args.window_tokens
+    try:
+        request = PassageContextRequest.model_validate(body)
+        result = context.run(request.passage_ids, window_tokens=request.window_tokens)
+    except ValidationError as error:
+        sys.stderr.write(_describe(error) + "\n")
+        malformed = error.details.get("malformed")
+        if isinstance(malformed, list):
+            for item in malformed:
+                sys.stderr.write(f"  malformed passage id: {item}\n")
+        return 2
+    response = PassageContextResponse.from_domain(result)
+    if args.json:
+        _emit(response.model_dump_json(indent=2) + "\n")
+    else:
+        _emit(_format_context(response))
+    return 0
+
+
 def _format_plan(plan: UpdatePlan) -> str:
     if plan.changes == 0:
         return f"No changes detected ({plan.unchanged} sources unchanged).\n"
@@ -1005,6 +1111,9 @@ def main(
     browse_factory: Callable[
         [Settings], AbstractContextManager[BrowseOperation]
     ] = open_browse,
+    context_factory: Callable[
+        [Settings], AbstractContextManager[ContextOperation]
+    ] = open_context,
     register_signal: Register = signal.signal,
 ) -> int:
     """Run one CLI command and return a process exit status.
@@ -1075,6 +1184,10 @@ def main(
         if args.command == "sources":
             with browse_factory(settings) as browse:
                 return _sources(args, browse)
+
+        if args.command == "context":
+            with context_factory(settings) as context:
+                return _context(args, context)
 
         if args.command == "cancel":
             text, status = _format_cancel(cancel_factory(settings).run())
@@ -1167,9 +1280,13 @@ def main(
         return 1
     except SettingsValidationError as error:
         sys.stderr.write(f"invalid_settings: {error}\n")
-        # Scan discovery, OCR, MCP and source browsing report configuration
-        # errors with 2, like usage errors.
-        return 2 if args.command in ("discover-scans", "ocr", "mcp", "sources") else 1
+        # Scan discovery, OCR, MCP, source browsing and passage context report
+        # configuration errors with 2, like usage errors.
+        return (
+            2
+            if args.command in ("discover-scans", "ocr", "mcp", "sources", "context")
+            else 1
+        )
     except OSError as error:
         sys.stderr.write(f"io_error: {error}\n")
         return 1

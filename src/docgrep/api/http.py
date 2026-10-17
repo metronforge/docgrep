@@ -5,7 +5,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from threading import Lock
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
@@ -26,6 +26,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from docgrep import __version__
 from docgrep.adapters.qdrant import local_passage_count, warn_if_local_mode_is_large
 from docgrep.api.container import (
+    ContextOperation,
     SearchOperation,
     Services,
     create_container,
@@ -33,12 +34,14 @@ from docgrep.api.container import (
     create_process_scans,
     index_missing,
     open_ocr_registry_view,
+    unindexed_context,
 )
 from docgrep.api.log_config import (
     configure_logging,
     log_server_start,
     warn_if_not_loopback,
 )
+from docgrep.domain.context import ContextResult, PassageContext, PassageLocation
 from docgrep.domain.errors import (
     ConfigDrift,
     DocgrepError,
@@ -460,6 +463,191 @@ def browse_sources(
     return BrowseSourcesResponse.from_domain(operation.run(request))
 
 
+class PassageContextRequest(BaseModel):
+    """Passage ids from search or browse results and the window, in tokens,
+    applied to each side of every passage (UC-12).
+
+    Unknown fields are rejected. The number of ids, their shape and the
+    window range are checked by the use case, so every front applies the
+    same limits; a missing window takes DOCGREP_CONTEXT_WINDOW_TOKENS.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    passage_ids: list[str]
+    window_tokens: int | None = None
+
+
+class ContextPassageResponse(BaseModel):
+    """The requested passage, verbatim, and its location."""
+
+    passage_id: str
+    text: str
+    page_number: int | None
+    heading_path: tuple[str, ...]
+
+
+class ContextLocationResponse(BaseModel):
+    """The page and heading path of one neighbour used in a window."""
+
+    page_number: int | None
+    heading_path: tuple[str, ...]
+
+    @classmethod
+    def from_domain(cls, item: PassageLocation) -> "ContextLocationResponse":
+        return cls(page_number=item.page_number, heading_path=item.heading_path)
+
+
+class WindowTokensUsedResponse(BaseModel):
+    """The stored token counts of the neighbours used on each side."""
+
+    before: int
+    after: int
+
+
+class PassageContextOk(BaseModel):
+    """A passage with the text before and after it in its source.
+
+    ``context_before + passage.text + context_after`` is the whole window:
+    verbatim text of the neighbouring passages, their overlap removed, and
+    a space or a blank line where two passages do not touch.
+    """
+
+    passage_id: str
+    status: Literal["ok"] = "ok"
+    passage: ContextPassageResponse
+    source: SourceResponse
+    context_before: str
+    context_after: str
+    before_locations: tuple[ContextLocationResponse, ...]
+    after_locations: tuple[ContextLocationResponse, ...]
+    at_source_start: bool
+    at_source_end: bool
+    window_tokens_used: WindowTokensUsedResponse
+
+
+class PassageNotFound(BaseModel):
+    """No passage with this id is in the published index."""
+
+    passage_id: str
+    status: Literal["not_found"] = "not_found"
+    hint: str
+
+
+class PassageSourceRemoved(BaseModel):
+    """The passage exists, but its source is no longer indexed."""
+
+    passage_id: str
+    status: Literal["source_removed"] = "source_removed"
+    hint: str
+    # The last known path of the source.
+    path: str
+
+
+class PassageSourceModified(BaseModel):
+    """The passage exists, but its source changed after it was indexed."""
+
+    passage_id: str
+    status: Literal["source_modified"] = "source_modified"
+    hint: str
+    path: str
+    indexed_content_hash: str | None
+    current_content_hash: str | None
+
+
+PassageContextEntry = Annotated[
+    PassageContextOk | PassageNotFound | PassageSourceRemoved | PassageSourceModified,
+    Field(discriminator="status"),
+]
+
+
+def _context_entry(item: PassageContext) -> PassageContextEntry:
+    if item.status == "ok" and item.passage and item.source and item.context:
+        passage, context = item.passage, item.context
+        return PassageContextOk(
+            passage_id=item.passage_id,
+            passage=ContextPassageResponse(
+                passage_id=passage.passage_id,
+                text=passage.text,
+                page_number=passage.page_number,
+                heading_path=passage.heading_path,
+            ),
+            source=SourceResponse.model_validate(item.source),
+            context_before=context.before,
+            context_after=context.after,
+            before_locations=tuple(
+                ContextLocationResponse.from_domain(location)
+                for location in context.before_locations
+            ),
+            after_locations=tuple(
+                ContextLocationResponse.from_domain(location)
+                for location in context.after_locations
+            ),
+            at_source_start=context.at_source_start,
+            at_source_end=context.at_source_end,
+            window_tokens_used=WindowTokensUsedResponse(
+                before=context.tokens_before, after=context.tokens_after
+            ),
+        )
+    hint = item.hint or ""
+    if item.status == "source_removed":
+        return PassageSourceRemoved(
+            passage_id=item.passage_id, hint=hint, path=item.path or ""
+        )
+    if item.status == "source_modified":
+        return PassageSourceModified(
+            passage_id=item.passage_id,
+            hint=hint,
+            path=item.path or "",
+            indexed_content_hash=item.indexed_content_hash,
+            current_content_hash=item.current_content_hash,
+        )
+    return PassageNotFound(passage_id=item.passage_id, hint=hint)
+
+
+class PassageContextResponse(BaseModel):
+    """One entry per distinct requested id, in request order, each with a
+    status; failed entries never fail the request."""
+
+    results: tuple[PassageContextEntry, ...]
+    window_tokens: int
+    # Set only when an MCP result left entries out to stay small.
+    hint: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @classmethod
+    def from_domain(cls, result: ContextResult) -> "PassageContextResponse":
+        return cls(
+            results=tuple(_context_entry(item) for item in result.entries),
+            window_tokens=result.window_tokens,
+        )
+
+
+def expand_passage_context(
+    settings: Settings,
+    services: Callable[[], Services],
+    request: PassageContextRequest,
+) -> PassageContextResponse:
+    """Run a context request through the shared composition root.
+
+    A data directory without an index answers every id with ``not_found``
+    without creating the composition root, which would create an empty
+    store.
+    """
+    operation: ContextOperation
+    if index_missing(settings):
+        operation = unindexed_context(settings)
+    else:
+        context = services().context
+        if context is None:
+            raise ValidationError(
+                "Passage context is not available in this configuration"
+            )
+        operation = context
+    return PassageContextResponse.from_domain(
+        operation.run(request.passage_ids, window_tokens=request.window_tokens)
+    )
+
+
 class BuildFailureResponse(BaseModel):
     """A source that failed during a completed build."""
 
@@ -735,6 +923,12 @@ def create_app(
         """Read-only (UC-08): one page of indexed sources; no lock is taken."""
         body = request or BrowseSourcesRequest()
         return browse_sources(effective, operations, body.to_domain())
+
+    @app.post("/passages/context", response_model=PassageContextResponse)
+    def passage_context(request: PassageContextRequest) -> PassageContextResponse:
+        """Read-only (UC-12): passages with the text around them; no lock is
+        taken and the corpus is not read."""
+        return expand_passage_context(effective, operations, request)
 
     @app.post("/scans/discover")
     def discover_scans(request: DiscoverScansRequest | None = None) -> dict[str, Any]:

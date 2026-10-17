@@ -57,7 +57,12 @@ def test_tools_are_listed_read_only_with_their_input_schemas(tmp_path: Path) -> 
 
     tools = {tool.name: tool for tool in _status_and_search(tmp_path)["tools"]}
 
-    assert sorted(tools) == ["browse_sources", "find_passages", "get_index_status"]
+    assert sorted(tools) == [
+        "browse_sources",
+        "expand_passage_context",
+        "find_passages",
+        "get_index_status",
+    ]
     for tool in tools.values():
         assert tool.annotations is not None
         assert tool.annotations.readOnlyHint is True
@@ -332,7 +337,12 @@ def test_startup_loads_nothing_and_needs_no_index(tmp_path: Path) -> None:
 
     run(work)
 
-    assert listed == ["find_passages", "get_index_status", "browse_sources"]
+    assert listed == [
+        "find_passages",
+        "get_index_status",
+        "browse_sources",
+        "expand_passage_context",
+    ]
     assert not (tmp_path / "data").exists()
 
 
