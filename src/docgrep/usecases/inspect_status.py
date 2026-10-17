@@ -12,12 +12,15 @@ from docgrep.domain.progress import estimate_eta_seconds
 from docgrep.domain.protocols import (
     IndexLock,
     ManifestReader,
+    RootCatalog,
     StatusStore,
     parser_reprocess_reason,
 )
+from docgrep.domain.roots import CorpusRoot
 from docgrep.domain.run_state import (
     VECTOR_CONFIG_KEYS,
     latest_build_run,
+    latest_root_prefixes,
     run_state,
     swap_already_happened,
 )
@@ -30,6 +33,7 @@ from docgrep.domain.status import (
     CollectionView,
     DriftView,
     FailedSourceView,
+    RootStatusView,
     RunView,
     SourcesView,
     StatusReport,
@@ -85,9 +89,15 @@ class InspectStatus:
         runtime_config: Mapping[str, str | int | float],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         parser_versions: Mapping[FileType, str | None] | None = None,
+        roots: RootCatalog | None = None,
+        root_readable: Callable[[CorpusRoot], bool] | None = None,
     ) -> None:
         """``parser_versions`` maps each file type with a registered parser to
-        the version it declares; without it the parser-version count is None."""
+        the version it declares; without it the parser-version count is None.
+        ``roots`` gives the configured roots, reported with their sources;
+        ``root_readable`` checks a root folder without walking it."""
+        self.roots = roots
+        self.root_readable = root_readable
         self.lock = lock
         self.open_manifest = open_manifest
         self.open_store = open_store
@@ -240,6 +250,7 @@ class InspectStatus:
         sources = None
         if manifest_ok and manifest is not None:
             sources = self._sources(manifest)
+        roots = self._roots(manifest if manifest_ok else None, warn)
         return StatusReport(
             index_state,
             run_view,
@@ -249,6 +260,73 @@ class InspectStatus:
             drift,
             tuple(warnings),
             sources,
+            roots,
+        )
+
+    def _roots(
+        self, manifest: ManifestReader | None, warn: Callable[[str, str], None]
+    ) -> tuple[RootStatusView, ...] | None:
+        """The configured roots, then the roots found only in the index, with
+        their committed sources by state."""
+        if self.roots is None:
+            return None
+        roots = self.roots.roots()
+        counts: dict[str, dict[str, int]] = {}
+        if manifest is not None:
+            try:
+                roots = roots.with_recorded(latest_root_prefixes(manifest))
+                records = manifest.committed_sources()
+            except Exception:
+                _LOG.debug("status_roots_unreadable", exc_info=True)
+                records = ()
+            for record in records:
+                state = record.status.partition(":")[0]
+                found = counts.setdefault(
+                    roots.root_of(record.source.source_id),
+                    {"indexed": 0, "skipped": 0, "failed": 0},
+                )
+                if state in found:
+                    found[state] += 1
+        views = [self._view(root, counts) for root in roots]
+        unconfigured = sorted(name for name in counts if roots.get(name) is None)
+        for name in unconfigured:
+            views.append(
+                RootStatusView(
+                    name, name == roots.legacy_name, False, None, **counts[name]
+                )
+            )
+        if unconfigured:
+            warn(
+                "root_not_configured",
+                "Sources of roots that are not configured stay in the index: "
+                + ", ".join(
+                    f"{name} ({sum(counts[name].values())})" for name in unconfigured
+                )
+                + "; `docgrep forget-root NAME` removes the sources of a prefixed root",
+            )
+        unreadable = [view.name for view in views if view.readable is False]
+        if unreadable:
+            warn(
+                "root_unreadable",
+                "Configured roots that cannot be read: "
+                + ", ".join(unreadable)
+                + "; indexing, update and OCR refuse to run until they can",
+            )
+        return tuple(views)
+
+    def _view(
+        self, root: CorpusRoot, counts: Mapping[str, Mapping[str, int]]
+    ) -> RootStatusView:
+        readable = None if self.root_readable is None else self.root_readable(root)
+        found = counts.get(root.name, {})
+        return RootStatusView(
+            root.name,
+            root.legacy,
+            True,
+            readable,
+            found.get("indexed", 0),
+            found.get("skipped", 0),
+            found.get("failed", 0),
         )
 
     def _sources(self, manifest: ManifestReader) -> SourcesView | None:

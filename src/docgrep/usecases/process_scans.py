@@ -52,6 +52,7 @@ from docgrep.domain.ocr import (
     parse_languages,
 )
 from docgrep.domain.protocols import (
+    CorpusAvailability,
     CorpusScanner,
     DjvuPdfConverter,
     IndexLock,
@@ -303,6 +304,7 @@ class ProcessScans:
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_seconds: float = CANCEL_POLL_SECONDS,
+        availability: CorpusAvailability | None = None,
     ) -> None:
         if cancel_mode not in CANCEL_MODES:
             raise ValueError("cancel_mode must be terminate or finish")
@@ -325,6 +327,7 @@ class ProcessScans:
         self.clock = clock
         self.now = now
         self.poll_seconds = poll_seconds
+        self.availability = availability
         self._cancel_event = threading.Event()
 
     def request_cancel(self) -> None:
@@ -339,9 +342,15 @@ class ProcessScans:
         Raises ``ValidationError`` for an invalid request and
         ``OcrToolsMissing`` when the engine or a language is not installed.
         """
+        self._require_roots()
         languages = self._validate(request)
         self._check_tools(languages)
         return self._plan(request, languages)
+
+    def _require_roots(self) -> None:
+        """Refuse before any work when a root of the run cannot be read."""
+        if self.availability is not None:
+            self.availability.require_available()
 
     def _validate(self, request: OcrRequest) -> str:
         chosen = sum(
@@ -374,7 +383,7 @@ class ProcessScans:
             raise ValidationError(
                 str(error), details={"reason": "languages", "languages": languages}
             ) from error
-        # Raises for a path outside the corpus root or a missing file.
+        # Raises for a path outside the corpus roots or a missing file.
         located = [self.files.locate(path) for path in request.paths]
         wrong = sorted(
             {
@@ -499,6 +508,7 @@ class ProcessScans:
         ``IndexLockHeld``.
         """
         started = self.clock()
+        self._require_roots()
         languages = self._validate(request)
         version = self._check_tools(languages)
         with self.lock.hold("ocr"):

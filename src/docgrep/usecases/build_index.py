@@ -17,6 +17,7 @@ from docgrep.domain.errors import (
     ResumeAvailable,
     StagingInconsistent,
     StoreUnavailable,
+    ValidationError,
 )
 from docgrep.domain.models import (
     DELEGATED_TO_OCR,
@@ -29,6 +30,7 @@ from docgrep.domain.models import (
 from docgrep.domain.progress import estimate_eta_seconds
 from docgrep.domain.protocols import (
     Chunker,
+    CorpusAvailability,
     CorpusEnumerator,
     DocumentParser,
     EmbeddingProvider,
@@ -36,14 +38,23 @@ from docgrep.domain.protocols import (
     Manifest,
     OcrDelegations,
     PassageWriter,
+    RootCatalog,
     SparseEncoder,
     parser_version,
+)
+from docgrep.domain.roots import (
+    RUN_PREFIXES_KEY,
+    RUN_ROOTS_KEY,
+    CorpusRoots,
+    prefixes_value,
 )
 from docgrep.domain.run_state import (
     RESUMABLE_STATES,
     VECTOR_CONFIG_KEYS,
     config_drift,
     latest_build_run,
+    latest_root_prefixes,
+    roots_drift,
     run_state,
     swap_already_happened,
 )
@@ -213,6 +224,40 @@ class SourceIndexing:
     _cancel_persisted: bool
     # Originals indexed through their OCR'd sibling; None: no OCR registry.
     delegations: OcrDelegations | None = None
+    # The roots of the run (ADR-0023); None: one unnamed root, as before.
+    roots: RootCatalog | None = None
+    availability: CorpusAvailability | None = None
+
+    def run_roots(self) -> CorpusRoots | None:
+        """The roots of the run, knowing every prefix the index records.
+
+        Checks first that every root can be read, so that a missing root
+        fails the run before any work.
+        """
+        if self.availability is not None:
+            self.availability.require_available()
+        return self.known_roots()
+
+    def known_roots(self) -> CorpusRoots | None:
+        """The roots of the run with the prefixes the index records; no root
+        is read."""
+        if self.roots is None:
+            return None
+        return self.roots.roots().with_recorded(latest_root_prefixes(self.manifest))
+
+    @staticmethod
+    def roots_config(
+        roots: CorpusRoots | None, prefixes: frozenset[str] | None = None
+    ) -> dict[str, str]:
+        """The run configuration keys of the roots: the roots visited and the
+        prefixes the index may hold afterwards."""
+        if roots is None:
+            return {}
+        known = roots.prefixed_names if prefixes is None else prefixes
+        return {
+            RUN_ROOTS_KEY: roots.snapshot(),
+            RUN_PREFIXES_KEY: prefixes_value(known),
+        }
 
     def is_delegated(self, source: Source) -> bool:
         """Whether a PDF or DjVu source has a live delegation to its OCR'd
@@ -380,6 +425,8 @@ class BuildIndex(SourceIndexing):
         progress_every_seconds: float = 60.0,
         log_context: Mapping[str, str | int | float] | None = None,
         delegations: OcrDelegations | None = None,
+        roots: RootCatalog | None = None,
+        availability: CorpusAvailability | None = None,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -390,6 +437,8 @@ class BuildIndex(SourceIndexing):
         if progress_every_seconds <= 0:
             raise ValueError("progress_every_seconds must be positive")
         self.delegations = delegations
+        self.roots = roots
+        self.availability = availability
         self.lock = lock
         self.enumerator = enumerator
         self.parsers = parsers
@@ -504,7 +553,11 @@ class BuildIndex(SourceIndexing):
             self._finish_swapped_run()
             if refuse_resumable:
                 self._refuse_if_resumable()
-            run_id = self.manifest.start_run(self.run_config)
+            roots = self.run_roots()
+            self._refuse_dropping_other_roots(roots)
+            run_id = self.manifest.start_run(
+                {**self.run_config, **self.roots_config(roots)}
+            )
             _LOG.info(
                 "index_build_started", extra={"run_id": run_id, **self.log_context}
             )
@@ -520,6 +573,29 @@ class BuildIndex(SourceIndexing):
                 return _Plan(sources, len(sources))
 
             return self._execute(run_id, started, prepare)
+
+    def _refuse_dropping_other_roots(self, roots: CorpusRoots | None) -> None:
+        """A full build replaces the index with the sources of its roots, so
+        it refuses while the index holds sources of any other root."""
+        if roots is None:
+            return
+        others: dict[str, int] = {}
+        for record in self.manifest.committed_sources():
+            name = roots.root_of(record.source.source_id)
+            if roots.get(name) is None:
+                others[name] = others.get(name, 0) + 1
+        if not others:
+            return
+        listed = ", ".join(
+            f"{name} ({count})" for name, count in sorted(others.items())
+        )
+        raise ValidationError(
+            "The index holds sources of roots that this build does not visit: "
+            f"{listed}. A full build would drop them. Include those roots, add "
+            "the new roots with `docgrep update` instead, or remove their sources "
+            "first with `docgrep forget-root NAME`",
+            details={"roots": dict(sorted(others.items()))},
+        )
 
     @staticmethod
     def _totals(records: Sequence[ManifestSourceRecord]) -> dict[str, int]:
@@ -543,7 +619,24 @@ class BuildIndex(SourceIndexing):
             if recovered is not None:
                 return self._recovered_summary(recovered, started)
             latest = self._check_resumable_latest()
-            runtime = self.run_config
+            roots = self.run_roots()
+            if roots is not None and roots_drift(
+                dict(latest.config),
+                roots.snapshot(),
+                single_legacy=len(roots) == 1 and roots.legacy is not None,
+            ):
+                raise ConfigDrift(
+                    "The corpus roots differ from the roots the run started "
+                    "with; resume with the same roots (the same --root "
+                    "parameters or saved roots), or use --restart",
+                    details={
+                        "run_id": latest.run_id,
+                        "fields": RUN_ROOTS_KEY,
+                        "recorded": str(dict(latest.config).get(RUN_ROOTS_KEY)),
+                        "runtime": roots.snapshot(),
+                    },
+                )
+            runtime = {**self.run_config, **self.roots_config(roots)}
             drifted = config_drift(dict(latest.config), runtime)
             if drifted:
                 raise ConfigDrift(

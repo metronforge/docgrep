@@ -7,14 +7,19 @@ cannot be inspected is reported, never raised.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
 from docgrep.domain.errors import InspectionFailed, ValidationError
 from docgrep.domain.globs import matching_pattern
 from docgrep.domain.models import FileType
-from docgrep.domain.protocols import CorpusScanner, OcrRegistryReader, ScanProbe
+from docgrep.domain.protocols import (
+    CorpusScanner,
+    OcrRegistryReader,
+    RootCatalog,
+    ScanProbe,
+)
 from docgrep.domain.scans import (
     INSPECTION_FAILED,
     LARGE_FILE_BYTES,
@@ -102,6 +107,9 @@ class ScanDiscoveryReport:
     include_already_processed: bool = False
     # Originals with a live delegation left out of the entries.
     already_processed: int = 0
+    # The roots of the run in order, and the root of each entry (ADR-0023).
+    root_names: tuple[str, ...] = ()
+    root_by_path: Mapping[str, str] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """The JSON form; its key names are stable and documented."""
@@ -124,7 +132,24 @@ class ScanDiscoveryReport:
                 name: _counts([e for e in self.entries if e.file_type == name])
                 for name in self.file_types
             },
+            **({} if self.root_by_path is None else {"by_root": self._by_root()}),
         }
+
+    def _by_root(self) -> list[dict[str, Any]]:
+        """The totals of each root of the run, in the order of the roots."""
+        found = self.root_by_path or {}
+        names = list(self.root_names)
+        for entry in self.entries:
+            name = found.get(entry.path, "")
+            if name not in names:
+                names.append(name)
+        return [
+            {
+                "root": name,
+                **_counts([e for e in self.entries if found.get(e.path, "") == name]),
+            }
+            for name in names
+        ]
 
 
 class DiscoverScans:
@@ -137,6 +162,7 @@ class DiscoverScans:
         probe: ScanProbe,
         density_lower: float,
         density_upper: float,
+        roots: RootCatalog | None = None,
     ) -> None:
         if not 0 <= density_lower < density_upper:
             raise ValidationError(
@@ -147,6 +173,7 @@ class DiscoverScans:
         self.probe = probe
         self.density_lower = density_lower
         self.density_upper = density_upper
+        self.roots = roots
 
     def run(
         self,
@@ -188,6 +215,7 @@ class DiscoverScans:
             entry = self._inspect(item.path, item.file_type, item.size)
             entries.append(replace(entry, ocr_status=status))
         entries.sort(key=lambda e: (e.file_type, e.path))
+        roots = None if self.roots is None else self.roots.roots()
         return ScanDiscoveryReport(
             path_glob=path_glob,
             file_types=types,
@@ -196,6 +224,10 @@ class DiscoverScans:
             entries=tuple(entries),
             include_already_processed=include_already_processed,
             already_processed=skipped,
+            root_names=() if roots is None else roots.names,
+            root_by_path=None
+            if roots is None
+            else {entry.path: roots.root_of(entry.path) for entry in entries},
         )
 
     @staticmethod

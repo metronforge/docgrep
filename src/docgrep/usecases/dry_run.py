@@ -21,7 +21,12 @@ from docgrep.domain.models import (
     ScannedFile,
     Source,
 )
-from docgrep.domain.protocols import Chunker, CorpusScanner, DocumentParser
+from docgrep.domain.protocols import (
+    Chunker,
+    CorpusScanner,
+    DocumentParser,
+    RootCatalog,
+)
 
 SCHEMA_VERSION = 1
 MAX_LIMIT = 500
@@ -181,6 +186,9 @@ class DryRunReport:
     sample: tuple[SampleTypeReport, ...] | None = None
     sample_seed: int | None = None
     sample_requested: int | None = None
+    # The roots of the run in order, and the root of each file (ADR-0023).
+    root_names: tuple[str, ...] = ()
+    root_by_path: Mapping[str, str] | None = None
 
     def _included(self) -> list[ScannedFile]:
         return [f for f in self.files if f.excluded_by is None]
@@ -273,6 +281,8 @@ class DryRunReport:
                 "text_quality": _text_quality(self.sample),
             },
         }
+        if self.root_by_path is not None:
+            report["by_root"] = self._by_root()
         if with_files:
             page = self.files[self.offset : self.offset + self.limit]
             report["files"] = {
@@ -295,6 +305,40 @@ class DryRunReport:
             }
         return report
 
+    def _by_root(self) -> list[dict[str, Any]]:
+        """The totals of each root of the run, in the order of the roots."""
+        found = self.root_by_path or {}
+        rows: dict[str, dict[str, int]] = {
+            name: {
+                "files": 0,
+                "size_bytes": 0,
+                "included": 0,
+                "excluded": 0,
+                "would_be_indexed": 0,
+            }
+            for name in self.root_names
+        }
+        for item in self.files:
+            row = rows.setdefault(
+                found.get(item.path, ""),
+                {
+                    "files": 0,
+                    "size_bytes": 0,
+                    "included": 0,
+                    "excluded": 0,
+                    "would_be_indexed": 0,
+                },
+            )
+            row["files"] += 1
+            row["size_bytes"] += item.size
+            if item.excluded_by is not None:
+                row["excluded"] += 1
+                continue
+            row["included"] += 1
+            if item.file_type is not None and item.file_type in self.parser_types:
+                row["would_be_indexed"] += 1
+        return [{"root": name, **row} for name, row in rows.items()]
+
 
 class DryRun:
     """Classify the corpus the way a build would, without changing anything."""
@@ -305,10 +349,12 @@ class DryRun:
         scanner: CorpusScanner,
         parsers: Mapping[FileType, DocumentParser],
         chunker: Chunker,
+        roots: RootCatalog | None = None,
     ) -> None:
         self.scanner = scanner
         self.parsers = parsers
         self.chunker = chunker
+        self.roots = roots
 
     @staticmethod
     def _validate(
@@ -474,6 +520,7 @@ class DryRun:
             for item in scanned
             if path_prefix is None or item.path.startswith(path_prefix)
         )
+        roots = None if self.roots is None else self.roots.roots()
         return DryRunReport(
             path_prefix=path_prefix,
             files=files,
@@ -484,4 +531,8 @@ class DryRun:
             sample=None if sample is None else self._sample(files, sample, seed),
             sample_seed=None if sample is None else seed,
             sample_requested=sample,
+            root_names=() if roots is None else roots.names,
+            root_by_path=None
+            if roots is None
+            else {item.path: roots.root_of(item.path) for item in files},
         )

@@ -14,13 +14,16 @@ from docgrep.domain.models import OcrOutput, Source
 from docgrep.domain.protocols import (
     CommittedSourceReader,
     OcrOutputOwners,
+    RootCatalog,
     SourcePassageCounter,
 )
+from docgrep.domain.roots import CorpusRoots, known_root_names
 from docgrep.domain.sources import (
     BrowsedSource,
     BrowseRequest,
     BrowseResult,
     OcrStatus,
+    check_roots,
     file_type_counts,
     sort_sources,
 )
@@ -51,14 +54,22 @@ class BrowseSources:
         store: SourcePassageCounter,
         ocr: OcrOutputOwners,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        roots: RootCatalog | None = None,
     ) -> None:
         self.manifest = manifest
         self.store = store
         self.ocr = ocr
         self.now = now
+        self.roots = roots
 
     def run(self, request: BrowseRequest) -> BrowseResult:
         records = self.manifest.committed_sources()
+        roots = CorpusRoots() if self.roots is None else self.roots.roots()
+        if request.source_filter.roots:
+            check_roots(
+                request.source_filter,
+                known_root_names(roots, (r.source.source_id for r in records)),
+            )
         outputs = self.ocr.live_outputs()
         originals = {record.source.path: record.source for record in records}
         current_year = self.now().year
@@ -73,7 +84,9 @@ class BrowseSources:
                 origin=ocr_origin(record.source, outputs, originals),
             )
             audit = None if sanitized.audit.empty else sanitized.audit
-            if request.selects(sanitized.source, audit):
+            if request.selects(
+                sanitized.source, audit, roots.root_of(record.source.source_id)
+            ):
                 matching.append(sanitized.source)
                 if audit is not None:
                     audits[sanitized.source.source_id] = audit
@@ -106,6 +119,9 @@ class BrowseSources:
                     self._ocr_status(source, outputs),
                     degraded=counts[source.source_id] is None,
                     metadata_dropped=audits.get(source.source_id),
+                    root=roots.root_of(source.source_id)
+                    if self.roots is not None and roots.named
+                    else None,
                 )
                 for source in page
             ),
