@@ -310,6 +310,11 @@ class PassageRetriever(Protocol):
     ``retrieve`` returns candidates in first-stage order, best first. Each
     candidate carries its true dense similarity, including hits that only the
     sparse query found, and may carry its position as ``stage1_rank``.
+
+    ``source_ids``, when given, is an allow-list: only passages of those
+    sources are candidates, and the ``top_k`` best are taken from them, so the
+    restriction applies before ranking, not to its result. An empty
+    allow-list returns nothing.
     """
 
     def retrieve(
@@ -317,6 +322,7 @@ class PassageRetriever(Protocol):
         dense_vector: Sequence[float],
         sparse_vector: Mapping[int, float],
         top_k: int,
+        source_ids: Collection[str] | None = None,
     ) -> tuple[RetrievalCandidate, ...]: ...
 
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None: ...

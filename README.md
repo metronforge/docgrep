@@ -448,6 +448,34 @@ uv run docgrep search "phrase to find" --json
 
 Results include the exact stored passage text, source path, and a page number or Markdown heading path when available. The JSON form includes scores and query metadata.
 
+### Filtered search
+
+Search can be restricted to the indexed sources that match the same filters as [Browse sources](#browse-sources): `source_ids`, `authors`, `year_from`, `year_to`, `file_types`, `path_prefixes` and `path_globs` (on the command line `--source-id`, `--author`, `--year-from`, `--year-to`, `--type`, `--path-prefix`, `--glob`, each list option repeatable). Their semantics are those of the browse section:
+
+- Different filters combine with AND; several values of one filter combine with OR.
+- A source without the filtered metadata (no author, no year) never matches that filter.
+- Authors match as case-insensitive substrings; file types and source ids as listed there.
+- Paths are matched relative to the corpus root with `/` separators, as a case-sensitive prefix or a glob.
+
+```sh
+uv run docgrep search "comet orbit" --author arnold --year-to 1980 --type pdf
+```
+
+```sh
+curl -X POST http://127.0.0.1:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"comet orbit","authors":["arnold"],"year_to":1980,"file_types":["pdf"]}'
+```
+
+The MCP tool `find_passages` takes the same fields next to `query`, for example `{"query": "comet orbit", "authors": ["arnold"], "path_prefixes": ["Books/Math/"]}`.
+
+The filter is applied before ranking: docgrep turns the matching sources from the manifest into a list of `source_id` values, and the vector store searches only their passages, so the `top_k` first-stage candidates all come from the filtered sources. Reranking, duplicate collapsing and `top_k` work as without filters, and `total_hits` still counts the first-stage candidates (at most `top_k`), now taken from the filtered sources. The response adds:
+
+- `applied_filters`: the canonical filter, `{}` for an unfiltered search (whose body is otherwise unchanged).
+- `sources_excluded_for_missing_metadata`: only when `authors`, `year_from` or `year_to` is set; the number of sources, not passages, that pass every other filter but are left out only because the filtered author or year is missing.
+
+Filters that match no indexed source give an empty success with `total_hits: 0` and a `hint`, without loading a model. Invalid values (an unknown file type, `year_from` after `year_to`, a blank author) and unknown fields are `validation_error`s. The plain-text output starts with a `Filters:` line when filters are set. The design is recorded in [ADR-0020](docs/adr/0020-shared-source-filter-and-browse.md).
+
 ### Duplicate passages
 
 The same book often exists as several files with different bytes, for example two downloads of the same PDF. Their passages have different ids, but the same text would take several result slots. By default docgrep therefore collapses passages whose text is identical into one result:
@@ -465,7 +493,7 @@ books/comet.pdf:12 (score 0.912)
 also in: downloads/comet (1).pdf (page 12)
 ```
 
-Collapsing is controlled by `DOCGREP_COLLAPSE_DUPLICATES` (default `true`), by the request field `collapse_duplicates` of `POST /search` (`true`, `false`, or `null` for the setting) and by `docgrep search --no-collapse-duplicates`. With collapsing off, results and response are exactly those of release 1.10.0: no `duplicates` and no `collapsed_duplicates` keys. Collapsing works at query time on the stored passages; it changes nothing in the index and needs no rebuild.
+Collapsing is controlled by `DOCGREP_COLLAPSE_DUPLICATES` (default `true`), by the request field `collapse_duplicates` of `POST /search` (`true`, `false`, or `null` for the setting) and by `docgrep search --no-collapse-duplicates`. With collapsing off, results and response are those of release 1.10.0, plus `applied_filters: {}` (see [Filtered search](#filtered-search)): no `duplicates` and no `collapsed_duplicates` keys. Collapsing works at query time on the stored passages; it changes nothing in the index and needs no rebuild.
 
 ## Browse sources
 
@@ -507,7 +535,7 @@ curl -X POST http://127.0.0.1:8000/search \
   -d '{"query":"phrase to find","top_n":5}'
 ```
 
-The body of `POST /search` takes `query`, an optional `top_n` and an optional `collapse_duplicates` (see [Duplicate passages](#duplicate-passages)).
+The body of `POST /search` takes `query`, an optional `top_n`, an optional `collapse_duplicates` (see [Duplicate passages](#duplicate-passages)) and the optional filter fields (see [Filtered search](#filtered-search)); unknown fields are rejected.
 
 `POST /sources/browse` lists the indexed sources (see [Browse sources](#browse-sources)). `POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information.
 
@@ -517,7 +545,7 @@ When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank 
 
 docgrep offers its search to MCP clients, such as Claude Code, as read-only tools over the same use cases as the command line and the HTTP API. Results are verbatim passages from your own documents, never summaries; clients are told to cite the path, the heading path and, when the passage has one, the page. Passage text is data from your documents, not instructions for the client. The design is recorded in [ADR-0019](docs/adr/0019-mcp-server-as-api-front-end.md).
 
-- `find_passages`: ranked verbatim passages for `query`, with an optional `top_n` (default 10, at most `DOCGREP_MCP_MAX_TOP_N`) and `collapse_duplicates`; the structured result is the body of `POST /search`, and DOCX and EPUB passages have a null page number.
+- `find_passages`: ranked verbatim passages for `query`, with an optional `top_n` (default 10, at most `DOCGREP_MCP_MAX_TOP_N`), `collapse_duplicates` and the filters of [Filtered search](#filtered-search); the structured result is the body of `POST /search`, and DOCX and EPUB passages have a null page number. Filters that match nothing give an empty result, not an error.
 - `get_index_status`: the report of `docgrep status --json`, including the failed sources and their errors.
 - `browse_sources`: one page of indexed sources with their metadata and passage counts, filtered and sorted as described in [Browse sources](#browse-sources) (`page_size` default 50, at most `DOCGREP_MCP_MAX_PAGE_SIZE`); the structured result is the body of `POST /sources/browse`. A page too large for one tool result keeps its first sources and says so in `hint`.
 

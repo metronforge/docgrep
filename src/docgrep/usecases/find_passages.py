@@ -3,6 +3,8 @@
 import logging
 import math
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 
 from docgrep.domain.duplicates import collapse_duplicates as collapse
 from docgrep.domain.errors import (
@@ -11,16 +13,51 @@ from docgrep.domain.errors import (
     ModelUnavailable,
     ValidationError,
 )
-from docgrep.domain.models import RankedPassage, RetrievalCandidate, SearchResult
+from docgrep.domain.models import (
+    RankedPassage,
+    RetrievalCandidate,
+    SearchResult,
+    Source,
+)
 from docgrep.domain.protocols import (
+    CommittedSourceReader,
     EmbeddingProvider,
     PassageRetriever,
     Reranker,
     SparseEncoder,
     ranked_passage_key,
 )
+from docgrep.domain.sources import SourceFilter, matches
 
 _LOG = logging.getLogger(__name__)
+
+NO_MATCHING_SOURCES_HINT = "The filters matched no indexed source"
+
+
+@dataclass(frozen=True, slots=True)
+class _Scope:
+    """The sources a filtered search may return passages from.
+
+    ``source_ids`` is None when every indexed source matches, so no
+    allow-list is needed.
+    """
+
+    source_ids: frozenset[str] | None
+    matched: int
+    excluded_for_missing_metadata: int | None
+
+
+def _excluded_for_missing_metadata(source_filter: SourceFilter, source: Source) -> bool:
+    """Whether a source fails the filter only because a filtered author or
+    year is null: it passes once the null fields are no longer filtered."""
+    relaxed = source_filter
+    if source_filter.authors and source.author is None:
+        relaxed = replace(relaxed, authors=())
+    if (
+        source_filter.year_from is not None or source_filter.year_to is not None
+    ) and source.year is None:
+        relaxed = replace(relaxed, year_from=None, year_to=None)
+    return relaxed is not source_filter and matches(relaxed, source)
 
 
 def _normalized_score(value: float) -> float:
@@ -60,6 +97,7 @@ class FindPassages:
         top_n_max: int,
         max_query_len: int,
         collapse_duplicates: bool = True,
+        manifest: CommittedSourceReader | None = None,
     ) -> None:
         if top_k <= 0 or not 0 < default_top_n <= top_n_max:
             raise ValueError("result limits must be positive")
@@ -74,6 +112,7 @@ class FindPassages:
         self.top_n_max = top_n_max
         self.max_query_len = max_query_len
         self.collapse_duplicates = collapse_duplicates
+        self.manifest = manifest
 
     def run(
         self,
@@ -81,10 +120,13 @@ class FindPassages:
         *,
         top_n: int | None = None,
         collapse_duplicates: bool | None = None,
+        source_filter: SourceFilter | None = None,
     ) -> SearchResult:
         """Find passages, keeping the indexed text unchanged in every result.
 
         ``collapse_duplicates`` overrides the configured default when given.
+        ``source_filter`` restricts the first stage to the indexed sources
+        that match it (UC-02); a filter without any field set is no filter.
         """
         started = time.monotonic()
         collapsing = (
@@ -137,6 +179,15 @@ class FindPassages:
             ("top_k", self.top_k),
             ("top_n", limit),
         )
+        applied_filters: Mapping[str, list[str] | int] = (
+            source_filter.applied() if source_filter is not None else {}
+        )
+        scope = (
+            self._scope(source_filter)
+            if source_filter is not None and applied_filters
+            else None
+        )
+        excluded = None if scope is None else scope.excluded_for_missing_metadata
 
         def result(
             passages: tuple[RankedPassage, ...],
@@ -156,6 +207,8 @@ class FindPassages:
                 rerank_skip_reason,
                 hint,
                 collapsed_duplicates if collapsing else None,
+                applied_filters,
+                excluded,
             )
             # Counts and timings only: neither the query nor passage text is logged.
             _LOG.info(
@@ -171,6 +224,9 @@ class FindPassages:
 
         if self.retriever.count_passages() == 0:
             return result((), 0, hint="The index is empty")
+        if scope is not None and scope.matched == 0:
+            # Nothing can match, so no model and no retrieval is needed.
+            return result((), 0, hint=NO_MATCHING_SOURCES_HINT)
 
         try:
             vectors = self.embedder.embed((query,))
@@ -187,7 +243,12 @@ class FindPassages:
                 details={"model": self.embedder.model_name, "reason": str(error)},
             ) from error
         sparse = self.sparse_encoder.encode(query)
-        candidates = self.retriever.retrieve(vectors[0], sparse, self.top_k)
+        if scope is None or scope.source_ids is None:
+            candidates = self.retriever.retrieve(vectors[0], sparse, self.top_k)
+        else:
+            candidates = self.retriever.retrieve(
+                vectors[0], sparse, self.top_k, source_ids=scope.source_ids
+            )
         if not candidates:
             return result((), 0)
 
@@ -261,3 +322,33 @@ class FindPassages:
             rerank_skip_reason=rerank_skip_reason,
             collapsed_duplicates=removed,
         )
+
+    def _scope(self, source_filter: SourceFilter) -> _Scope:
+        """Resolve the filter against the committed indexed sources.
+
+        Raises ``IndexIncomplete`` when the manifest cannot be read, the same
+        category as a search without a published index.
+        """
+        if self.manifest is None:
+            raise IndexIncomplete("Filtered search needs the index manifest")
+        try:
+            records = self.manifest.committed_sources()
+        except Exception as error:
+            _LOG.exception("search_manifest_read_failed")
+            raise IndexIncomplete(
+                "The index manifest cannot be read", details={"reason": str(error)}
+            ) from error
+        indexed = [record.source for record in records if record.status == "indexed"]
+        allowed = frozenset(
+            source.source_id for source in indexed if matches(source_filter, source)
+        )
+        excluded: int | None = None
+        if source_filter.authors or (
+            source_filter.year_from is not None or source_filter.year_to is not None
+        ):
+            excluded = sum(
+                _excluded_for_missing_metadata(source_filter, source)
+                for source in indexed
+            )
+        everything = len(allowed) == len({source.source_id for source in indexed})
+        return _Scope(None if everything else allowed, len(allowed), excluded)

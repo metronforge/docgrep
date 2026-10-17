@@ -31,12 +31,14 @@ from docgrep.api.http import (
     BrowseSourcesResponse,
     SearchResponse,
     create_app,
+    format_filters,
+    run_search,
     validation_problems,
 )
 from docgrep.api.log_config import configure_logging
 from docgrep.api.signals import Register, graceful_cancel
 from docgrep.domain.errors import DocgrepError, ValidationError
-from docgrep.domain.sources import HAS_METADATA_VALUES, SORT_KEYS
+from docgrep.domain.sources import HAS_METADATA_VALUES, SORT_KEYS, SourceFilter
 from docgrep.settings import Settings
 from docgrep.usecases.cancel_index import CancelIndex, CancelResult
 from docgrep.usecases.discover_scans import DiscoverScans
@@ -84,7 +86,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep sources that failed before instead of trying them again",
     )
-    search = commands.add_parser("search", help="Find verbatim passages")
+    search = commands.add_parser(
+        "search",
+        help="Find verbatim passages",
+        description="Filters restrict the search to the matching indexed "
+        "sources before ranking. They combine with AND; repeated values of one "
+        "option combine with OR. A source without the filtered metadata never "
+        "matches.",
+    )
     search.add_argument("query")
     search.add_argument("--top-n", type=int, dest="top_n")
     search.add_argument("--json", action="store_true")
@@ -96,6 +105,7 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="List passages with identical text from several files separately",
     )
+    _add_filter_options(search)
     dry = commands.add_parser(
         "dry-run",
         help="Preview what a build would index, without changing anything",
@@ -166,35 +176,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Filters combine with AND; repeated values of one option "
         "combine with OR. A source without the filtered metadata never matches.",
     )
-    sources.add_argument(
-        "--author",
-        dest="authors",
-        action="append",
-        help="Author substring, case-insensitive; repeatable",
-    )
-    sources.add_argument("--year-from", dest="year_from", type=int)
-    sources.add_argument("--year-to", dest="year_to", type=int)
-    sources.add_argument(
-        "--type",
-        dest="file_types",
-        action="append",
-        help="File type (pdf, markdown, txt, epub, docx, djvu); repeatable",
-    )
-    sources.add_argument(
-        "--path-prefix",
-        dest="path_prefixes",
-        action="append",
-        help="Path prefix relative to the corpus root, case-sensitive; repeatable",
-    )
-    sources.add_argument(
-        "--glob",
-        dest="path_globs",
-        action="append",
-        help="Path glob, as in DOCGREP_INCLUDE_GLOBS; repeatable",
-    )
-    sources.add_argument(
-        "--source-id", dest="source_ids", action="append", help="Repeatable"
-    )
+    _add_filter_options(sources)
     sources.add_argument(
         "--has-metadata", dest="has_metadata", choices=HAS_METADATA_VALUES
     )
@@ -218,6 +200,52 @@ def _parser() -> argparse.ArgumentParser:
         help="Serve the read-only MCP tools on standard input and output",
     )
     return parser
+
+
+def _add_filter_options(command: argparse.ArgumentParser) -> None:
+    """The options of the shared source filter, for sources and search."""
+    command.add_argument(
+        "--author",
+        dest="authors",
+        action="append",
+        help="Author substring, case-insensitive; repeatable",
+    )
+    command.add_argument("--year-from", dest="year_from", type=int)
+    command.add_argument("--year-to", dest="year_to", type=int)
+    command.add_argument(
+        "--type",
+        dest="file_types",
+        action="append",
+        help="File type (pdf, markdown, txt, epub, docx, djvu); repeatable",
+    )
+    command.add_argument(
+        "--path-prefix",
+        dest="path_prefixes",
+        action="append",
+        help="Path prefix relative to the corpus root, case-sensitive; repeatable",
+    )
+    command.add_argument(
+        "--glob",
+        dest="path_globs",
+        action="append",
+        help="Path glob, as in DOCGREP_INCLUDE_GLOBS; repeatable",
+    )
+    command.add_argument(
+        "--source-id", dest="source_ids", action="append", help="Repeatable"
+    )
+
+
+def _source_filter(args: argparse.Namespace) -> SourceFilter:
+    """The filter of the command line; invalid values raise ValidationError."""
+    return SourceFilter(
+        source_ids=tuple(args.source_ids or ()),
+        authors=tuple(args.authors or ()),
+        year_from=args.year_from,
+        year_to=args.year_to,
+        file_types=tuple(args.file_types or ()),
+        path_prefixes=tuple(args.path_prefixes or ()),
+        path_globs=tuple(args.path_globs or ()),
+    )
 
 
 def _size(value: float) -> str:
@@ -780,6 +808,13 @@ def _format_update(summary: UpdateSummary) -> str:
 def _format_search(response: SearchResponse) -> str:
     """Render search results as plain text with the verbatim passage text."""
     lines: list[str] = []
+    if response.applied_filters:
+        lines.append(f"Filters: {format_filters(response.applied_filters)}\n")
+    if response.sources_excluded_for_missing_metadata:
+        lines.append(
+            "Sources left out for a missing author or year: "
+            f"{response.sources_excluded_for_missing_metadata}\n"
+        )
     if response.hint:
         lines.append(response.hint + "\n")
     for item in response.results:
@@ -1038,6 +1073,10 @@ def main(
             _emit(text)
             return status
 
+        # Checked before the composition root, so a bad filter loads nothing.
+        source_filter = (
+            _source_filter(args) if args.command == "search" else SourceFilter()
+        )
         services = container_factory(settings)
         if args.command == "update":
             update = services.update
@@ -1102,14 +1141,13 @@ def main(
                 _emit(f"  {failure.path}: {failure.reason}: {failure.message}\n")
             return 1 if summary.failed else 0
 
-        if args.collapse_duplicates is None:
-            result = services.search.run(args.query, top_n=args.top_n)
-        else:
-            result = services.search.run(
-                args.query,
-                top_n=args.top_n,
-                collapse_duplicates=args.collapse_duplicates,
-            )
+        result = run_search(
+            services.search,
+            args.query,
+            top_n=args.top_n,
+            collapse_duplicates=args.collapse_duplicates,
+            source_filter=source_filter,
+        )
         response = SearchResponse.from_domain(result)
         if args.json:
             _emit(response.model_dump_json() + "\n")

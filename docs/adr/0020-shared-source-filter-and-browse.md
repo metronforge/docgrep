@@ -42,6 +42,16 @@ UC-08 lists the indexed sources with their metadata, filtered, sorted and paged.
 - No `delegated_to_sibling` OCR status: an original delegated to its OCR'd sibling is not indexed itself, so it is never listed; its output is listed as `processed_via_ocr`.
 - The draft names the path filters in the singular; the request takes lists (`path_prefixes`, `path_globs`) like the other filter fields, OR within each list.
 
+## Search
+
+UC-02 reuses `SourceFilter`, `matches()` and `applied()` unchanged; there is no second matcher.
+
+- **Resolve through the manifest, restrict in the store.** `FindPassages` lists the committed `indexed` sources, keeps those that match, and passes their `source_id` values to `PassageRetriever.retrieve` as an allow-list. The Qdrant adapter applies it as a `MatchAny` condition on the `source_id` payload (which has a keyword index) in the dense prefetch, the sparse prefetch and the final fused query, together with the record-type condition. The `top_k` first-stage candidates are therefore the best of the matching sources, not what is left of the best of the whole corpus; rerank, collapsing and `top_k` are unchanged. This is part of the published index contract: the allow-list comes from the manifest, the store checks `source_id`.
+- **No filter means the old search.** A request without filter fields, or with every field empty, reads no manifest, passes no allow-list and returns the previous body plus `applied_filters: {}`. A filter that matches every indexed source also passes no allow-list.
+- **An empty match set returns at once**, with no embedding, no store query and no rerank: `total_hits: 0`, the canonical `applied_filters` and a `hint` that the filters matched no indexed source. It is a success, not an error, over every front.
+- When `authors`, `year_from` or `year_to` is set, the response adds `sources_excluded_for_missing_metadata`: the number of sources (not passages) that pass every other filter but are left out only because the filtered author or year is null.
+- A filtered search whose manifest cannot be read fails with `index_incomplete`, the category of a search without a published index.
+
 ## Consequences
 
 Browse and search will share one definition of each filter field. A filter costs one manifest scan in Python, which is linear in the number of committed sources and cheap for a few thousand. A default page costs at most one store count per listed source; `sort_by=passage_count` costs one per match. No new payload index and no new stored state are needed.

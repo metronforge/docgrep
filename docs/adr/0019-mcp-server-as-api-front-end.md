@@ -36,7 +36,7 @@ MCP is a third front-end in the API layer, in this repository and package. It is
 
 LLM clients get the same findings as REST and CLI users, with the same field names, so the fronts cannot drift. The SDK and its dependencies join the lock. Over HTTP the models are shared; over stdio each client process loads its own. In local mode a stdio server and `docgrep serve` cannot both open the store, as with any two docgrep processes, so a Qdrant server is the setup for several clients.
 
-No output schema is declared for the tools, because the SDK validates every returned result against a declared output model, error results included, and that would replace the structured error body. Clients still receive the structured content.
+Each tool declares an output schema that accepts its success body or the structured error body, because the SDK validates every returned result against it, error results included. Clients still receive the structured content.
 
 Adding a tool means adding its use case first. A tool that writes would need a new decision on authorization and confirmation.
 
