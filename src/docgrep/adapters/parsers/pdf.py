@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pymupdf
 
+from docgrep.adapters.corpus import as_roots
+from docgrep.adapters.parsers._common import source_location
 from docgrep.adapters.parsers.page_policy import (
     ANY_RULE_DOCUMENT_SHARE,
     GARBLED_DOCUMENT_SHARE,
@@ -20,6 +22,7 @@ from docgrep.domain.models import (
     ParsedDocument,
     Source,
 )
+from docgrep.domain.roots import CorpusRoots
 
 _LOG = logging.getLogger(__name__)
 _PDF_DATE_YEAR = re.compile(r"^D:(\d{4})")
@@ -57,16 +60,17 @@ class PdfParser:
     # pages are handled. 3: only broken characters drop a page.
     version = "3"
 
-    def __init__(self, corpus_root: Path) -> None:
-        self.corpus_root = corpus_root
+    def __init__(self, corpus_root: CorpusRoots | Path) -> None:
+        self.roots = as_roots(corpus_root)
 
     def parse(self, source: Source) -> ParsedDocument:
         """Return text-bearing pages with 1-based locations and PDF metadata."""
         if source.file_type is not FileType.PDF:
             raise ParseError("source is not PDF", details={"path": source.path})
+        path, root = source_location(self.roots, source)
         try:
             # PyMuPDF's Document constructor lacks complete type annotations.
-            with pymupdf.open(self.corpus_root / source.path) as pdf:  # type: ignore[no-untyped-call]
+            with pymupdf.open(path) as pdf:  # type: ignore[no-untyped-call]
                 metadata = pdf.metadata or {}
                 pages_total = pdf.page_count
                 sections, quality = apply_page_policy(
@@ -87,9 +91,7 @@ class PdfParser:
                 "PDF cannot be parsed",
                 details={
                     "path": source.path,
-                    "reason": scrub_tool_output(
-                        str(error), (self.corpus_root / source.path, self.corpus_root)
-                    ),
+                    "reason": scrub_tool_output(str(error), (path, root)),
                 },
             ) from error
         garbled = quality.pages_garbled

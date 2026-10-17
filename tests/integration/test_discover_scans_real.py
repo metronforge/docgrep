@@ -145,6 +145,7 @@ def test_the_wiring_has_no_store_manifest_lock_or_model(corpus: Path) -> None:
         "density_lower",
         "density_upper",
         "probe",
+        "roots",
         "scanner",
     ]
 

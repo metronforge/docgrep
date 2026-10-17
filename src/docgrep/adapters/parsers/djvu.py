@@ -4,12 +4,14 @@ import logging
 from dataclasses import replace
 from pathlib import Path
 
+from docgrep.adapters.corpus import as_roots
 from docgrep.adapters.djvulibre import (
     CommandRunner,
     DjvuError,
     SubprocessRunner,
     page_texts,
 )
+from docgrep.adapters.parsers._common import source_location
 from docgrep.adapters.parsers.page_policy import apply_page_policy
 from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.domain.errors import ParseError
@@ -20,6 +22,7 @@ from docgrep.domain.models import (
     ParsedDocument,
     Source,
 )
+from docgrep.domain.roots import CorpusRoots
 
 _LOG = logging.getLogger(__name__)
 
@@ -38,22 +41,25 @@ class DjvuParser:
     # extract the sources of this type again.
     version = "1"
 
-    def __init__(self, corpus_root: Path, runner: CommandRunner | None = None) -> None:
-        self.corpus_root = corpus_root
+    def __init__(
+        self, corpus_root: CorpusRoots | Path, runner: CommandRunner | None = None
+    ) -> None:
+        self.roots = as_roots(corpus_root)
         self.runner: CommandRunner = runner or SubprocessRunner()
 
     def parse(self, source: Source) -> ParsedDocument:
         """Return text-bearing pages; title, author and year are not known."""
         if source.file_type is not FileType.DJVU:
             raise ParseError("source is not DjVu", details={"path": source.path})
-        path = (self.corpus_root / source.path).resolve()
+        file, root = source_location(self.roots, source)
+        path = file.resolve()
         try:
             texts = page_texts(self.runner, path)
         except DjvuError as error:
             raise ParseError(
                 scrub_tool_output(
                     f"DjVu cannot be read ({error.reason}): {error}",
-                    (path, self.corpus_root),
+                    (path, root),
                 ),
                 details={"path": source.path, "reason": error.reason},
             ) from error

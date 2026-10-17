@@ -77,6 +77,7 @@ def test_the_json_report_has_the_documented_keys(setup: tuple[Path, Path]) -> No
         "would_be_indexed",
         "recognised_without_parser",
         "excluded",
+        "by_root",
         "files",
         "sample",
     }
@@ -195,7 +196,9 @@ def test_the_text_report_is_readable_and_has_no_file_list_or_content(
 ) -> None:
     code, out, err = _run("--sample", "2")
 
-    assert code == 0 and err == ""
+    # The deprecated DOCGREP_CORPUS_ROOT is reported with one line (ADR-0023).
+    assert code == 0 and err.startswith("warning: DOCGREP_CORPUS_ROOT is deprecated")
+    assert err.count("\n") == 1
     assert "Corpus dry run (read-only" in out
     assert "Recognised without a parser: 0 files" in out
     assert "notes/private/: 1" in out
@@ -352,7 +355,7 @@ def test_the_command_wires_only_a_scanner_parsers_and_a_chunker(
         Settings(corpus_root=tmp_path, data_dir=tmp_path / "d", backend="fake")
     )
 
-    assert sorted(vars(dry_run)) == ["chunker", "parsers", "scanner"]
+    assert sorted(vars(dry_run)) == ["chunker", "parsers", "roots", "scanner"]
     assert not (tmp_path / "d").exists()
     assert os.listdir(tmp_path) == []
 

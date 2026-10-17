@@ -24,6 +24,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from docgrep import __version__
+from docgrep.adapters.corpus import root_readable
 from docgrep.adapters.qdrant import local_passage_count, warn_if_local_mode_is_large
 from docgrep.api.container import (
     ContextOperation,
@@ -41,6 +42,7 @@ from docgrep.api.log_config import (
     log_server_start,
     warn_if_not_loopback,
 )
+from docgrep.api.roots import corpus_roots
 from docgrep.domain.context import ContextResult, PassageContext, PassageLocation
 from docgrep.domain.errors import (
     ConfigDrift,
@@ -92,6 +94,8 @@ class SourceResponse(BaseModel):
     size: int | None
     indexed_at: str | None
     parser_version: str | None
+    # The name of the source's root (ADR-0023); set in search results.
+    root: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class PassageResponse(BaseModel):
@@ -117,9 +121,12 @@ class DuplicateResponse(BaseModel):
     file_type: FileType
     page_number: int | None
     heading_path: tuple[str, ...]
+    root: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @classmethod
-    def from_domain(cls, item: RankedPassage) -> "DuplicateResponse":
+    def from_domain(
+        cls, item: RankedPassage, roots: Mapping[str, str] | None = None
+    ) -> "DuplicateResponse":
         return cls(
             passage_id=item.passage.passage_id,
             source_id=item.source.source_id,
@@ -127,6 +134,7 @@ class DuplicateResponse(BaseModel):
             file_type=item.source.file_type,
             page_number=item.passage.page_number,
             heading_path=item.passage.heading_path,
+            root=(roots or {}).get(item.source.source_id),
         )
 
 
@@ -144,15 +152,19 @@ class RankedPassageResponse(BaseModel):
     )
 
     @classmethod
-    def from_domain(cls, item: RankedPassage) -> "RankedPassageResponse":
+    def from_domain(
+        cls, item: RankedPassage, roots: Mapping[str, str] | None = None
+    ) -> "RankedPassageResponse":
+        source = SourceResponse.model_validate(item.source)
+        source.root = (roots or {}).get(item.source.source_id)
         return cls(
             passage=PassageResponse.model_validate(item.passage),
-            source=SourceResponse.model_validate(item.source),
+            source=source,
             score=item.score,
             dense_score=item.dense_score,
             reranker_score=item.reranker_score,
             duplicates=tuple(
-                DuplicateResponse.from_domain(duplicate)
+                DuplicateResponse.from_domain(duplicate, roots)
                 for duplicate in item.duplicates
             ),
         )
@@ -184,7 +196,8 @@ class SearchResponse(BaseModel):
     def from_domain(cls, result: SearchResult) -> "SearchResponse":
         return cls(
             results=tuple(
-                RankedPassageResponse.from_domain(item) for item in result.results
+                RankedPassageResponse.from_domain(item, result.source_roots)
+                for item in result.results
             ),
             total_hits=result.total_hits,
             took_ms=result.took_ms,
@@ -209,7 +222,7 @@ def _checked[T](check: Callable[[], T]) -> T:
 
 
 class SourceFilterBody(BaseModel):
-    """The seven fields of the shared source filter, for browsing and search.
+    """The fields of the shared source filter, for browsing and search.
 
     Unknown fields are rejected. The values are checked by the domain's
     ``SourceFilter``, so every front applies the same rules.
@@ -224,8 +237,10 @@ class SourceFilterBody(BaseModel):
     file_types: list[str] | None = None
     path_prefixes: list[str] | None = None
     path_globs: list[str] | None = None
+    # Root names (ADR-0023); checked against the known roots when resolved.
+    roots: list[str] | None = None
 
-    @field_validator("source_ids", "authors", "path_prefixes", "path_globs")
+    @field_validator("source_ids", "authors", "path_prefixes", "path_globs", "roots")
     @classmethod
     def check_texts(
         cls, values: list[str] | None, info: ValidationInfo
@@ -255,6 +270,7 @@ class SourceFilterBody(BaseModel):
             file_types=parse_file_types(self.file_types or ()),
             path_prefixes=tuple(self.path_prefixes or ()),
             path_globs=tuple(self.path_globs or ()),
+            roots=tuple(self.roots or ()),
         )
 
 
@@ -358,6 +374,8 @@ class BrowsedSourceResponse(BaseModel):
     indexed_at: str | None
     content_hash: str | None
     ocr_status: OcrStatus
+    # The name of the source's root (ADR-0023).
+    root: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # Present, and true, only when the passage count failed.
     degraded: bool = Field(default=False, exclude_if=lambda value: not value)
     # Present only when sanitizing dropped or inherited a field.
@@ -379,6 +397,7 @@ class BrowsedSourceResponse(BaseModel):
             indexed_at=source.indexed_at,
             content_hash=source.content_hash,
             ocr_status=item.ocr_status,
+            root=item.root,
             degraded=item.degraded,
             metadata_dropped=(
                 None
@@ -422,6 +441,32 @@ class BrowseSourcesResponse(BaseModel):
             ),
             applied_filters=dict(result.applied_filters),
         )
+
+
+def root_status_lines(roots: Sequence[Mapping[str, Any]] | None) -> list[str]:
+    """The roots of a status report as text, when there is more than one or
+    one needs attention; a single readable root says nothing new."""
+    roots = roots or ()
+    if len(roots) < 2 and all(
+        root["configured"] and root["readable"] is not False for root in roots
+    ):
+        return []
+    return [format_root_status(root) for root in roots]
+
+
+def format_root_status(root: Mapping[str, Any]) -> str:
+    """One root of the status report on one line: name, flags and counts."""
+    flags = ["legacy"] if root["legacy"] else []
+    if not root["configured"]:
+        flags.append("not configured")
+    elif root["readable"] is False:
+        flags.append("not readable")
+    return (
+        f"Root {root['name']}"
+        + (f" ({', '.join(flags)})" if flags else "")
+        + f": {root['indexed']} indexed, {root['skipped']} skipped, "
+        f"{root['failed']} failed"
+    )
 
 
 def format_filters(applied: Mapping[str, object]) -> str:
@@ -677,6 +722,40 @@ class ProcessScansRequest(BaseModel):
     force: bool = False
 
 
+class InfoRootResponse(BaseModel):
+    """A configured corpus root; ``readable`` is a cheap check of its folder."""
+
+    name: str
+    path: str
+    legacy: bool
+    readable: bool
+
+
+class InfoResponse(BaseModel):
+    """Basic service information and the configured corpus roots, in order."""
+
+    version: str
+    backend: str
+    roots: list[InfoRootResponse] = Field(default_factory=list)
+
+
+def service_info(settings: Settings) -> InfoResponse:
+    """What ``GET /info`` returns; the index is not read."""
+    return InfoResponse(
+        version=__version__,
+        backend=settings.backend,
+        roots=[
+            InfoRootResponse(
+                name=root.name,
+                path=str(root.path),
+                legacy=root.legacy,
+                readable=root_readable(root.path),
+            )
+            for root in corpus_roots(settings)
+        ],
+    )
+
+
 class BuildRequest(BaseModel):
     """Optional body of a build request."""
 
@@ -902,9 +981,11 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/info")
-    def info() -> dict[str, str]:
-        return {"version": __version__, "backend": effective.backend}
+    @app.get("/info", response_model=InfoResponse)
+    def info() -> InfoResponse:
+        """The version, the backend and the configured corpus roots with their
+        absolute paths; the index is not read."""
+        return service_info(effective)
 
     @app.post("/search", response_model=SearchResponse)
     def search(request: SearchRequest) -> SearchResponse:

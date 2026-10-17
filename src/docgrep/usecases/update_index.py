@@ -3,7 +3,7 @@
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal
@@ -14,6 +14,7 @@ from docgrep.domain.errors import (
     DocgrepError,
     IndexIncomplete,
     ResumeAvailable,
+    ValidationError,
 )
 from docgrep.domain.models import (
     DELEGATED_TO_OCR,
@@ -23,6 +24,7 @@ from docgrep.domain.models import (
 )
 from docgrep.domain.protocols import (
     Chunker,
+    CorpusAvailability,
     CorpusReader,
     DocumentParser,
     EmbeddingProvider,
@@ -30,10 +32,12 @@ from docgrep.domain.protocols import (
     LiveIndexWriter,
     Manifest,
     OcrDelegations,
+    RootCatalog,
     SparseEncoder,
     parser_reprocess_reason,
     parser_version,
 )
+from docgrep.domain.roots import CorpusRoots, known_root_names
 from docgrep.domain.run_state import (
     RESUMABLE_STATES,
     VECTOR_CONFIG_KEYS,
@@ -92,6 +96,9 @@ class UpdatePlan:
     newly_supported: int = 0
     delegated_to_ocr: int = 0
     delegation_ended: int = 0
+    # Sources kept because their root is not part of the run, by root name
+    # (ADR-0023): they are neither checked nor removed.
+    outside_run: tuple[tuple[str, int], ...] = ()
 
     @property
     def changes(self) -> int:
@@ -166,6 +173,8 @@ class UpdateIndex(SourceIndexing):
         progress_every_seconds: float = 60.0,
         log_context: Mapping[str, str | int | float] | None = None,
         delegations: OcrDelegations | None = None,
+        roots: RootCatalog | None = None,
+        availability: CorpusAvailability | None = None,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -176,6 +185,8 @@ class UpdateIndex(SourceIndexing):
         if progress_every_seconds <= 0:
             raise ValueError("progress_every_seconds must be positive")
         self.delegations = delegations
+        self.roots = roots
+        self.availability = availability
         self.lock = lock
         self.corpus = corpus
         self.parsers = parsers
@@ -223,14 +234,86 @@ class UpdateIndex(SourceIndexing):
         started = self.clock()
         with self.lock.hold("update"):
             self._check_preconditions()
+            roots = self.run_roots()
             self._close_dead_update()
-            run_id = self.manifest.start_run(self.run_config, kind="update")
+            run_id = self.manifest.start_run(
+                {**self.run_config, **self.roots_config(roots)}, kind="update"
+            )
             _LOG.info(
                 "index_update_started", extra={"run_id": run_id, **self.log_context}
             )
-            return self._execute(run_id, started, retry_failed, on_plan)
+            return self._execute(
+                run_id, started, lambda: self._plan(retry_failed, roots), on_plan
+            )
 
-    def _check_preconditions(self) -> None:
+    def forget_plan(self, name: str) -> tuple[ManifestSourceRecord, ...]:
+        """The committed sources of a root, which ``forget_root`` removes.
+
+        Refuses the legacy root, whose sources have no prefix, and a name
+        that is neither configured nor found in the index.
+        """
+        roots = self._catalog()
+        records = self.manifest.committed_sources()
+        if name == roots.legacy_name:
+            raise ValidationError(
+                f"root {name!r} is the legacy root: its sources have no prefix, so "
+                "they cannot be told apart from the sources of another unprefixed "
+                "root and are not removed this way. Remove the files and run "
+                "`docgrep update`, or rebuild the index",
+                details={"field": "name", "name": name, "reason": "legacy_root"},
+            )
+        known = known_root_names(roots, (r.source.source_id for r in records))
+        if name not in known:
+            raise ValidationError(
+                f"unknown root {name!r}; known roots: {', '.join(known) or 'none'}",
+                details={"field": "name", "name": name, "known": list(known)},
+            )
+        return tuple(r for r in records if roots.root_of(r.source.source_id) == name)
+
+    def forget_root(
+        self, name: str, *, on_plan: Callable[[UpdatePlan], None] | None = None
+    ) -> UpdateSummary:
+        """Remove every source of a prefixed root from the index, with the
+        removal path of an update; the files are not touched."""
+        started = self.clock()
+        with self.lock.hold("update"):
+            # Removing writes no vectors, so the vector settings may differ.
+            self._check_preconditions(drift=False)
+            removed = self.forget_plan(name)
+            roots = self._catalog()
+            self._close_dead_update()
+            run_id = self.manifest.start_run(
+                {
+                    **self.run_config,
+                    **self.roots_config(roots, roots.prefixed_names - {name}),
+                },
+                kind="update",
+            )
+            _LOG.info(
+                "index_forget_root_started",
+                extra={"run_id": run_id, "sources": len(removed)},
+            )
+
+            def plan() -> tuple[list[_Change], UpdatePlan]:
+                changes = [_Change("removed", r.source, r) for r in removed]
+                return changes, UpdatePlan(removed=len(changes))
+
+            return self._execute(run_id, started, plan, on_plan)
+
+    def _catalog(self) -> CorpusRoots:
+        """The roots known to this process and to the index; none is read."""
+        roots = self.known_roots()
+        return CorpusRoots() if roots is None else roots
+
+    def passages_of(self, records: Sequence[ManifestSourceRecord]) -> int:
+        """How many passages the published index holds for these sources."""
+        return sum(
+            self.index.count_source_passages(record.source.source_id)
+            for record in records
+            if record.status == "indexed"
+        )
+
+    def _check_preconditions(self, *, drift: bool = True) -> None:
         build = latest_build_run(self.manifest)
         if build is not None:
             # The lock is held here, so a build stored as running is dead.
@@ -247,7 +330,7 @@ class UpdateIndex(SourceIndexing):
             raise IndexIncomplete(
                 "No completed index exists to update; build one with `docgrep index`"
             )
-        drifted = config_drift(metadata, self.run_config)
+        drifted = config_drift(metadata, self.run_config) if drift else ()
         if drifted:
             raise ConfigDrift(
                 "The configuration differs from the index in settings that decide "
@@ -267,8 +350,19 @@ class UpdateIndex(SourceIndexing):
                 self.manifest.finish_run(latest.run_id, "aborted", dict(latest.totals))
                 _LOG.info("update_run_closed", extra={"run_id": latest.run_id})
 
-    def _plan(self, retry_failed: bool) -> tuple[list[_Change], UpdatePlan]:
-        recorded = {r.source.path: r for r in self.manifest.committed_sources()}
+    def _plan(
+        self, retry_failed: bool, roots: CorpusRoots | None = None
+    ) -> tuple[list[_Change], UpdatePlan]:
+        recorded: dict[str, ManifestSourceRecord] = {}
+        outside: dict[str, int] = {}
+        for entry in self.manifest.committed_sources():
+            # Only the roots of the run are compared with the disk; the
+            # sources of any other root stay as they are.
+            name = None if roots is None else roots.root_of(entry.source.path)
+            if name is None or roots is None or roots.get(name) is not None:
+                recorded[entry.source.path] = entry
+            else:
+                outside[name] = outside.get(name, 0) + 1
         found: dict[ChangeKind, list[_Change]] = {kind: [] for kind in _ORDER}
         reasons: dict[ModifiedReason, int] = {
             "content_changed": 0,
@@ -345,6 +439,7 @@ class UpdateIndex(SourceIndexing):
             retried=len(found["retried"]),
             refreshed=refreshed,
             **reasons,
+            outside_run=tuple(sorted(outside.items())),
         )
         return changes, plan
 
@@ -384,7 +479,7 @@ class UpdateIndex(SourceIndexing):
         self,
         run_id: str,
         started: float,
-        retry_failed: bool,
+        planner: Callable[[], tuple[list[_Change], UpdatePlan]],
         on_plan: Callable[[UpdatePlan], None] | None,
     ) -> UpdateSummary:
         counts: dict[str, int] = dict.fromkeys(_ORDER, 0)
@@ -395,7 +490,7 @@ class UpdateIndex(SourceIndexing):
         plan = UpdatePlan()
         cancelled = False
         try:
-            changes, plan = self._plan(retry_failed)
+            changes, plan = planner()
             self.manifest.set_total_sources(run_id, len(changes))
             _LOG.info(
                 "index_update_plan",

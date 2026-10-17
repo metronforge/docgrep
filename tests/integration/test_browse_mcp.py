@@ -95,6 +95,7 @@ def test_the_tool_is_read_only_and_describes_its_purpose(tmp_path: Path) -> None
         "file_types",
         "path_prefixes",
         "path_globs",
+        "roots",
         "has_metadata",
         "page",
         "page_size",

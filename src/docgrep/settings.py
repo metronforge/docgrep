@@ -3,10 +3,11 @@
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from docgrep.domain.ocr import parse_languages
+from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.sources import MAX_PAGE_SIZE
 
 # The MCP tools return this many passages by default, and at most
@@ -27,6 +28,8 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="DOCGREP_")
 
+    # Deprecated: the corpus roots live in <data_dir>/roots.json (ADR-0023).
+    # Without that file a corpus_root that is set is one legacy root.
     corpus_root: Path = Path(".")
     data_dir: Path = Path(".docgrep")
     include_globs: tuple[str, ...] = ("**/*",)
@@ -85,6 +88,21 @@ class Settings(BaseSettings):
     context_max_passages: int = Field(default=20, gt=0)
     context_window_tokens: int = Field(default=500, ge=0)
     context_max_window_tokens: int = Field(default=5000, gt=0)
+
+    # The roots this process uses, once chosen (the roots file, the
+    # deprecated corpus_root or --root parameters); never read from the
+    # environment.
+    _corpus_roots: CorpusRoots | None = PrivateAttr(default=None)
+
+    @property
+    def chosen_corpus_roots(self) -> CorpusRoots | None:
+        return self._corpus_roots
+
+    def with_corpus_roots(self, roots: CorpusRoots) -> Self:
+        """A copy of these settings that uses the given roots."""
+        chosen = self.model_copy()
+        chosen._corpus_roots = roots
+        return chosen
 
     @field_validator("log_level", mode="before")
     @classmethod

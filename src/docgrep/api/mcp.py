@@ -49,9 +49,11 @@ from docgrep.api.http import (
     browse_sources,
     expand_passage_context,
     format_filters,
+    root_status_lines,
     run_search,
     validation_problems,
 )
+from docgrep.api.roots import corpus_roots
 from docgrep.domain.errors import DocgrepError, IndexIncomplete, ValidationError
 from docgrep.domain.sources import DEFAULT_PAGE_SIZE, HasMetadata, SortKey
 from docgrep.settings import MCP_DEFAULT_TOP_N, Settings
@@ -163,6 +165,13 @@ PathGlobsArg = Annotated[
         "** spans folders, and a pattern without / matches file names."
     ),
 ]
+RootsArg = Annotated[
+    list[str] | None,
+    Field(
+        description="Names of the library roots (folders) to keep, as "
+        "get_index_status lists them."
+    ),
+]
 
 
 class ToolErrorBody(BaseModel):
@@ -190,6 +199,9 @@ class IndexStatusBody(BaseModel):
     drift: list[dict[str, Any]]
     warnings: list[dict[str, Any]]
     sources: dict[str, Any] | None = None
+    # The corpus roots by name with their flags and source counts; never a
+    # path.
+    roots: list[dict[str, Any]] | None = None
 
 
 # The declared output schemas accept a success body or an error body: the SDK
@@ -308,6 +320,7 @@ def render_status(report: Mapping[str, Any]) -> str:
             lines.append(
                 f"  failed: {failed['path']}: {failed['category']}: {failed['reason']}"
             )
+    lines.extend(root_status_lines(report.get("roots")))
     for warning in report["warnings"]:
         lines.append(f"Warning ({warning['code']}): {warning['message']}")
     return "\n".join(lines) + "\n"
@@ -486,7 +499,13 @@ def create_mcp_server(
     search, never at startup.
     """
     open_status = status or (lambda: create_status(settings))
-    paths = (settings.corpus_root.resolve(), settings.data_dir.resolve())
+    # Absolute paths never reach an MCP client: neither a root's nor the
+    # data directory's.
+    paths = (
+        *(root.path for root in corpus_roots(settings)),
+        settings.corpus_root.resolve(),
+        settings.data_dir.resolve(),
+    )
     cap = effective_max_top_n(settings)
     default_top_n = min(MCP_DEFAULT_TOP_N, cap)
     names = [*_LOCAL_HOSTS, settings.host, *settings.allowed_hosts]
@@ -579,6 +598,7 @@ def create_mcp_server(
         file_types: FileTypesArg = None,
         path_prefixes: PathPrefixesArg = None,
         path_globs: PathGlobsArg = None,
+        roots: RootsArg = None,
     ) -> Annotated[CallToolResult, FindPassagesOutput]:
         arguments = {
             "query": query,
@@ -591,6 +611,7 @@ def create_mcp_server(
             "file_types": file_types,
             "path_prefixes": path_prefixes,
             "path_globs": path_globs,
+            "roots": roots,
         }
         return await guarded(lambda: search(arguments))
 
@@ -638,6 +659,7 @@ def create_mcp_server(
         file_types: FileTypesArg = None,
         path_prefixes: PathPrefixesArg = None,
         path_globs: PathGlobsArg = None,
+        roots: RootsArg = None,
         has_metadata: Annotated[
             HasMetadata,
             Field(description="Keep sources with a year, an author, both, or neither."),
@@ -674,6 +696,7 @@ def create_mcp_server(
             "file_types": file_types,
             "path_prefixes": path_prefixes,
             "path_globs": path_globs,
+            "roots": roots,
             "has_metadata": has_metadata,
             "page": page,
             "page_size": page_size,

@@ -2,9 +2,11 @@
 
 from pathlib import Path
 
+from docgrep.adapters.corpus import as_roots
 from docgrep.adapters.parsers._common import read_text
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import FileType, ParsedDocument, ParsedSection, Source
+from docgrep.domain.roots import CorpusRoots
 
 
 class TextParser:
@@ -14,12 +16,12 @@ class TextParser:
     # extract the sources of this type again.
     version = "1"
 
-    def __init__(self, corpus_root: Path) -> None:
-        self.corpus_root = corpus_root
+    def __init__(self, corpus_root: CorpusRoots | Path) -> None:
+        self.roots = as_roots(corpus_root)
 
     def parse(self, source: Source) -> ParsedDocument:
         """Read a TXT source and preserve its full decoded text."""
         if source.file_type is not FileType.TXT:
             raise ParseError("source is not TXT", details={"path": source.path})
-        text = read_text(self.corpus_root, source)
+        text = read_text(self.roots, source)
         return ParsedDocument(source=source, sections=(ParsedSection(text=text),))

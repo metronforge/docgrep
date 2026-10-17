@@ -83,6 +83,7 @@ def test_tools_are_listed_read_only_with_their_input_schemas(tmp_path: Path) -> 
         "file_types",
         "path_prefixes",
         "path_globs",
+        "roots",
     }
     assert find["properties"]["top_n"]["default"] == MCP_DEFAULT_TOP_N
     assert find["properties"]["top_n"]["maximum"] == MCP_MAX_TOP_N

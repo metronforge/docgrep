@@ -139,7 +139,8 @@ def test_unexpected_os_errors_are_reported_without_a_traceback(
     assert main(["index"], container_factory=factory) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "io_error: [Errno 28] No space left on device\n"
+    # The deprecated DOCGREP_CORPUS_ROOT adds one warning line (ADR-0023).
+    assert captured.err.startswith("io_error: [Errno 28] No space left on device\n")
 
 
 def test_domain_error_reason_is_printed(
@@ -154,7 +155,8 @@ def test_domain_error_reason_is_printed(
         )
 
     assert main(["search", "x"], container_factory=factory) == 1
-    assert capsys.readouterr().err == (
+    # The deprecated DOCGREP_CORPUS_ROOT adds one warning line (ADR-0023).
+    assert capsys.readouterr().err.startswith(
         "store_unavailable: Cannot open Qdrant storage (reason: already accessed)\n"
     )
 

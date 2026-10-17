@@ -233,7 +233,8 @@ def test_a_runtime_failure_exits_1(
 
     out, err = capsys.readouterr()
     assert status == 1 and out == ""
-    assert err == "store_unavailable: Qdrant operation failed (reason: down)\n"
+    # The deprecated DOCGREP_CORPUS_ROOT adds one warning line (ADR-0023).
+    assert err.startswith("store_unavailable: Qdrant operation failed (reason: down)\n")
 
 
 def test_a_degraded_count_is_shown_as_a_question_mark(

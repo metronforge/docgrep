@@ -7,10 +7,12 @@ from pathlib import Path
 import yaml
 from markdown_it import MarkdownIt
 
+from docgrep.adapters.corpus import as_roots
 from docgrep.adapters.parsers._common import read_text
 from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import FileType, ParsedDocument, ParsedSection, Source
+from docgrep.domain.roots import CorpusRoots
 
 _WIKILINK = re.compile(r"\[\[([^\[\]\n]+)\]\]")
 
@@ -97,14 +99,14 @@ class MarkdownParser:
     # extract the sources of this type again.
     version = "1"
 
-    def __init__(self, corpus_root: Path) -> None:
-        self.corpus_root = corpus_root
+    def __init__(self, corpus_root: CorpusRoots | Path) -> None:
+        self.roots = as_roots(corpus_root)
 
     def parse(self, source: Source) -> ParsedDocument:
         """Extract headings, known frontmatter fields, and link targets."""
         if source.file_type is not FileType.MARKDOWN:
             raise ParseError("source is not Markdown", details={"path": source.path})
-        raw = read_text(self.corpus_root, source)
+        raw = read_text(self.roots, source)
         frontmatter, body = _frontmatter(raw, source)
         enriched = replace(
             source,

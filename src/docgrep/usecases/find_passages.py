@@ -29,10 +29,12 @@ from docgrep.domain.protocols import (
     OcrOutputOwners,
     PassageRetriever,
     Reranker,
+    RootCatalog,
     SparseEncoder,
     ranked_passage_key,
 )
-from docgrep.domain.sources import SourceFilter, matches
+from docgrep.domain.roots import CorpusRoots, known_root_names
+from docgrep.domain.sources import SourceFilter, check_roots, matches
 
 _LOG = logging.getLogger(__name__)
 
@@ -106,7 +108,9 @@ def _committed(manifest: CommittedSourceReader) -> tuple[ManifestSourceRecord, .
         ) from error
 
 
-def _excluded_for_missing_metadata(source_filter: SourceFilter, source: Source) -> bool:
+def _excluded_for_missing_metadata(
+    source_filter: SourceFilter, source: Source, root: str | None = None
+) -> bool:
     """Whether a source fails the filter only because a filtered author or
     year is null: it passes once the null fields are no longer filtered."""
     relaxed = source_filter
@@ -116,7 +120,7 @@ def _excluded_for_missing_metadata(source_filter: SourceFilter, source: Source) 
         source_filter.year_from is not None or source_filter.year_to is not None
     ) and source.year is None:
         relaxed = replace(relaxed, year_from=None, year_to=None)
-    return relaxed is not source_filter and matches(relaxed, source)
+    return relaxed is not source_filter and matches(relaxed, source, root)
 
 
 def _normalized_score(value: float) -> float:
@@ -159,6 +163,7 @@ class FindPassages:
         manifest: CommittedSourceReader | None = None,
         ocr: OcrOutputOwners | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        roots: RootCatalog | None = None,
     ) -> None:
         if top_k <= 0 or not 0 < default_top_n <= top_n_max:
             raise ValueError("result limits must be positive")
@@ -173,6 +178,7 @@ class FindPassages:
         self.top_n_max = top_n_max
         self.max_query_len = max_query_len
         self.collapse_duplicates = collapse_duplicates
+        self.roots = roots
         self.manifest = manifest
         self.ocr = ocr
         self.now = now
@@ -248,8 +254,9 @@ class FindPassages:
             source_filter.applied() if source_filter is not None else {}
         )
         sanitizer = RequestSanitizer(self.now().year, self.ocr, self.manifest)
+        roots = CorpusRoots() if self.roots is None else self.roots.roots()
         scope = (
-            self._scope(source_filter, sanitizer)
+            self._scope(source_filter, sanitizer, roots)
             if source_filter is not None and applied_filters
             else None
         )
@@ -275,6 +282,13 @@ class FindPassages:
                 collapsed_duplicates if collapsing else None,
                 applied_filters,
                 excluded,
+                {
+                    item.source.source_id: roots.root_of(item.source.source_id)
+                    for passage in passages
+                    for item in (passage, *passage.duplicates)
+                }
+                if self.roots is not None and roots.named
+                else {},
             )
             # Counts and timings only: neither the query nor passage text is logged.
             _LOG.info(
@@ -395,7 +409,10 @@ class FindPassages:
         )
 
     def _scope(
-        self, source_filter: SourceFilter, sanitizer: RequestSanitizer
+        self,
+        source_filter: SourceFilter,
+        sanitizer: RequestSanitizer,
+        roots: CorpusRoots,
     ) -> _Scope:
         """Resolve the filter against the sanitized committed indexed sources.
 
@@ -406,20 +423,29 @@ class FindPassages:
             raise IndexIncomplete("Filtered search needs the index manifest")
         records = _committed(self.manifest)
         sanitizer.records = records
+        if source_filter.roots:
+            check_roots(
+                source_filter,
+                known_root_names(roots, (r.source.source_id for r in records)),
+            )
         indexed = [
             sanitizer.clean(record.source)
             for record in records
             if record.status == "indexed"
         ]
         allowed = frozenset(
-            source.source_id for source in indexed if matches(source_filter, source)
+            source.source_id
+            for source in indexed
+            if matches(source_filter, source, roots.root_of(source.source_id))
         )
         excluded: int | None = None
         if source_filter.authors or (
             source_filter.year_from is not None or source_filter.year_to is not None
         ):
             excluded = sum(
-                _excluded_for_missing_metadata(source_filter, source)
+                _excluded_for_missing_metadata(
+                    source_filter, source, roots.root_of(source.source_id)
+                )
                 for source in indexed
             )
         everything = len(allowed) == len({source.source_id for source in indexed})

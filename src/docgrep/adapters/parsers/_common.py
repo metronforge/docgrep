@@ -5,14 +5,28 @@ from pathlib import Path
 
 import chardet
 
+from docgrep.adapters.corpus import as_roots, source_file
 from docgrep.adapters.tool_output import scrub_tool_output
-from docgrep.domain.errors import ParseError
+from docgrep.domain.errors import ParseError, ValidationError
 from docgrep.domain.models import Source
+from docgrep.domain.roots import CorpusRoots
 
 
-def read_text(corpus_root: Path, source: Source) -> str:
+def source_location(roots: CorpusRoots, source: Source) -> tuple[Path, Path]:
+    """The file of a source and the folder of its root; ``ParseError`` when
+    the root is not available to this process."""
+    try:
+        return source_file(roots, source.path)
+    except ValidationError as error:
+        raise ParseError(
+            "source cannot be read: its root is not available",
+            details={**error.details, "path": source.path},
+        ) from error
+
+
+def read_text(corpus_root: CorpusRoots | Path, source: Source) -> str:
     """Read UTF-8 first, then a confidently detected legacy encoding."""
-    path = corpus_root / source.path
+    path, corpus_root = source_location(as_roots(corpus_root), source)
     try:
         data = path.read_bytes()
     except OSError as error:

@@ -54,7 +54,8 @@ def test_default_relative_layout_does_not_index_its_own_data(
     _populate(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DOCGREP_BACKEND", "fake")
-    monkeypatch.delenv("DOCGREP_CORPUS_ROOT", raising=False)
+    # Without a roots file the corpus root must be set (ADR-0023).
+    monkeypatch.setenv("DOCGREP_CORPUS_ROOT", ".")
     monkeypatch.delenv("DOCGREP_DATA_DIR", raising=False)
     services = create_container(Settings())
 

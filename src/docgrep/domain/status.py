@@ -113,6 +113,23 @@ class SourcesView:
 
 
 @dataclass(frozen=True, slots=True)
+class RootStatusView:
+    """A corpus root and its committed sources by state (ADR-0023).
+
+    ``configured`` is false for a root found only in the index; such a root
+    has no folder here, so ``readable`` is None.
+    """
+
+    name: str
+    legacy: bool
+    configured: bool
+    readable: bool | None
+    indexed: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class StatusReport:
     index_state: IndexState
     latest_run: RunView | None
@@ -122,6 +139,8 @@ class StatusReport:
     drift: tuple[DriftView, ...]
     warnings: tuple[StatusWarning, ...]
     sources: SourcesView | None = None
+    # None when the roots are not known to the report (ADR-0023).
+    roots: tuple[RootStatusView, ...] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """The JSON form; its key names are stable and documented in the README."""
@@ -180,7 +199,23 @@ class StatusReport:
             ],
             "warnings": [{"code": w.code, "message": w.message} for w in self.warnings],
             "sources": None if self.sources is None else _sources(self.sources),
+            **({} if self.roots is None else {"roots": _roots(self.roots)}),
         }
+
+
+def _roots(roots: tuple[RootStatusView, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": root.name,
+            "legacy": root.legacy,
+            "configured": root.configured,
+            "readable": root.readable,
+            "indexed": root.indexed,
+            "skipped": root.skipped,
+            "failed": root.failed,
+        }
+        for root in roots
+    ]
 
 
 def _sources(view: SourcesView) -> dict[str, Any]:

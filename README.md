@@ -48,8 +48,7 @@ Keep the settings in one file, for example `~/docgrep-trial.env`, with these lin
 
 ```sh
 export UV_NO_SYNC=1                                # keep the torch build chosen at install
-export DOCGREP_CORPUS_ROOT="$HOME/library"          # the documents to search
-export DOCGREP_DATA_DIR="$HOME/docgrep-data"       # manifest (and index in local mode)
+export DOCGREP_DATA_DIR="$HOME/docgrep-data"       # roots file, manifest (and index in local mode)
 export DOCGREP_QDRANT_URL=http://localhost:6333    # omit for local mode
 export DOCGREP_BACKEND=real                        # fake: no models, for a dry trial
 export DOCGREP_DEVICE=cuda                         # cpu, cuda or auto
@@ -59,12 +58,13 @@ export DOCGREP_DEVICE=cuda                         # cpu, cuda or auto
 
 ```sh
 source ~/docgrep-trial.env
+uv run docgrep roots add library "$HOME/library"   # the documents to search (once)
 uv run docgrep index                               # first full build
 uv run docgrep status                              # should report Index: ready
 uv run docgrep search "a sentence you remember from a book"
 ```
 
-`docgrep index` builds the whole index from scratch; once it exists, use `docgrep update` to apply changes (see [Keeping the index current](#keeping-the-index-current)).
+`docgrep index` builds the whole index from scratch; once it exists, use `docgrep update` to apply changes (see [Keeping the index current](#keeping-the-index-current)). A corpus can have several folders; see [Corpus roots](#corpus-roots).
 
 ### Searching from the command line
 
@@ -188,20 +188,77 @@ uv run docgrep ocr --all-discovered          # run it, then: uv run docgrep upda
 
 ## Configure and index
 
-Set a corpus directory and a separate data directory for the SQLite manifest and, in local mode, the Qdrant index (see [Running with a Qdrant server](#running-with-a-qdrant-server) for larger corpora):
+Set a data directory for the roots file, the SQLite manifest and, in local mode, the Qdrant index (see [Running with a Qdrant server](#running-with-a-qdrant-server) for larger corpora), save one or more corpus folders as roots, and build:
 
 ```sh
-export DOCGREP_CORPUS_ROOT=/absolute/path/to/documents
 export DOCGREP_DATA_DIR=/absolute/path/to/docgrep-data
 export DOCGREP_BACKEND=fake
+uv run docgrep roots add documents /absolute/path/to/documents
 uv run docgrep index
 ```
 
-Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOCGREP_CHUNK_SIZE` and `DOCGREP_CHUNK_OVERLAP`, use the same `DOCGREP_` prefix. The data directory may be placed inside the corpus: it is skipped during enumeration, as are `.git` directories. The corpus root itself must not be inside the data directory; that configuration is rejected with a validation error.
+Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOCGREP_CHUNK_SIZE` and `DOCGREP_CHUNK_OVERLAP`, use the same `DOCGREP_` prefix. The data directory may be placed inside a root: it is skipped during enumeration, as are `.git` directories. A root must not be inside the data directory; that configuration is rejected with a validation error.
+
+## Corpus roots
+
+The corpus is one or more folders, each saved as a named root. The roots are stored in `roots.json` in the data directory and managed with `docgrep roots`; there is no environment variable for the list. The design is recorded in [ADR-0023](docs/adr/0023-corpus-roots-and-stored-identity.md).
+
+```sh
+uv run docgrep roots add books /srv/library          # save a root
+uv run docgrep roots add notes ~/notes               # and another one
+uv run docgrep roots list                            # name, path, flags, indexed sources
+uv run docgrep roots list --json
+uv run docgrep roots remove notes                    # only edits roots.json
+```
+
+The file has the shape `{"version": 1, "roots": [{"name": "books", "path": "/srv/library", "legacy": true}, {"name": "notes", "path": "/home/me/notes"}]}`; paths are stored absolute and resolved, and the file is written atomically (a temporary file, then a rename), so a failed write leaves the old list intact. `docgrep roots list --json` prints `origin` (`file`, `bootstrap` for the deprecated variable below, or `none`), `roots` (each with `name`, `path`, `legacy`, `readable` and `indexed_sources`) and `warnings`.
+
+**Names and stored paths.** Every source is stored, and identified by its `source_id`, as its path relative to its root behind the root's prefix: `<name>/` for an ordinary root (`notes/2024/ideas.md`), nothing for the legacy root. The legacy root is the folder of an index built before roots had names: its sources keep the stored paths, source ids and passage ids they always had, so an existing index needs no rebuild. At most one root is legacy (`docgrep roots add NAME PATH --legacy`); a new installation needs none. Two roots can therefore hold the same relative path: `a.txt` of the legacy root and `notes/a.txt` are two sources. The root of a source is derived from its stored path, and search, browse and status show it as `root`.
+
+The rules, checked by `roots add` and again whenever the file is read:
+
+- A name starts with a letter or a digit and continues with letters, digits, `.`, `_` and `-`; names are unique without regard to case.
+- The path must exist and be a directory when the root is added.
+- No root may be inside another root, or contain one: a sub-folder of an existing root is a path prefix filter (`--path-prefix`), not a new root.
+- Only one root can be the legacy root.
+- An ordinary root may not be named like a top-level entry of the legacy root (a root `notes` next to a legacy folder `notes/`), because its source ids would collide with that entry's.
+
+**One-off roots.** `index`, `update`, `dry-run`, `discover-scans` and `ocr` accept `--root NAME=PATH`, repeatable (a path alone is a root named after its folder). With any `--root`, only the given roots are used for that run and the saved list is ignored for it; a name that is saved must point to the same folder (or it is an error) and keeps its legacy flag. The run writes nothing to `roots.json`. What it indexed stays in the index, but later updates do not visit an unsaved root. So after a successful `index` or `update` with roots that are not saved, docgrep asks on a terminal:
+
+```text
+Add root notes (/home/me/notes) to the saved list so future updates include it? [y/N]
+```
+
+Without a terminal it prints the `docgrep roots add NAME PATH` command to run instead. `--save-roots` saves without asking and `--no-save-roots` neither asks nor prints the command. A saved one-off root is never the legacy root. The JSON reports of `dry-run`, `discover-scans` and `ocr` run with `--root` carry `unsaved_roots`, a list of `name` and `path`.
+
+Roots cannot be added or chosen through MCP or the HTTP API, so an AI client never decides which folders are indexed.
+
+**Missing and removed roots.** A root that is missing, not a directory or not readable makes `index`, `update` and `ocr` fail before any work, naming the root; it is never taken for an empty folder. Search, browse, context and status read only the index and keep working. `update` removes a source only when its root is part of the run, readable, and the file is gone. The sources of a root that is not part of the run (removed from the list, or not passed with `--root`) are kept: the update plan says how many it kept per root, and `docgrep status` lists them under their root with `configured: false`. A full `docgrep index` replaces the whole index with the sources of its roots, so it refuses while the index holds sources of another root. To remove such sources, use:
+
+```sh
+uv run docgrep forget-root notes          # shows how many sources and passages it would remove
+uv run docgrep forget-root notes --yes    # removes them from the index; the files stay
+```
+
+`forget-root` removes the sources through the same path as an update that finds their files gone. It refuses the legacy root, whose sources have no prefix to tell them apart. Without `--yes` it changes nothing and exits with 1.
+
+**Upgrading from `DOCGREP_CORPUS_ROOT`.** The old variable is deprecated. Without a roots file it still works as a single legacy root named after its folder (`default` when the folder name is not a valid name), and every command prints one line saying so, with the exact command that saves it, for example `warning: DOCGREP_CORPUS_ROOT is deprecated; save it as a root with: docgrep roots add library /srv/library --legacy`. Nothing is written for you. When a roots file exists, the variable is ignored, with a warning. With neither, commands that index fail with `no corpus roots configured`, while search, browse, context and status still work. To move an existing installation to several roots, without a rebuild:
+
+```sh
+uv run docgrep roots add books /srv/library --legacy   # the folder DOCGREP_CORPUS_ROOT named
+uv run docgrep roots add notes ~/notes                 # a new root
+unset DOCGREP_CORPUS_ROOT                              # and remove it from your settings file
+uv run docgrep dry-run                                 # totals and per-root counts
+uv run docgrep update                                  # indexes the new root only
+```
+
+If a roots file has no legacy root but the index holds unprefixed sources, they are reported as the unconfigured root `_legacy` and nothing is removed.
+
+**Restricting to roots.** Search and browse take a `roots` filter, a list of root names combined with OR (`--in-root NAME` on the command line, repeatable, because `--root` names folders to index). An unknown name is a `validation_error` that lists the known roots, configured or found in the index. The existing path filters see stored paths, so `--path-prefix notes/` selects the same sources as `--in-root notes`.
 
 ## Include and exclude patterns
 
-`DOCGREP_INCLUDE_GLOBS` and `DOCGREP_EXCLUDE_GLOBS` take JSON arrays of patterns that are matched against paths relative to the corpus root, using `/` as the separator. An excluded path is never indexed, even if it is included.
+`DOCGREP_INCLUDE_GLOBS` and `DOCGREP_EXCLUDE_GLOBS` take JSON arrays of patterns that are matched against paths relative to each corpus root (without the root's prefix), using `/` as the separator. An excluded path is never indexed, even if it is included.
 
 - `*`, `?` and `[...]` match within one path segment and never cross `/`.
 - `**` as a whole segment matches zero or more segments; as the last segment it matches everything beneath a directory.
@@ -309,11 +366,12 @@ The JSON output has these keys (`schema_version` is 1; sections that do not appl
 - `collection`: when the index can be read. `passage_count`, `embedding_model`, `embedding_dimension`, `embedding_dtype`, `docgrep_version`, `completed_at` and `last_updated_at` (when the latest `docgrep update` completed, `null` before the first).
 - `drift`: a list of `field`, `indexed` and `runtime` for the settings that decide what vectors contain (see the resume rules above) and differ from the index. Only keys the index recorded and that are known without loading a model are compared.
 - `sources`: what the committed sources table says, or `null` when the manifest is missing or cannot be read. `total`; `by_state` with `indexed`, `skipped` and `failed`; `skipped_by_reason` with `requires_ocr` (no text layer), `garbled_text_layer` (a PDF whose text layer is garbled), `unsupported` (no parser for the type) and `other`, plus `delegated_to_ocr` (an original whose text is indexed from its OCR output) when any source has that reason; `skipped_by_extension`, the 10 most common extensions among the skipped sources, a list of `extension` (`(none)` without one) and `sources`; `failed`, the first 20 failed sources by path, each with `path`, `category` (for example `parse_error`, `embedding_error` or `store_error`) and `reason` (the stored error message, shortened to 200 characters); and `parser_changed`, the number of sources that the next `docgrep update` would extract again because their parser declares another version (the same rule as update, missing versions counting as `1`). The plain-text report shows a `Sources:` line, the skipped counts per reason and the failed sources with their paths.
-- `warnings`: a list of `code` and `message`, for example `store_unreachable`, `store_busy`, `manifest_unreadable`, `config_drift`, `resume_available`, `swap_pending_commit`, `update_unfinished` (the latest update was cancelled, aborted or interrupted; run `docgrep update` again), `index_incomplete`, `lock_held_without_run` and `lock_unreadable`.
+- `warnings`: a list of `code` and `message`, for example `store_unreachable`, `store_busy`, `manifest_unreadable`, `config_drift`, `resume_available`, `swap_pending_commit`, `update_unfinished` (the latest update was cancelled, aborted or interrupted; run `docgrep update` again), `index_incomplete`, `lock_held_without_run`, `lock_unreadable`, `root_not_configured` (the index holds sources of roots that are not configured) and `root_unreadable` (a configured root cannot be read).
+- `roots`: the configured [corpus roots](#corpus-roots) in order, then the roots found only in the index, each with `name`, `legacy`, `configured`, `readable` (`null` for a root that is not configured) and the numbers of its committed sources that are `indexed`, `skipped` and `failed`. No path is shown. The plain-text report lists the roots when there is more than one or one needs attention.
 
 ## Dry run
 
-`docgrep dry-run` previews what a build would do with the configured corpus. It reads directory entries only: it takes no index lock, writes no manifest, does not open Qdrant, loads no model and creates no file, and it uses the configured corpus root, include and exclude patterns, so it predicts what `docgrep index` would enumerate.
+`docgrep dry-run` previews what a build would do with the configured corpus. It reads directory entries only: it takes no index lock, writes no manifest, does not open Qdrant, loads no model and creates no file, and it uses the configured corpus roots (or the `--root` roots), include and exclude patterns, so it predicts what `docgrep index` would enumerate.
 
 ```sh
 uv run docgrep dry-run                     # plain-text report
@@ -323,7 +381,7 @@ uv run docgrep dry-run --path-prefix books/ --sample 20 --seed 1
 
 The report gives the total number of files, and for each file type the count and the total, average and largest size. Types that docgrep recognises but has no registered parser for are listed separately as recognised without a parser, files with other extensions as unsupported with the 20 most common extensions, and excluded files with the pattern that excluded them (`not_matched_by_includes` when no include pattern matched).
 
-- `--path-prefix` restricts every figure to paths starting with the given relative prefix.
+- `--path-prefix` restricts every figure to stored paths starting with the given prefix (a prefixed root's paths start with its name and `/`).
 - `--limit` (1 to 500, default 100) and `--offset` page the file list, which is part of the JSON output only.
 - `--sample N` (1 to 50, off by default) parses and chunks N randomly chosen files of the supported types, spread proportionally over the types, with the seed given by `--seed` (default 0), so the same seed picks the same files. Nothing is embedded or written. For each type it reports passages per file and per MB (1 MB is 1,000,000 bytes), parse plus chunk seconds per file and the fraction flagged as needing OCR, and then extrapolates the passage count and parse time of the whole corpus both by file count and by size. These are estimates from a sample, not measurements. For PDFs it also measures the text layer of the sampled files: pages sampled, pages classified as garbled (count and fraction), the files that a build would skip as `requires_ocr` because of a garbled text layer (count, fraction of the parsed sampled files and their paths) and the soft hyphens removed per file on average, per type and for all sampled files together; the corpus-wide number of such files is extrapolated as an estimate like the others. Sampling reads whole files, which is why it is opt-in; with the real backend it loads the tokenizer files of the embedding model, never its weights.
 
@@ -336,13 +394,14 @@ The JSON output has these keys (`schema_version` is 1):
 - `unsupported`: `files`, `size_bytes`, `average_size_bytes`, `largest_size_bytes` and `extensions`, a list of `extension` and `files`.
 - `would_be_indexed` (`files`, `size_bytes`) and `recognised_without_parser` (`files`, `size_bytes`, `types`).
 - `excluded`: `files`, `size_bytes` and `by_pattern`, a list of `pattern` and `files`.
+- `by_root`: one entry per [corpus root](#corpus-roots) of the run, in order, with `root`, `files`, `size_bytes`, `included`, `excluded` and `would_be_indexed`; the plain-text report shows them when there is more than one root.
 - `files`: `offset`, `limit`, `total` and `items`, a list of `path`, `size_bytes`, `extension`, `type` (null when unsupported), `status` (`indexed`, `recognised_without_parser`, `unsupported` or `excluded`) and `excluded_by`.
 - `sample`: null without `--sample`, otherwise `requested`, `seed`, `note` and `types`, a list of `type`, `sampled_files`, `parsed`, `failed`, `requires_ocr_fraction`, `passages_per_file`, `passages_per_mb`, `parse_chunk_seconds_per_file`, `text_quality` and `estimate` (`note`, `corpus_files`, `corpus_size_bytes`, and `by_file_count` and `by_size`, each with `passages` and `parse_chunk_seconds`; `by_file_count` also has `garbled_text_layer_files`, the estimated number of files in the corpus that would be skipped for a garbled text layer). `sample.text_quality` totals the same figures over all sampled types.
 - `text_quality` (measured on the sampled files, never text): `pages_sampled`, `pages_garbled`, `pages_garbled_fraction` (of the pages sampled), `garbled_text_layer_files` (paths of the sampled files that would be skipped as `requires_ocr` for a garbled text layer), `garbled_text_layer_fraction` (of the parsed sampled files), `soft_hyphens_removed_per_file` (average over the parsed sampled files), `pages_by_rule` (on how many sampled pages each rule fired, counted separately from the dropped pages so that the weak signals stay visible: `r1_broken_characters`, `r2_long_tokens` and `r3_low_alnum`) and `flagged_files`, a list of the sampled files on which any rule fired, each with `path`, `pages_dropped` (pages dropped for broken characters), `pages_by_rule` and `dropped_pages` (at most the first 20 dropped page numbers). The plain-text report shows the counts per rule but lists no flagged files; use `--json` for them. Fractions are null when there is nothing to divide by; types other than PDF report zero pages.
 
 ## Scan discovery
 
-`docgrep discover-scans` lists the PDF and DjVu files whose text layer is missing or unusable, so that you can decide which ones need OCR. It is read-only like the dry run: it takes no index lock, opens neither the manifest nor Qdrant, loads no model, writes nothing and can run before any build. It uses the build's corpus root and include and exclude patterns.
+`docgrep discover-scans` lists the PDF and DjVu files whose text layer is missing or unusable, so that you can decide which ones need OCR. It is read-only like the dry run: it takes no index lock, opens neither the manifest nor Qdrant, loads no model, writes nothing and can run before any build. It uses the build's corpus roots (or the `--root` roots) and include and exclude patterns.
 
 ```sh
 uv run docgrep discover-scans                          # plain-text list and counts
@@ -361,8 +420,9 @@ Exit status 0 on success and 2 for usage or configuration errors (an unknown opt
 The JSON report has these keys (`schema_version` is 1):
 
 - `schema_version`, `filters` (`path_glob`, `file_types`) and `thresholds` (`density_lower`, `density_upper`).
-- `files`: the scanned, uncertain and failed files, sorted by file type and path, each with `path` (relative to the corpus root), `file_type` (`pdf` or `djvu`), `size_bytes`, `page_count` (null when unknown), `classification` (`scanned`, `mixed_or_uncertain` or `inspection_failed`), `reason` (`low_text_density`, `garbled_text_layer` or `uncertain_text_density`; for failures `encrypted`, `corrupt_header`, `djvu_invalid`, `djvu_tools_missing`, `djvu_timeout`, `djvu_output_too_large` or `unsamplable`), `hint` (how to install the DjVu tools when they are missing, else null), `ocr_status` (`not_processed`; `processed_via_ocr_pdf` for an original whose text is indexed from its OCR output; `processed` for an OCR output itself; the last two are listed only with `--include-processed`), `large_file` (more than 5000 pages or 1 GiB), `text_density` (null for failures) and `sampled_pages`.
+- `files`: the scanned, uncertain and failed files, sorted by file type and path, each with `path` (the stored path: relative to its root, behind the root's prefix), `file_type` (`pdf` or `djvu`), `size_bytes`, `page_count` (null when unknown), `classification` (`scanned`, `mixed_or_uncertain` or `inspection_failed`), `reason` (`low_text_density`, `garbled_text_layer` or `uncertain_text_density`; for failures `encrypted`, `corrupt_header`, `djvu_invalid`, `djvu_tools_missing`, `djvu_timeout`, `djvu_output_too_large` or `unsamplable`), `hint` (how to install the DjVu tools when they are missing, else null), `ocr_status` (`not_processed`; `processed_via_ocr_pdf` for an original whose text is indexed from its OCR output; `processed` for an OCR output itself; the last two are listed only with `--include-processed`), `large_file` (more than 5000 pages or 1 GiB), `text_density` (null for failures) and `sampled_pages`.
 - `totals` and `by_file_type` (per requested type): `inspected`, `native`, `scanned`, `uncertain` and `inspection_failed`.
+- `by_root`: the same counts for each [corpus root](#corpus-roots) of the run, a list of entries with `root` and the counts; the plain-text report shows them when there is more than one root.
 - `include_already_processed` (whether `--include-processed`, or the HTTP field of the same name, was given) and `already_processed`: the number of originals left out because a live OCR output stands in for them. Without the option, OCR outputs and such originals are neither listed nor counted in `totals`.
 
 ## OCR
@@ -389,7 +449,7 @@ uv run docgrep update                                  # index the outputs
 
 Name the files with exactly one of:
 
-- explicit paths, relative to the corpus root or absolute. Every path must be an existing `.pdf`, `.djvu` or `.djv` file inside the corpus root; a path outside it, or a file of another type, rejects the whole request (exit status 2);
+- explicit paths, as stored (relative to their root behind the root's prefix, as `discover-scans` lists them) or absolute. Every path must be an existing `.pdf`, `.djvu` or `.djv` file inside a corpus root; a path outside them, or a file of another type, rejects the whole request (exit status 2);
 - `--path-glob PATTERN` (the glob rules of the include patterns); matching files of other types are left out and counted as `filtered`;
 - `--all-discovered`: every file scan discovery classifies as `scanned`; add `--include-uncertain` for the `mixed_or_uncertain` ones too.
 
@@ -401,7 +461,7 @@ The plan checks every file, in this order: a file whose content is already regis
 
 1. A DjVu file is converted into a temporary PDF of page images with `ddjvu -format=pdf`.
 2. `ocrmypdf` runs with the languages, `--output-type pdf --rotate-pages --deskew --optimize 1`, `--jobs N` when `DOCGREP_OCR_JOBS` is set, and one of two modes: `--skip-text` (keep pages that have text, recognise the others) for files without text or with too little, and `--force-ocr` (discard every page's text and recognise it again from the page image) for a garbled text layer and for `--override-native`.
-3. The result, written to a hidden `.<name>.docgrep-ocr-<random>.part` file in the same directory, must open with the input's page count; it is then renamed to `<stem>.ocr.pdf` next to the original (`books/scan.pdf` gives `books/scan.ocr.pdf`, `books/book.djvu` gives `books/book.ocr.pdf`). An existing file of that name that is not this original's earlier output is never overwritten.
+3. The result, written to a hidden `.<name>.docgrep-ocr-<random>.part` file in the same directory, must open with the input's page count; it is then renamed to `<stem>.ocr.pdf` next to the original (`books/scan.pdf` gives `books/scan.ocr.pdf`, `books/book.djvu` gives `books/book.ocr.pdf`). An existing file of that name that is not this original's earlier output is never overwritten. The output is always in the original's [corpus root](#corpus-roots), so an original and its output never belong to different roots.
 4. The output is registered in the manifest database together with a delegation: the original is from now on represented by its output. `docgrep update` then indexes the output as an added PDF, records the original as skipped with the reason `delegated_to_ocr` and removes the passages it had.
 
 Failures stay per file: `failed:djvu_conversion`, `failed:ocr_engine_error` (with a short message), `failed:timeout`, `failed:output_invalid`, `failed:output_collision` and `failed:registry_write` (the output is left on disk but not registered, so the next run processes the file again). Before each file at least three times its size must be free in its directory; otherwise, or when the engine reports a full disk, the file is `failed:disk_full` and the rest of the batch is aborted. Files completed before stay valid.
@@ -450,12 +510,12 @@ Results include the exact stored passage text, source path, and a page number or
 
 ### Filtered search
 
-Search can be restricted to the indexed sources that match the same filters as [Browse sources](#browse-sources): `source_ids`, `authors`, `year_from`, `year_to`, `file_types`, `path_prefixes` and `path_globs` (on the command line `--source-id`, `--author`, `--year-from`, `--year-to`, `--type`, `--path-prefix`, `--glob`, each list option repeatable). Their semantics are those of the browse section:
+Search can be restricted to the indexed sources that match the same filters as [Browse sources](#browse-sources): `source_ids`, `authors`, `year_from`, `year_to`, `file_types`, `path_prefixes`, `path_globs` and `roots` (on the command line `--source-id`, `--author`, `--year-from`, `--year-to`, `--type`, `--path-prefix`, `--glob`, `--in-root`, each list option repeatable). Their semantics are those of the browse section:
 
 - Different filters combine with AND; several values of one filter combine with OR.
 - A source without the filtered metadata (no author, no year) never matches that filter.
 - Authors match as case-insensitive substrings; file types and source ids as listed there.
-- Paths are matched relative to the corpus root with `/` separators, as a case-sensitive prefix or a glob.
+- Paths are matched as stored, with `/` separators, as a case-sensitive prefix or a glob; `roots` names [corpus roots](#corpus-roots).
 
 ```sh
 uv run docgrep search "comet orbit" --author arnold --year-to 1980 --type pdf
@@ -472,6 +532,7 @@ The MCP tool `find_passages` takes the same fields next to `query`, for example 
 The filter is applied before ranking: docgrep turns the matching sources from the manifest into a list of `source_id` values, and the vector store searches only their passages, so the `top_k` first-stage candidates all come from the filtered sources. Reranking, duplicate collapsing and `top_k` work as without filters, and `total_hits` still counts the first-stage candidates (at most `top_k`), now taken from the filtered sources. The response adds:
 
 - `applied_filters`: the canonical filter, `{}` for an unfiltered search (whose body is otherwise unchanged).
+- `root` in each result's `source` and in each entry of `duplicates`: the name of the source's [corpus root](#corpus-roots).
 - `sources_excluded_for_missing_metadata`: only when `authors`, `year_from` or `year_to` is set; the number of sources, not passages, that pass every other filter but are left out only because the filtered author or year is missing.
 
 Filters that match no indexed source give an empty success with `total_hits: 0` and a `hint`, without loading a model. Invalid values (an unknown file type, `year_from` after `year_to`, a blank author) and unknown fields are `validation_error`s. The plain-text output starts with a `Filters:` line when filters are set. The design is recorded in [ADR-0020](docs/adr/0020-shared-source-filter-and-browse.md).
@@ -512,11 +573,12 @@ curl -X POST http://127.0.0.1:8000/sources/browse \
 
 The MCP tool `browse_sources` takes the same fields as the JSON body, for example `{"path_prefixes": ["Books/Math/"], "sort_by": "passage_count", "sort_order": "desc"}`.
 
-Filters (`source_ids`, `authors`, `year_from`, `year_to`, `file_types`, `path_prefixes`, `path_globs`; on the command line `--source-id`, `--author`, `--year-from`, `--year-to`, `--type`, `--path-prefix`, `--glob`, each list option repeatable):
+Filters (`source_ids`, `authors`, `year_from`, `year_to`, `file_types`, `path_prefixes`, `path_globs`, `roots`; on the command line `--source-id`, `--author`, `--year-from`, `--year-to`, `--type`, `--path-prefix`, `--glob`, `--in-root`, each list option repeatable):
 
 - Different filters combine with AND; several values of one filter combine with OR. A source without the filtered metadata (no author, no year) never matches that filter.
 - Authors match as case-insensitive substrings; file types are `pdf`, `markdown`, `txt`, `epub`, `docx` and `djvu`, in any case; source ids match exactly.
-- Paths are matched as stored and shown in results: relative to the corpus root with `/` separators. A prefix is a case-sensitive string prefix (`Books/Math/`); a glob follows the [include and exclude pattern](#include-and-exclude-patterns) rules.
+- Paths are matched as stored and shown in results: relative to their root behind the root's prefix (see [Corpus roots](#corpus-roots)), with `/` separators. A prefix is a case-sensitive string prefix (`Books/Math/`); a glob follows the [include and exclude pattern](#include-and-exclude-patterns) rules.
+- `roots` keeps the sources of the named roots; an unknown name is a `validation_error` listing the known roots.
 - `has_metadata` keeps sources with a year (`with_year`), an author (`with_author`), both (`with_both`) or neither (`without_any`); the default `any` keeps all.
 
 Titles, authors and years are shown and matched after junk values are dropped: impossible years (such as `101`, or `1601`, the Windows epoch), placeholder authors and titles (`Unknown`, `python-docx`, `book title`), bare numbers and titles that only repeat the file name. A dropped value is shown as null; nothing is guessed. An OCR output takes a missing or dropped value from its original. The stored values do not change. To judge the rules on your library, each entry of the JSON body carries a `metadata_dropped` object when something was dropped or inherited, with the raw value and a reason, and `--dropped-metadata` (`"metadata_dropped": true`) lists only those sources:
@@ -527,7 +589,7 @@ uv run docgrep sources --dropped-metadata --json
 
 The rules are recorded in [ADR-0021](docs/adr/0021-sanitize-source-metadata-on-read.md).
 
-The response holds the page (`sources`), `total_hits`, `page`, `page_size`, `aggregates` (`total_sources` and `by_file_type`, over every match) and the canonical `applied_filters`. Pages start at 1 and hold 1 to 500 sources (default 50); `sort_by` is `path` (default), `indexed_at`, `passage_count`, `year` or `title`, with ties broken by source id and missing values last. Passage counts are counted in the index at query time for the page only; sorting by `passage_count` counts every match and is the slow case. A count that fails gives that source `passage_count: null` and `degraded: true`. Unknown fields are rejected. The design is recorded in [ADR-0020](docs/adr/0020-shared-source-filter-and-browse.md).
+Each entry carries `root`, the name of its [corpus root](#corpus-roots). The response holds the page (`sources`), `total_hits`, `page`, `page_size`, `aggregates` (`total_sources` and `by_file_type`, over every match) and the canonical `applied_filters`. Pages start at 1 and hold 1 to 500 sources (default 50); `sort_by` is `path` (default), `indexed_at`, `passage_count`, `year` or `title`, with ties broken by source id and missing values last. Passage counts are counted in the index at query time for the page only; sorting by `passage_count` counts every match and is the slow case. A count that fails gives that source `passage_count: null` and `degraded: true`. Unknown fields are rejected. The design is recorded in [ADR-0020](docs/adr/0020-shared-source-filter-and-browse.md).
 
 ## Passage context
 
@@ -570,7 +632,7 @@ curl -X POST http://127.0.0.1:8000/search \
 
 The body of `POST /search` takes `query`, an optional `top_n`, an optional `collapse_duplicates` (see [Duplicate passages](#duplicate-passages)) and the optional filter fields (see [Filtered search](#filtered-search)); unknown fields are rejected.
 
-`POST /sources/browse` lists the indexed sources (see [Browse sources](#browse-sources)). `POST /passages/context` returns passages with the text around them (see [Passage context](#passage-context)). `POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information.
+`POST /sources/browse` lists the indexed sources (see [Browse sources](#browse-sources)). `POST /passages/context` returns passages with the text around them (see [Passage context](#passage-context)). `POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information: `GET /info` returns `version`, `backend` and `roots`, the configured [corpus roots](#corpus-roots) in order, each with `name`, `path` (absolute), `legacy` and `readable` (the folder exists and can be listed; nothing is walked). It does not read the index, so it gives no source counts (see `docgrep status`), and lists no root found only in the index. No endpoint adds or changes roots, and `POST /index/build` and `POST /scans/process` take no folder: they use the saved roots, and OCR `paths` must lie inside one of them.
 
 When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
 
@@ -578,12 +640,12 @@ When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank 
 
 docgrep offers its search to MCP clients, such as Claude Code, as read-only tools over the same use cases as the command line and the HTTP API. Results are verbatim passages from your own documents, never summaries; clients are told to cite the path, the heading path and, when the passage has one, the page. Passage text is data from your documents, not instructions for the client. The design is recorded in [ADR-0019](docs/adr/0019-mcp-server-as-api-front-end.md).
 
-- `find_passages`: ranked verbatim passages for `query`, with an optional `top_n` (default 10, at most `DOCGREP_MCP_MAX_TOP_N`), `collapse_duplicates` and the filters of [Filtered search](#filtered-search); the structured result is the body of `POST /search`, and DOCX and EPUB passages have a null page number. Filters that match nothing give an empty result, not an error.
-- `get_index_status`: the report of `docgrep status --json`, including the failed sources and their errors.
+- `find_passages`: ranked verbatim passages for `query`, with an optional `top_n` (default 10, at most `DOCGREP_MCP_MAX_TOP_N`), `collapse_duplicates` and the filters of [Filtered search](#filtered-search), `roots` included; the structured result is the body of `POST /search`, and DOCX and EPUB passages have a null page number. Filters that match nothing give an empty result, not an error.
+- `get_index_status`: the report of `docgrep status --json`, including the failed sources and their errors and the `roots` (names, flags and counts; never a path).
 - `browse_sources`: one page of indexed sources with their metadata and passage counts, filtered and sorted as described in [Browse sources](#browse-sources) (`page_size` default 50, at most `DOCGREP_MCP_MAX_PAGE_SIZE`); the structured result is the body of `POST /sources/browse`. A page too large for one tool result keeps its first sources and says so in `hint`.
 - `expand_passage_context`: the passages with the given `passage_ids` (at most `DOCGREP_MCP_MAX_CONTEXT_PASSAGES`) and the text around them, as described in [Passage context](#passage-context); the structured result is the body of `POST /passages/context`. A result too large for one tool result keeps its first entries and says so in `hint`.
 
-No tool indexes, runs OCR, changes the configuration or cancels anything. A missing or empty index, an invalid argument and every other failure come back as a tool error with a category, a message and details; only `browse_sources` answers a missing index with an empty listing and `expand_passage_context` with `not_found` entries, as their HTTP endpoints do.
+No tool indexes, runs OCR, changes the configuration (the corpus roots included) or cancels anything. A missing or empty index, an invalid argument and every other failure come back as a tool error with a category, a message and details; only `browse_sources` answers a missing index with an empty listing and `expand_passage_context` with `not_found` entries, as their HTTP endpoints do.
 
 There are two transports. `docgrep serve` serves the tools over streamable HTTP at `/mcp`, next to the REST API; this is the one to use day to day, because one process holds the models for every client. `docgrep mcp` serves them on standard input and output for a client that starts the server itself; each such process loads its own models on the first search.
 
@@ -609,7 +671,7 @@ A stdio server does not inherit your shell profile, so start it through a small 
 ```sh
 #!/bin/sh
 set -a
-. "$HOME/.config/docgrep/env"   # DOCGREP_CORPUS_ROOT, DOCGREP_DATA_DIR, ...
+. "$HOME/.config/docgrep/env"   # DOCGREP_DATA_DIR, ...
 set +a
 PATH="/path/to/docgrep/.venv/bin:$PATH"
 exec docgrep mcp
