@@ -27,7 +27,7 @@ from docgrep.domain.roots import CorpusRoots
 _LOG = logging.getLogger(__name__)
 
 # The kinds of run recorded in the runs table.
-RUN_KINDS = ("build", "update", "ocr")
+RUN_KINDS = ("build", "update", "ocr", "reencode_sparse")
 
 # Columns added to the runs table after the first schema; added when missing.
 _RUN_COLUMNS = (
@@ -36,6 +36,7 @@ _RUN_COLUMNS = (
     ("cancel_requested_at", "TEXT"),
     ("total_sources", "INTEGER"),
     ("carried_sources", "INTEGER"),
+    ("checkpoint", "TEXT"),
 )
 
 _SOURCE_COLUMNS = (
@@ -356,6 +357,14 @@ class SQLiteManifest:
             if cursor.rowcount != 1:
                 raise ValueError("unknown or finished run_id")
 
+    def set_checkpoint(self, run_id: str, checkpoint: str) -> None:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE runs SET checkpoint=? WHERE id=?", (checkpoint, run_id)
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("unknown run_id")
+
     @staticmethod
     def _optional(row: sqlite3.Row, name: str) -> object:
         return row[name] if name in row.keys() else None
@@ -437,6 +446,7 @@ class SQLiteManifest:
             total_sources=cast(int | None, self._optional(row, "total_sources")),
             carried_sources=cast(int | None, self._optional(row, "carried_sources"))
             or 0,
+            checkpoint=cast(str | None, self._optional(row, "checkpoint")),
         )
 
 

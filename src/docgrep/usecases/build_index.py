@@ -173,8 +173,9 @@ class Progress:
         self.done = carried
         self.passages = 0
 
-    def advance(self, passages: int, failed: int) -> None:
-        self.done += 1
+    def advance(self, passages: int, failed: int, *, done: int = 1) -> None:
+        """Count ``done`` more units (sources; passages for a re-encode)."""
+        self.done += done
         self.passages += passages
         since = self.done - (
             self._carried if self._logged_done is None else self._logged_done

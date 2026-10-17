@@ -285,7 +285,9 @@ class ManifestRunRecord:
 
     ``swapped`` means the new index is published but the committed sources have
     not been replaced from the run's journal yet. ``kind`` is ``build`` for a
-    full build or its resume and ``update`` for an incremental update.
+    full build or its resume, ``update`` for an incremental update, ``ocr``
+    for OCR processing and ``reencode_sparse`` for a re-encode of the sparse
+    vectors.
     """
 
     run_id: str
@@ -300,6 +302,8 @@ class ManifestRunRecord:
     cancel_requested_at: str | None = None
     total_sources: int | None = None
     carried_sources: int = 0
+    # Where a run that works in pages has got to (``set_checkpoint``).
+    checkpoint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
