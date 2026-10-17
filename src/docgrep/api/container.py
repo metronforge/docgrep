@@ -1,5 +1,6 @@
 """Composition root for local indexing and retrieval."""
 
+import logging
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -7,7 +8,13 @@ from typing import Protocol
 
 from docgrep import __version__
 from docgrep.adapters.chunking import TokenChunker, WhitespaceTokenizer
-from docgrep.adapters.corpus import describe_source, enumerate_corpus, scan_corpus
+from docgrep.adapters.corpus import (
+    describe_source,
+    enumerate_corpus,
+    require_available,
+    root_readable,
+    scan_corpus,
+)
 from docgrep.adapters.filelock import FileIndexLock
 from docgrep.adapters.manifest import SQLiteManifest, SQLiteOcrRegistry
 from docgrep.adapters.models.deterministic import (
@@ -30,6 +37,7 @@ from docgrep.adapters.parsers.text import TextParser
 from docgrep.adapters.qdrant import QdrantPassageStore
 from docgrep.adapters.scans import FileScanProbe
 from docgrep.api.log_config import configure_logging
+from docgrep.api.roots import corpus_roots
 from docgrep.domain.context import ContextResult, OutlineEntry
 from docgrep.domain.errors import IndexIncomplete
 from docgrep.domain.models import (
@@ -53,6 +61,8 @@ from docgrep.domain.protocols import (
     TokenSpanTokenizer,
     parser_version,
 )
+from docgrep.domain.roots import CorpusRoots
+from docgrep.domain.run_state import latest_root_prefixes
 from docgrep.domain.sources import BrowseRequest, BrowseResult, SourceFilter
 from docgrep.settings import Settings
 from docgrep.usecases.browse_sources import BrowseSources
@@ -65,6 +75,8 @@ from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
 from docgrep.usecases.process_scans import ProcessScans
 from docgrep.usecases.update_index import UpdateIndex, UpdatePlan, UpdateSummary
+
+_LOG = logging.getLogger(__name__)
 
 
 class SearchOperation(Protocol):
@@ -102,6 +114,14 @@ class UpdateOperation(Protocol):
 
     def request_cancel(self) -> None: ...
 
+    def forget_plan(self, name: str) -> tuple[ManifestSourceRecord, ...]: ...
+
+    def passages_of(self, records: Sequence[ManifestSourceRecord]) -> int: ...
+
+    def forget_root(
+        self, name: str, *, on_plan: Callable[[UpdatePlan], None] | None = None
+    ) -> UpdateSummary: ...
+
 
 class BrowseOperation(Protocol):
     """List one page of indexed sources."""
@@ -131,10 +151,14 @@ class Services:
 class _CorpusEnumerator:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._roots = corpus_roots(settings)
+
+    def require_available(self) -> None:
+        require_available(self._roots)
 
     def enumerate(self) -> tuple[Source, ...]:
         return enumerate_corpus(
-            self._settings.corpus_root,
+            self._roots,
             self._settings.include_globs,
             self._settings.exclude_globs,
             self._settings.data_dir,
@@ -142,14 +166,40 @@ class _CorpusEnumerator:
 
     def scan(self) -> tuple[ScannedFile, ...]:
         return scan_corpus(
-            self._settings.corpus_root,
+            self._roots,
             self._settings.include_globs,
             self._settings.exclude_globs,
             self._settings.data_dir,
         )
 
     def describe(self, path: str) -> Source:
-        return describe_source(self._settings.corpus_root, path)
+        return describe_source(self._roots, path)
+
+
+class _RootCatalog:
+    """The roots of this process with the prefixes the index records, read
+    from the manifest on every call; nothing is created or migrated."""
+
+    def __init__(self, settings: Settings, roots: CorpusRoots | None = None) -> None:
+        self._data_dir = settings.data_dir
+        self._roots = corpus_roots(settings) if roots is None else roots
+
+    def roots(self) -> CorpusRoots:
+        if not (self._data_dir / "manifest.sqlite3").is_file():
+            return self._roots
+        try:
+            manifest = SQLiteManifest(self._data_dir, read_only=True)
+            return self._roots.with_recorded(latest_root_prefixes(manifest))
+        except Exception:
+            _LOG.debug("root_prefixes_unreadable", exc_info=True)
+            return self._roots
+
+
+def _log_root_name(settings: Settings, roots: CorpusRoots) -> str:
+    """The folder name logged as ``corpus_root``: the legacy root, or else
+    the first root."""
+    root = roots.legacy or next(iter(roots), None)
+    return (root.path if root else settings.corpus_root.resolve()).name
 
 
 class _LazyTokenizerOnly:
@@ -173,14 +223,17 @@ class _LazyModelTokenizer:
         return self._embedder.tokenizer.token_spans(text)
 
 
-def _parsers(settings: Settings) -> Mapping[FileType, DocumentParser]:
+def _parsers(
+    settings: Settings, roots: CorpusRoots | None = None
+) -> Mapping[FileType, DocumentParser]:
+    found = corpus_roots(settings) if roots is None else roots
     return {
-        FileType.TXT: TextParser(settings.corpus_root),
-        FileType.MARKDOWN: MarkdownParser(settings.corpus_root),
-        FileType.PDF: PdfParser(settings.corpus_root),
-        FileType.EPUB: EpubParser(settings.corpus_root),
-        FileType.DOCX: DocxParser(settings.corpus_root),
-        FileType.DJVU: DjvuParser(settings.corpus_root),
+        FileType.TXT: TextParser(found),
+        FileType.MARKDOWN: MarkdownParser(found),
+        FileType.PDF: PdfParser(found),
+        FileType.EPUB: EpubParser(found),
+        FileType.DOCX: DocxParser(found),
+        FileType.DJVU: DjvuParser(found),
     }
 
 
@@ -198,10 +251,12 @@ def create_dry_run(settings: Settings) -> DryRun:
         if settings.backend == "fake"
         else _LazyTokenizerOnly(settings.embedding_model)
     )
+    roots = corpus_roots(settings)
     return DryRun(
         scanner=_CorpusEnumerator(settings),
-        parsers=_parsers(settings),
+        parsers=_parsers(settings, roots),
         chunker=TokenChunker(tokenizer, settings.chunk_size, settings.chunk_overlap),
+        roots=_RootCatalog(settings, roots),
     )
 
 
@@ -214,11 +269,13 @@ def create_discover_scans(settings: Settings) -> DiscoverScans:
     passed to each run.
     """
     configure_logging(settings.log_level)
+    roots = corpus_roots(settings)
     return DiscoverScans(
         scanner=_CorpusEnumerator(settings),
-        probe=FileScanProbe(settings.corpus_root),
+        probe=FileScanProbe(roots),
         density_lower=settings.scan_density_lower,
         density_upper=settings.scan_density_upper,
+        roots=_RootCatalog(settings, roots),
     )
 
 
@@ -228,7 +285,9 @@ def open_ocr_registry_view(settings: Settings) -> SQLiteOcrRegistry:
     It creates and migrates nothing; a missing manifest reads as nothing
     processed.
     """
-    return SQLiteOcrRegistry(settings.data_dir, settings.corpus_root, read_only=True)
+    return SQLiteOcrRegistry(
+        settings.data_dir, _RootCatalog(settings).roots(), read_only=True
+    )
 
 
 def create_process_scans(settings: Settings) -> ProcessScans:
@@ -240,15 +299,19 @@ def create_process_scans(settings: Settings) -> ProcessScans:
     """
     configure_logging(settings.log_level)
     corpus = _CorpusEnumerator(settings)
+    roots = corpus_roots(settings)
+    manifest = SQLiteManifest(settings.data_dir)
+    known = roots.with_recorded(latest_root_prefixes(manifest))
     return ProcessScans(
         lock=FileIndexLock(settings.data_dir / "index.lock"),
-        manifest=SQLiteManifest(settings.data_dir),
+        manifest=manifest,
         scanner=corpus,
         discovery=create_discover_scans(settings),
-        registry=SQLiteOcrRegistry(settings.data_dir, settings.corpus_root),
-        engine=OcrmypdfEngine(settings.corpus_root),
-        converter=DdjvuConverter(settings.corpus_root),
-        files=LocalOcrFiles(settings.corpus_root),
+        registry=SQLiteOcrRegistry(settings.data_dir, known),
+        engine=OcrmypdfEngine(known),
+        converter=DdjvuConverter(known),
+        files=LocalOcrFiles(known),
+        availability=corpus,
         languages=settings.ocr_languages,
         jobs=settings.ocr_jobs,
         timeout_seconds=settings.ocr_timeout_seconds,
@@ -318,6 +381,8 @@ def create_status(settings: Settings) -> InspectStatus:
             file_type: parser_version(parser)
             for file_type, parser in _parsers(settings).items()
         },
+        roots=_RootCatalog(settings),
+        root_readable=lambda root: root_readable(root.path),
     )
 
 
@@ -436,7 +501,10 @@ def open_browse(settings: Settings) -> Iterator[BrowseSources]:
     store = _ReadStore(settings)
     try:
         yield BrowseSources(
-            manifest=manifest, store=store, ocr=open_ocr_registry_view(settings)
+            manifest=manifest,
+            store=store,
+            ocr=open_ocr_registry_view(settings),
+            roots=_RootCatalog(settings),
         )
     finally:
         store.close()
@@ -545,16 +613,21 @@ def create_container(
         )
     )
     manifest = SQLiteManifest(settings.data_dir)
+    roots = corpus_roots(settings)
+    catalog = _RootCatalog(settings, roots)
     # The manifest above has created or migrated the OCR tables.
     delegations = SQLiteOcrRegistry(
-        settings.data_dir, settings.corpus_root, read_only=True
+        settings.data_dir,
+        roots.with_recorded(latest_root_prefixes(manifest)),
+        read_only=True,
     )
-    parsers = _parsers(settings)
+    parsers = _parsers(settings, roots)
     config = _vector_config(settings)
     lock = FileIndexLock(settings.data_dir / "index.lock")
     chunker = TokenChunker(tokenizer, settings.chunk_size, settings.chunk_overlap)
+    corpus = _CorpusEnumerator(settings)
     log_context: dict[str, str | int | float] = {
-        "corpus_root": settings.corpus_root.resolve().name,
+        "corpus_root": _log_root_name(settings, roots),
         "backend": settings.backend,
     }
     return Services(
@@ -570,10 +643,11 @@ def create_container(
             collapse_duplicates=settings.collapse_duplicates,
             manifest=manifest,
             ocr=delegations,
+            roots=catalog,
         ),
         build=BuildIndex(
             lock=lock,
-            enumerator=_CorpusEnumerator(settings),
+            enumerator=corpus,
             parsers=parsers,
             chunker=chunker,
             embedder=embedder,
@@ -586,10 +660,12 @@ def create_container(
             refuse_resumable_by_default=refuse_resumable_by_default,
             log_context=log_context,
             delegations=delegations,
+            roots=catalog,
+            availability=corpus,
         ),
         update=UpdateIndex(
             lock=lock,
-            corpus=_CorpusEnumerator(settings),
+            corpus=corpus,
             parsers=parsers,
             chunker=chunker,
             embedder=embedder,
@@ -600,9 +676,13 @@ def create_container(
             upsert_batch_size=settings.upsert_batch_size,
             log_context=log_context,
             delegations=delegations,
+            roots=catalog,
+            availability=corpus,
         ),
         # The search store is shared, so a local store is never opened twice.
-        browse=BrowseSources(manifest=manifest, store=store, ocr=delegations),
+        browse=BrowseSources(
+            manifest=manifest, store=store, ocr=delegations, roots=catalog
+        ),
         context=_expand_context(
             settings, store=store, manifest=manifest, ocr=delegations
         ),

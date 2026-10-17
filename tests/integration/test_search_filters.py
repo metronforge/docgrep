@@ -212,6 +212,7 @@ def test_the_openapi_schema_shows_the_filters(client: TestClient) -> None:
         "file_types",
         "path_prefixes",
         "path_globs",
+        "roots",
     }
     assert request["additionalProperties"] is False
     response = schemas["SearchResponse"]["properties"]

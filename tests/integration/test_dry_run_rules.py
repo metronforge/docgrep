@@ -157,4 +157,9 @@ def test_rule_sampling_writes_nothing_and_wires_no_embedder(
     }
     assert after == before
     assert not (tmp_path / "data").exists()
-    assert sorted(vars(create_dry_run(Settings()))) == ["chunker", "parsers", "scanner"]
+    assert sorted(vars(create_dry_run(Settings()))) == [
+        "chunker",
+        "parsers",
+        "roots",
+        "scanner",
+    ]

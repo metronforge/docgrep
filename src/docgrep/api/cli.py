@@ -10,6 +10,8 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
+from contextvars import ContextVar
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError as SettingsValidationError
@@ -24,6 +26,7 @@ from docgrep.api.container import (
     create_dry_run,
     create_process_scans,
     create_status,
+    index_missing,
     open_browse,
     open_context,
     open_ocr_registry_view,
@@ -40,12 +43,24 @@ from docgrep.api.http import (
     SearchResponse,
     create_app,
     format_filters,
+    root_status_lines,
     run_search,
     validation_problems,
 )
 from docgrep.api.log_config import configure_logging
+from docgrep.api.roots import (
+    RootSelection,
+    add_command,
+    add_root,
+    list_roots,
+    remove_root,
+    require_configured,
+    save_parameter_root,
+    select_roots,
+)
 from docgrep.api.signals import Register, graceful_cancel
 from docgrep.domain.errors import DocgrepError, ValidationError
+from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.sources import HAS_METADATA_VALUES, SORT_KEYS, SourceFilter
 from docgrep.settings import Settings
 from docgrep.usecases.cancel_index import CancelIndex, CancelResult
@@ -85,6 +100,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --resume: keep sources that failed instead of trying them again",
     )
+    _add_root_options(index, save=True)
     update = commands.add_parser(
         "update",
         help="Apply the corpus changes since the last run to the index, in place",
@@ -94,6 +110,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep sources that failed before instead of trying them again",
     )
+    _add_root_options(update, save=True)
     search = commands.add_parser(
         "search",
         help="Find verbatim passages",
@@ -124,6 +141,7 @@ def _parser() -> argparse.ArgumentParser:
     dry.add_argument("--offset", type=int, default=0)
     dry.add_argument("--sample", type=int, default=None)
     dry.add_argument("--seed", type=int, default=0)
+    _add_root_options(dry)
     discover = commands.add_parser(
         "discover-scans",
         help="List PDF and DjVu files whose text layer needs OCR (read-only)",
@@ -142,11 +160,13 @@ def _parser() -> argparse.ArgumentParser:
         help="Also list files already processed through OCR, and their outputs",
     )
     discover.add_argument("--json", action="store_true")
+    _add_root_options(discover)
     ocr = commands.add_parser(
         "ocr",
         help="Make scanned PDF and DjVu files searchable through OCR",
-        description="Name the files with exactly one of: paths (relative to "
-        "the corpus root, or absolute), --path-glob or --all-discovered.",
+        description="Name the files with exactly one of: paths (stored paths, "
+        "as listed by discover-scans, or absolute), --path-glob or "
+        "--all-discovered.",
     )
     ocr.add_argument("paths", nargs="*", help="PDF or DjVu files to process")
     ocr.add_argument("--path-glob", dest="path_glob")
@@ -178,6 +198,7 @@ def _parser() -> argparse.ArgumentParser:
         "rebuilding their text layer",
     )
     ocr.add_argument("--json", action="store_true")
+    _add_root_options(ocr)
     sources = commands.add_parser(
         "sources",
         help="List the indexed sources with their metadata (read-only)",
@@ -229,12 +250,68 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="Show the state of the index and of long operations"
     )
     status.add_argument("--json", action="store_true")
+    roots = commands.add_parser(
+        "roots",
+        help="List, add or remove the saved corpus roots",
+        description="The corpus roots are saved in roots.json in the data "
+        "directory. Removing a root only edits that list: its indexed sources "
+        "stay until `docgrep forget-root NAME --yes`.",
+    )
+    roots_commands = roots.add_subparsers(dest="roots_command", required=True)
+    roots_list = roots_commands.add_parser("list", help="Show the corpus roots")
+    roots_list.add_argument("--json", action="store_true")
+    roots_add = roots_commands.add_parser("add", help="Save a corpus root")
+    roots_add.add_argument("name", metavar="NAME")
+    roots_add.add_argument("path", metavar="PATH")
+    roots_add.add_argument(
+        "--legacy",
+        action="store_true",
+        help="The root of an index built before roots had names: its sources "
+        "keep their stored paths",
+    )
+    roots_remove = roots_commands.add_parser(
+        "remove", help="Remove a root from the saved list; the index is unchanged"
+    )
+    roots_remove.add_argument("name", metavar="NAME")
+    forget = commands.add_parser(
+        "forget-root",
+        help="Remove every source of a root from the index (the files stay)",
+    )
+    forget.add_argument("name", metavar="NAME")
+    forget.add_argument(
+        "--yes", action="store_true", help="Remove them; without it, only show counts"
+    )
     commands.add_parser("serve", help="Start the local HTTP API")
     commands.add_parser(
         "mcp",
         help="Serve the read-only MCP tools on standard input and output",
     )
     return parser
+
+
+def _add_root_options(command: argparse.ArgumentParser, *, save: bool = False) -> None:
+    """The one-off roots of a run, and for index and update the offer to
+    save them."""
+    command.add_argument(
+        "--root",
+        dest="root_params",
+        action="append",
+        metavar="NAME=PATH",
+        help="Use this root for this run only, instead of the saved roots "
+        "(a path alone is named after its folder); repeatable",
+    )
+    if save:
+        choice = command.add_mutually_exclusive_group()
+        choice.add_argument(
+            "--save-roots",
+            action="store_true",
+            help="Save the --root roots that are not saved yet, without asking",
+        )
+        choice.add_argument(
+            "--no-save-roots",
+            action="store_true",
+            help="Neither ask to save the --root roots nor print how to",
+        )
 
 
 def _add_filter_options(command: argparse.ArgumentParser) -> None:
@@ -257,7 +334,15 @@ def _add_filter_options(command: argparse.ArgumentParser) -> None:
         "--path-prefix",
         dest="path_prefixes",
         action="append",
-        help="Path prefix relative to the corpus root, case-sensitive; repeatable",
+        help="Stored path prefix (a prefixed root's paths start with its name "
+        "and /), case-sensitive; repeatable",
+    )
+    command.add_argument(
+        "--in-root",
+        dest="roots",
+        action="append",
+        metavar="NAME",
+        help="Only sources of this corpus root; repeatable",
     )
     command.add_argument(
         "--glob",
@@ -280,6 +365,7 @@ def _source_filter(args: argparse.Namespace) -> SourceFilter:
         file_types=tuple(args.file_types or ()),
         path_prefixes=tuple(args.path_prefixes or ()),
         path_globs=tuple(args.path_globs or ()),
+        roots=tuple(args.roots or ()),
     )
 
 
@@ -304,6 +390,17 @@ def _format_dry_run(report: dict[str, Any]) -> str:
         f"({_size(report['would_be_indexed']['size_bytes'])})",
         f"Recognised without a parser: {report['recognised_without_parser']['files']} "
         f"files ({_size(report['recognised_without_parser']['size_bytes'])})",
+    ]
+    # Per root only when there is more than one; the totals say the rest.
+    by_root = report.get("by_root") or ()
+    for entry in by_root if len(by_root) > 1 else ():
+        lines.append(
+            f"Root {entry['root']}: {entry['files']} files "
+            f"({_size(entry['size_bytes'])}); included {entry['included']}, "
+            f"excluded {entry['excluded']}; would be indexed "
+            f"{entry['would_be_indexed']}"
+        )
+    lines += [
         "By file type:",
     ]
     for entry in report["types"]:
@@ -416,9 +513,15 @@ def _format_discover_scans(report: dict[str, Any]) -> str:
             f"Already processed through OCR (not listed): "
             f"{report['already_processed']}; use --include-processed to list them"
         )
-    for label, counts in [("Total", report["totals"])] + [
-        (name, counts) for name, counts in report["by_file_type"].items()
-    ]:
+    for label, counts in (
+        [("Total", report["totals"])]
+        + [(name, counts) for name, counts in report["by_file_type"].items()]
+        + [
+            (f"Root {counts['root']}", counts)
+            for counts in report.get("by_root") or ()
+            if len(report.get("by_root") or ()) > 1
+        ]
+    ):
         lines.append(
             f"{label}: {counts['inspected']} inspected, {counts['native']} native, "
             f"{counts['scanned']} scanned, {counts['uncertain']} uncertain, "
@@ -674,6 +777,7 @@ def _format_status(report: dict[str, Any]) -> str:
                 + (f": {entry['reason']}" if entry["reason"] else "")
                 for entry in sources["failed"]
             )
+    lines.extend(root_status_lines(report.get("roots")))
     for entry in report["drift"]:
         lines.append(
             f"Drift: {entry['field']} is {entry['indexed']} in the index and "
@@ -761,6 +865,7 @@ def _sources(args: argparse.Namespace, browse: BrowseOperation) -> int:
         "file_types",
         "path_prefixes",
         "path_globs",
+        "roots",
         "has_metadata",
         "page",
         "page_size",
@@ -874,6 +979,13 @@ def _context(args: argparse.Namespace, context: ContextOperation) -> int:
 
 
 def _format_plan(plan: UpdatePlan) -> str:
+    return _format_changes(plan) + "".join(
+        f"Kept {count} sources of root {name}, which is not part of this run.\n"
+        for name, count in plan.outside_run
+    )
+
+
+def _format_changes(plan: UpdatePlan) -> str:
     if plan.changes == 0:
         return f"No changes detected ({plan.unchanged} sources unchanged).\n"
     return (
@@ -1024,7 +1136,12 @@ def _describe(error: DocgrepError) -> str:
     return f"{text} (reason: {reason})" if reason else text
 
 
-def _ocr(args: argparse.Namespace, ocr: ProcessScans, register: Register) -> int:
+def _ocr(
+    args: argparse.Namespace,
+    ocr: ProcessScans,
+    register: Register,
+    selection: RootSelection | None = None,
+) -> int:
     """Run ``docgrep ocr``: 0 when nothing failed, 1 when a file failed or the
     run was cancelled or aborted, 2 for usage errors."""
     request = OcrRequest(
@@ -1040,7 +1157,7 @@ def _ocr(args: argparse.Namespace, ocr: ProcessScans, register: Register) -> int
         if args.plan:
             plan = ocr.plan(request)
             if args.json:
-                _emit(json.dumps(plan.as_dict(), indent=2) + "\n")
+                _emit(json.dumps(_unsaved(plan.as_dict(), selection), indent=2) + "\n")
             else:
                 _emit(_format_ocr_plan(plan))
             return 0
@@ -1073,10 +1190,174 @@ def _ocr(args: argparse.Namespace, ocr: ProcessScans, register: Register) -> int
         sys.stderr.write(_describe(error) + "\n")
         return 2
     if args.json:
-        _emit(json.dumps(summary.as_dict(), indent=2) + "\n")
+        _emit(json.dumps(_unsaved(summary.as_dict(), selection), indent=2) + "\n")
     else:
         _emit(_format_ocr_summary(summary))
     return 0 if summary.status == "completed" and not summary.failed else 1
+
+
+def _unsaved(report: dict[str, Any], selection: RootSelection | None) -> dict[str, Any]:
+    return report if selection is None else _with_unsaved(report, selection)
+
+
+# Lines for standard error once the command is done, such as the deprecation
+# warning of DOCGREP_CORPUS_ROOT.
+_NOTICES: ContextVar[list[str] | None] = ContextVar("docgrep_notices", default=None)
+
+
+def _notice(text: str) -> None:
+    notices = _NOTICES.get()
+    if notices is None:
+        sys.stderr.write(text + "\n")
+    else:
+        notices.append(text)
+
+
+def _notices_at_exit[**P](command: Callable[P, int]) -> Callable[P, int]:
+    """Write the collected notices to standard error when the command ends."""
+
+    @functools.wraps(command)
+    def run(*args: P.args, **kwargs: P.kwargs) -> int:
+        notices: list[str] = []
+        token = _NOTICES.set(notices)
+        try:
+            return command(*args, **kwargs)
+        finally:
+            _NOTICES.reset(token)
+            for text in notices:
+                sys.stderr.write(text + "\n")
+
+    return run
+
+
+SAVE_ROOT_PROMPT = (
+    "Add root {name} ({path}) to the saved list so future updates include it? [y/N] "
+)
+
+
+def _interactive() -> bool:
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _offer_to_save(
+    args: argparse.Namespace, settings: Settings, selection: RootSelection
+) -> None:
+    """After an index or update with ``--root`` roots that are not saved:
+    save them (``--save-roots``), ask on a terminal, or else say how."""
+    if args.no_save_roots:
+        return
+    for root in selection.unsaved:
+        if not args.save_roots:
+            if not _interactive():
+                sys.stderr.write(
+                    f"Root {root.name} ({root.path}) is not saved, so future "
+                    f"updates will not visit it; save it with: {add_command(root)}\n"
+                )
+                continue
+            _emit(SAVE_ROOT_PROMPT.format(name=root.name, path=root.path))
+            _flush_stdout()
+            if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+                continue
+        path, with_bootstrap = save_parameter_root(settings, root)
+        _emit(f"Saved root {root.name} ({root.path}) in {path}.\n")
+        if with_bootstrap:
+            _emit(
+                "The root of DOCGREP_CORPUS_ROOT was saved with it as the legacy "
+                "root; the variable is ignored from now on.\n"
+            )
+
+
+def _with_unsaved(report: dict[str, Any], selection: RootSelection) -> dict[str, Any]:
+    """A JSON report of a run with ``--root`` roots, with those not saved."""
+    if selection.origin == "parameters":
+        report["unsaved_roots"] = [
+            {"name": root.name, "path": str(root.path)} for root in selection.unsaved
+        ]
+    return report
+
+
+def _roots(args: argparse.Namespace, settings: Settings) -> int:
+    """Run ``docgrep roots``: 0 on success, 2 for invalid names or paths."""
+    try:
+        if args.roots_command == "list":
+            listing = list_roots(settings)
+            for warning in listing["warnings"]:
+                _notice(warning)
+            if args.json:
+                _emit(json.dumps(listing, indent=2) + "\n")
+                return 0
+            if not listing["roots"]:
+                _emit(
+                    "No corpus roots are configured; add one with "
+                    "`docgrep roots add NAME PATH`.\n"
+                )
+                return 0
+            for root in listing["roots"]:
+                flags = ["legacy"] if root["legacy"] else []
+                if not root["readable"]:
+                    flags.append("not readable")
+                _emit(
+                    f"{root['name']}  {root['path']}"
+                    + (f"  ({', '.join(flags)})" if flags else "")
+                    + f"  {root['indexed_sources']} indexed sources\n"
+                )
+            if listing["origin"] == "bootstrap":
+                _emit("(from DOCGREP_CORPUS_ROOT; no roots file is saved yet)\n")
+            return 0
+        if args.roots_command == "add":
+            path = add_root(settings, args.name, Path(args.path), legacy=args.legacy)
+            _emit(
+                f"Added root {args.name} ({Path(args.path).expanduser().resolve()}) "
+                f"to {path}"
+                + (
+                    " as the legacy root: its sources keep their stored paths"
+                    if args.legacy
+                    else ""
+                )
+                + ". Run `docgrep update` to index it.\n"
+            )
+            return 0
+        path = remove_root(settings, args.name)
+        _emit(
+            f"Removed root {args.name} from {path}. Its indexed sources stay in "
+            "the index and `docgrep status` reports them; `docgrep forget-root "
+            f"{args.name} --yes` removes them.\n"
+        )
+        return 0
+    except ValidationError as error:
+        sys.stderr.write(_describe(error) + "\n")
+        return 2
+
+
+def _forget_root(args: argparse.Namespace, services: Services) -> int:
+    """Run ``docgrep forget-root``: without ``--yes`` only the counts, with
+    exit status 1; with it the removal."""
+    update = services.update
+    if update is None:
+        sys.stderr.write("forget-root is not available in this configuration\n")
+        return 1
+    records = update.forget_plan(args.name)
+    states = Counter(record.status.partition(":")[0] for record in records)
+    if not args.yes:
+        _emit(
+            f"forget-root {args.name} would remove {len(records)} sources "
+            f"({states['indexed']} indexed, {states['skipped']} skipped, "
+            f"{states['failed']} failed) and {update.passages_of(records)} "
+            "passages from the index; the files are not touched. Run it again "
+            "with --yes to remove them.\n"
+        )
+        return 1
+    summary = update.forget_root(args.name)
+    _emit(
+        f"Forgot root {args.name}: {summary.removed} sources and "
+        f"{summary.passages_removed} passages removed from the index.\n"
+    )
+    for failure in summary.failures:
+        _emit(f"  {failure.path}: {failure.reason}: {failure.message}\n")
+    return 1 if summary.failed else 0
 
 
 MCP_INSTALL_HINT = "uv pip install mcp"
@@ -1099,6 +1380,7 @@ def _mcp(settings: Settings) -> int:
 
 
 @_tolerate_closed_stdout
+@_notices_at_exit
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -1126,6 +1408,18 @@ def main(
     try:
         settings = Settings()
         configure_logging(settings.log_level)
+        if args.command == "roots":
+            return _roots(args, settings)
+        selection = RootSelection(roots=CorpusRoots(), origin="none")
+        if args.command != "cancel":
+            selection = select_roots(settings, getattr(args, "root_params", None) or ())
+            for warning in selection.warnings:
+                # A server runs until stopped: its warning comes first.
+                if args.command in ("serve", "mcp"):
+                    sys.stderr.write(warning + "\n")
+                else:
+                    _notice(warning)
+            settings = settings.with_corpus_roots(selection.roots)
         if args.command == "serve":
             import uvicorn
 
@@ -1136,6 +1430,7 @@ def main(
             return _mcp(settings)
 
         if args.command == "dry-run":
+            require_configured(selection.roots)
             report = dry_run_factory(settings).run(
                 path_prefix=args.path_prefix,
                 sample=args.sample,
@@ -1144,7 +1439,10 @@ def main(
                 offset=args.offset,
             )
             if args.json:
-                _emit(json.dumps(report.as_dict(), indent=2) + "\n")
+                _emit(
+                    json.dumps(_with_unsaved(report.as_dict(), selection), indent=2)
+                    + "\n"
+                )
             else:
                 _emit(_format_dry_run(report.as_dict(with_files=False)))
             return 0
@@ -1155,6 +1453,7 @@ def main(
 
         if args.command == "discover-scans":
             try:
+                require_configured(selection.roots)
                 discovery = discover_factory(settings).run(
                     path_glob=args.path_glob,
                     file_types=args.file_types,
@@ -1165,13 +1464,16 @@ def main(
                 sys.stderr.write(_describe(error) + "\n")
                 return 2
             if args.json:
-                _emit(json.dumps(discovery.as_dict(), indent=2) + "\n")
+                _emit(
+                    json.dumps(_with_unsaved(discovery.as_dict(), selection), indent=2)
+                    + "\n"
+                )
             else:
                 _emit(_format_discover_scans(discovery.as_dict()))
             return 0
 
         if args.command == "ocr":
-            return _ocr(args, ocr_factory(settings), register_signal)
+            return _ocr(args, ocr_factory(settings), register_signal, selection)
 
         if args.command == "status":
             status_report = status_factory(settings).run().as_dict()
@@ -1193,6 +1495,12 @@ def main(
             text, status = _format_cancel(cancel_factory(settings).run())
             _emit(text)
             return status
+
+        if args.command == "forget-root":
+            if index_missing(settings):
+                sys.stderr.write("index_incomplete: no index has been built yet\n")
+                return 1
+            return _forget_root(args, container_factory(settings))
 
         # Checked before the composition root, so a bad filter loads nothing.
         source_filter = (
@@ -1216,6 +1524,7 @@ def main(
             _emit(_format_update(outcome))
             if outcome.cancelled:
                 return 2
+            _offer_to_save(args, settings, selection)
             return 1 if outcome.failed else 0
 
         if args.command == "index":
@@ -1260,6 +1569,7 @@ def main(
             )
             for failure in summary.failures:
                 _emit(f"  {failure.path}: {failure.reason}: {failure.message}\n")
+            _offer_to_save(args, settings, selection)
             return 1 if summary.failed else 0
 
         result = run_search(

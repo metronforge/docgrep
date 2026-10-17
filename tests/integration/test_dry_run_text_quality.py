@@ -143,7 +143,7 @@ def test_sampling_pdfs_writes_nothing_and_wires_no_embedder(
     assert after == before
     assert not (tmp_path / "data").exists()
     dry_run = create_dry_run(Settings())
-    assert sorted(vars(dry_run)) == ["chunker", "parsers", "scanner"]
+    assert sorted(vars(dry_run)) == ["chunker", "parsers", "roots", "scanner"]
 
 
 def _keys(value: object, found: set[str] | None = None) -> set[str]:
