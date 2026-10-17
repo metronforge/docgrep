@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Literal
 
+from docgrep.domain.context import OutlineEntry
 from docgrep.domain.errors import (
     IndexIncomplete,
     ManifestUnavailable,
@@ -40,6 +41,10 @@ class InMemoryPassageStore:
         self._building = False
         self._dimension = 0
         self.orphans: list[str] = []
+        # The calls of the context reads (UC-12), with their arguments.
+        self.passage_fetches: list[tuple[str, ...]] = []
+        self.outline_reads: list[str] = []
+        self.text_fetches: list[tuple[str, ...]] = []
 
     def _target(
         self,
@@ -165,6 +170,47 @@ class InMemoryPassageStore:
         if self._completion is None:
             raise IndexIncomplete("No index is published")
         return sum(item[1].source_id == source_id for item in self._items.values())
+
+    # The context reads: the published collection only.
+
+    def _readable(
+        self,
+    ) -> dict[str, tuple[Passage, Source, tuple[float, ...], dict[int, float]]]:
+        return self._items if self._completion is not None else {}
+
+    def fetch_passages(
+        self, passage_ids: Sequence[str]
+    ) -> tuple[tuple[Passage, Source] | None, ...]:
+        self.passage_fetches.append(tuple(passage_ids))
+        items = self._readable()
+        return tuple(
+            items[passage_id][:2] if passage_id in items else None
+            for passage_id in passage_ids
+        )
+
+    def source_outline(self, source_id: str) -> tuple[OutlineEntry, ...]:
+        self.outline_reads.append(source_id)
+        return tuple(
+            sorted(
+                (
+                    OutlineEntry(
+                        passage.passage_id, passage.chunk_offset, passage.token_count
+                    )
+                    for passage, source, _, _ in self._readable().values()
+                    if source.source_id == source_id
+                ),
+                key=lambda entry: (entry.chunk_offset, entry.passage_id),
+            )
+        )
+
+    def passage_texts(self, passage_ids: Collection[str]) -> dict[str, Passage]:
+        self.text_fetches.append(tuple(sorted(passage_ids)))
+        items = self._readable()
+        return {
+            passage_id: items[passage_id][0]
+            for passage_id in passage_ids
+            if passage_id in items
+        }
 
     def write_completion_metadata(
         self, metadata: Mapping[str, str | int | float]

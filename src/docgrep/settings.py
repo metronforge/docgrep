@@ -16,6 +16,10 @@ MCP_MAX_TOP_N = 25
 # The browse_sources tool returns at most DOCGREP_MCP_MAX_PAGE_SIZE sources
 # per page (default MCP_MAX_PAGE_SIZE), never more than MAX_PAGE_SIZE.
 MCP_MAX_PAGE_SIZE = 100
+# The expand_passage_context tool takes at most DOCGREP_MCP_MAX_CONTEXT_PASSAGES
+# ids per call (default MCP_MAX_CONTEXT_PASSAGES), within
+# DOCGREP_CONTEXT_MAX_PASSAGES.
+MCP_MAX_CONTEXT_PASSAGES = 5
 
 
 class Settings(BaseSettings):
@@ -75,6 +79,12 @@ class Settings(BaseSettings):
     mcp_http_enabled: bool = True
     mcp_max_top_n: int = Field(default=MCP_MAX_TOP_N, gt=0)
     mcp_max_page_size: int = Field(default=MCP_MAX_PAGE_SIZE, gt=0, le=MAX_PAGE_SIZE)
+    mcp_max_context_passages: int = Field(default=MCP_MAX_CONTEXT_PASSAGES, gt=0)
+    # Passage context (UC-12): the most passage ids per request, and the
+    # default and largest window in tokens, applied to each side.
+    context_max_passages: int = Field(default=20, gt=0)
+    context_window_tokens: int = Field(default=500, ge=0)
+    context_max_window_tokens: int = Field(default=5000, gt=0)
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -102,6 +112,10 @@ class Settings(BaseSettings):
             raise ValueError("top_n must not exceed top_n_max")
         if self.top_n > self.top_k:
             raise ValueError("top_n must not exceed top_k")
+        if self.context_window_tokens > self.context_max_window_tokens:
+            raise ValueError(
+                "context_window_tokens must not exceed context_max_window_tokens"
+            )
         if self.scan_density_lower >= self.scan_density_upper:
             raise ValueError("scan_density_lower must be below scan_density_upper")
         return self

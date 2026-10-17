@@ -1,6 +1,6 @@
 """Composition root for local indexing and retrieval."""
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
@@ -30,10 +30,12 @@ from docgrep.adapters.parsers.text import TextParser
 from docgrep.adapters.qdrant import QdrantPassageStore
 from docgrep.adapters.scans import FileScanProbe
 from docgrep.api.log_config import configure_logging
+from docgrep.domain.context import ContextResult, OutlineEntry
 from docgrep.domain.errors import IndexIncomplete
 from docgrep.domain.models import (
     FileType,
     ManifestSourceRecord,
+    Passage,
     ScannedFile,
     SearchResult,
     Source,
@@ -43,7 +45,10 @@ from docgrep.domain.protocols import (
     DocumentParser,
     EmbeddingProvider,
     ManifestReader,
+    OcrOutputOwners,
+    PassageContextReader,
     Reranker,
+    SourceRecordReader,
     StatusStore,
     TokenSpanTokenizer,
     parser_version,
@@ -55,6 +60,7 @@ from docgrep.usecases.build_index import BuildIndex, BuildSummary
 from docgrep.usecases.cancel_index import CancelIndex
 from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DryRun
+from docgrep.usecases.expand_context import ExpandContext
 from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
 from docgrep.usecases.process_scans import ProcessScans
@@ -103,6 +109,14 @@ class BrowseOperation(Protocol):
     def run(self, request: BrowseRequest) -> BrowseResult: ...
 
 
+class ContextOperation(Protocol):
+    """Return passages with the text around them."""
+
+    def run(
+        self, passage_ids: Sequence[str], *, window_tokens: int | None = None
+    ) -> ContextResult: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Services:
     """Operations exposed to HTTP and CLI transports."""
@@ -111,6 +125,7 @@ class Services:
     build: BuildOperation
     update: UpdateOperation | None = None
     browse: BrowseOperation | None = None
+    context: ContextOperation | None = None
 
 
 class _CorpusEnumerator:
@@ -323,12 +338,31 @@ class _NoSources:
     def committed_sources(self) -> tuple[ManifestSourceRecord, ...]:
         return ()
 
+    def get_source(self, path: str) -> ManifestSourceRecord | None:
+        return None
 
-class _BrowseStore:
-    """Open the store on the first count, and only then.
+
+class _NoPassages:
+    """The passage reads of a data directory without an index."""
+
+    def fetch_passages(
+        self, passage_ids: Sequence[str]
+    ) -> tuple[tuple[Passage, Source] | None, ...]:
+        return tuple(None for _ in passage_ids)
+
+    def source_outline(self, source_id: str) -> tuple[OutlineEntry, ...]:
+        return ()
+
+    def passage_texts(self, passage_ids: Collection[str]) -> Mapping[str, Passage]:
+        return {}
+
+
+class _ReadStore:
+    """Open the store on the first read, and only then.
 
     A local store that does not exist is not created: it has no published
-    index. A store that cannot be opened fails every count the same way.
+    index, so a count raises ``IndexIncomplete`` and nothing is found. A
+    store that cannot be opened fails every read the same way.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -336,14 +370,14 @@ class _BrowseStore:
         self._store: QdrantPassageStore | None = None
         self._failure: Exception | None = None
 
-    def count_source_passages(self, source_id: str) -> int:
+    def _opened(self) -> QdrantPassageStore | None:
         if self._failure is not None:
             raise self._failure
         if self._store is None:
             settings = self._settings
             local = settings.data_dir / "qdrant"
             if not settings.qdrant_url and not local.is_dir():
-                raise IndexIncomplete("No index is published")
+                return None
             try:
                 self._store = (
                     QdrantPassageStore(
@@ -355,7 +389,29 @@ class _BrowseStore:
             except Exception as error:
                 self._failure = error
                 raise
-        return self._store.count_source_passages(source_id)
+        return self._store
+
+    def count_source_passages(self, source_id: str) -> int:
+        store = self._opened()
+        if store is None:
+            raise IndexIncomplete("No index is published")
+        return store.count_source_passages(source_id)
+
+    def fetch_passages(
+        self, passage_ids: Sequence[str]
+    ) -> tuple[tuple[Passage, Source] | None, ...]:
+        store = self._opened()
+        if store is None:
+            return tuple(None for _ in passage_ids)
+        return store.fetch_passages(passage_ids)
+
+    def source_outline(self, source_id: str) -> tuple[OutlineEntry, ...]:
+        store = self._opened()
+        return () if store is None else store.source_outline(source_id)
+
+    def passage_texts(self, passage_ids: Collection[str]) -> Mapping[str, Passage]:
+        store = self._opened()
+        return {} if store is None else store.passage_texts(passage_ids)
 
     def close(self) -> None:
         if self._store is not None:
@@ -377,10 +433,60 @@ def open_browse(settings: Settings) -> Iterator[BrowseSources]:
         if (settings.data_dir / "manifest.sqlite3").is_file()
         else _NoSources()
     )
-    store = _BrowseStore(settings)
+    store = _ReadStore(settings)
     try:
         yield BrowseSources(
             manifest=manifest, store=store, ocr=open_ocr_registry_view(settings)
+        )
+    finally:
+        store.close()
+
+
+def _expand_context(
+    settings: Settings,
+    *,
+    store: PassageContextReader,
+    manifest: SourceRecordReader,
+    ocr: OcrOutputOwners | None,
+) -> ExpandContext:
+    return ExpandContext(
+        store=store,
+        manifest=manifest,
+        ocr=ocr,
+        max_passages=settings.context_max_passages,
+        default_window_tokens=settings.context_window_tokens,
+        max_window_tokens=settings.context_max_window_tokens,
+    )
+
+
+def unindexed_context(settings: Settings) -> ExpandContext:
+    """The context operation of a data directory where no index was built:
+    it validates requests and finds nothing, without creating anything."""
+    configure_logging(settings.log_level)
+    return _expand_context(
+        settings, store=_NoPassages(), manifest=_NoSources(), ocr=None
+    )
+
+
+@contextmanager
+def open_context(settings: Settings) -> Iterator[ExpandContext]:
+    """Wire passage context (UC-12) for a process of its own, such as the CLI.
+
+    It loads no model, takes no lock and creates nothing: the manifest and
+    the OCR registry are opened read-only, and the store only on the first
+    read, after the request is validated. The store is closed on exit.
+    """
+    configure_logging(settings.log_level)
+    if index_missing(settings):
+        yield unindexed_context(settings)
+        return
+    store = _ReadStore(settings)
+    try:
+        yield _expand_context(
+            settings,
+            store=store,
+            manifest=SQLiteManifest(settings.data_dir, read_only=True),
+            ocr=open_ocr_registry_view(settings),
         )
     finally:
         store.close()
@@ -497,4 +603,7 @@ def create_container(
         ),
         # The search store is shared, so a local store is never opened twice.
         browse=BrowseSources(manifest=manifest, store=store, ocr=delegations),
+        context=_expand_context(
+            settings, store=store, manifest=manifest, ocr=delegations
+        ),
     )

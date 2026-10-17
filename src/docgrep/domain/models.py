@@ -31,6 +31,12 @@ def make_passage_id(source_id: str, chunk_offset: int) -> str:
     return sha256(payload).hexdigest()
 
 
+def is_passage_id(value: str) -> bool:
+    """Whether a string has the shape of ``make_passage_id`` output: 64
+    lower-case hexadecimal digits."""
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
 @dataclass(frozen=True, slots=True)
 class Source:
     """A document and its known source metadata."""

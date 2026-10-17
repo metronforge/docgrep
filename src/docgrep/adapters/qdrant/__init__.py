@@ -9,11 +9,13 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
 from functools import wraps
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from qdrant_client import QdrantClient, models
 
+from docgrep.domain.context import OutlineEntry
 from docgrep.domain.errors import (
     DocgrepError,
     IndexIncomplete,
@@ -79,6 +81,52 @@ def _source_filter(source_id: str) -> models.Filter:
 
 def _point_id(passage_id: str) -> str:
     return str(uuid5(NAMESPACE_URL, passage_id))
+
+
+# The payload fields of a passage without its source metadata.
+_PASSAGE_FIELDS = [
+    "record_type",
+    "passage_id",
+    "source_id",
+    "text",
+    "chunk_offset",
+    "token_count",
+    "page_number",
+    "heading_path",
+]
+# The payload fields that order the passages of a source.
+_OUTLINE_FIELDS = ["passage_id", "chunk_offset", "token_count"]
+
+
+def _passage_of(payload: Mapping[str, Any]) -> Passage:
+    """The passage of a point payload; raises KeyError, TypeError or
+    ValueError when the payload is not a valid passage."""
+    return Passage(
+        passage_id=str(payload["passage_id"]),
+        source_id=str(payload["source_id"]),
+        text=str(payload["text"]),
+        chunk_offset=int(payload["chunk_offset"]),
+        token_count=int(payload["token_count"]),
+        page_number=payload.get("page_number"),
+        heading_path=tuple(payload["heading_path"]),
+    )
+
+
+def _source_of(payload: Mapping[str, Any]) -> Source:
+    """The source stored with a passage; raises like ``_passage_of``."""
+    return Source(
+        source_id=str(payload["source_id"]),
+        path=str(payload["path"]),
+        file_type=FileType(payload["file_type"]),
+        title=payload.get("title"),
+        author=payload.get("author"),
+        year=payload.get("year"),
+        content_hash=payload.get("content_hash"),
+        mtime=payload.get("mtime"),
+        size=payload.get("size"),
+        indexed_at=payload.get("indexed_at"),
+        parser_version=payload.get("parser_version"),
+    )
 
 
 @contextmanager
@@ -720,28 +768,8 @@ class QdrantPassageStore:
         for hit in fused.points:
             try:
                 payload = hit.payload or {}
-                source = Source(
-                    source_id=str(payload["source_id"]),
-                    path=str(payload["path"]),
-                    file_type=FileType(payload["file_type"]),
-                    title=payload.get("title"),
-                    author=payload.get("author"),
-                    year=payload.get("year"),
-                    content_hash=payload.get("content_hash"),
-                    mtime=payload.get("mtime"),
-                    size=payload.get("size"),
-                    indexed_at=payload.get("indexed_at"),
-                    parser_version=payload.get("parser_version"),
-                )
-                passage = Passage(
-                    passage_id=str(payload["passage_id"]),
-                    source_id=source.source_id,
-                    text=str(payload["text"]),
-                    chunk_offset=int(payload["chunk_offset"]),
-                    token_count=int(payload["token_count"]),
-                    page_number=payload.get("page_number"),
-                    heading_path=tuple(payload["heading_path"]),
-                )
+                source = _source_of(payload)
+                passage = _passage_of(payload)
                 dense_score = _cosine(
                     query_vector, query_norm, _stored_dense(hit.vector)
                 )
@@ -768,3 +796,93 @@ class QdrantPassageStore:
             replace(candidate, stage1_rank=rank)
             for rank, (_, candidate) in enumerate(scored)
         )
+
+    def _published_points(
+        self, passage_ids: Collection[str], fields: list[str] | bool
+    ) -> list[models.Record]:
+        """The passage points with these ids in the published collection."""
+        if not passage_ids or self._active_collection() is None:
+            return []
+        records = self._client.retrieve(
+            self._alias,
+            [_point_id(passage_id) for passage_id in passage_ids],
+            with_payload=fields,
+            with_vectors=False,
+        )
+        return [
+            record
+            for record in records
+            if record.payload and record.payload.get("record_type") == "passage"
+        ]
+
+    @_domain_errors
+    def fetch_passages(
+        self, passage_ids: Sequence[str]
+    ) -> tuple[tuple[Passage, Source] | None, ...]:
+        """Published passages with their stored source, in input order, in one
+        retrieve; None for an id without a valid passage."""
+        found: dict[str, tuple[Passage, Source]] = {}
+        for record in self._published_points(set(passage_ids), True):
+            payload = record.payload or {}
+            try:
+                passage = _passage_of(payload)
+                found[passage.passage_id] = (passage, _source_of(payload))
+            except (KeyError, TypeError, ValueError) as error:
+                _LOG.warning(
+                    "invalid_passage_payload",
+                    extra={"point_id": str(record.id), "reason": str(error)},
+                )
+        return tuple(found.get(passage_id) for passage_id in passage_ids)
+
+    @_domain_errors
+    def source_outline(self, source_id: str) -> tuple[OutlineEntry, ...]:
+        """The published passages of a source by chunk offset, read with the
+        ``source_id`` filter and only the fields that order them."""
+        if self._active_collection() is None:
+            return ()
+        entries: list[OutlineEntry] = []
+        offset: models.ExtendedPointId | None = None
+        while True:
+            points, offset = self._client.scroll(
+                self._alias,
+                scroll_filter=_source_filter(source_id),
+                limit=1000,
+                offset=offset,
+                with_payload=_OUTLINE_FIELDS,
+                with_vectors=False,
+            )
+            for point in points:
+                payload = point.payload or {}
+                try:
+                    entries.append(
+                        OutlineEntry(
+                            str(payload["passage_id"]),
+                            int(payload["chunk_offset"]),
+                            int(payload["token_count"]),
+                        )
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    _LOG.warning(
+                        "invalid_passage_payload",
+                        extra={"point_id": str(point.id), "reason": str(error)},
+                    )
+            if offset is None:
+                break
+        entries.sort(key=lambda entry: (entry.chunk_offset, entry.passage_id))
+        return tuple(entries)
+
+    @_domain_errors
+    def passage_texts(self, passage_ids: Collection[str]) -> Mapping[str, Passage]:
+        """Published passages by id, in one retrieve without source metadata."""
+        found: dict[str, Passage] = {}
+        for record in self._published_points(set(passage_ids), _PASSAGE_FIELDS):
+            try:
+                passage = _passage_of(record.payload or {})
+            except (KeyError, TypeError, ValueError) as error:
+                _LOG.warning(
+                    "invalid_passage_payload",
+                    extra={"point_id": str(record.id), "reason": str(error)},
+                )
+                continue
+            found[passage.passage_id] = passage
+        return found

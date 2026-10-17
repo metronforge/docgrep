@@ -53,7 +53,7 @@ class _Scope:
 
 
 @dataclass(slots=True)
-class _Sanitizer:
+class RequestSanitizer:
     """Sanitize source metadata for one request (ADR-0021).
 
     The OCR registry is read once, on first use; the manifest is read at
@@ -247,7 +247,7 @@ class FindPassages:
         applied_filters: Mapping[str, list[str] | int] = (
             source_filter.applied() if source_filter is not None else {}
         )
-        sanitizer = _Sanitizer(self.now().year, self.ocr, self.manifest)
+        sanitizer = RequestSanitizer(self.now().year, self.ocr, self.manifest)
         scope = (
             self._scope(source_filter, sanitizer)
             if source_filter is not None and applied_filters
@@ -394,7 +394,9 @@ class FindPassages:
             collapsed_duplicates=removed,
         )
 
-    def _scope(self, source_filter: SourceFilter, sanitizer: _Sanitizer) -> _Scope:
+    def _scope(
+        self, source_filter: SourceFilter, sanitizer: RequestSanitizer
+    ) -> _Scope:
         """Resolve the filter against the sanitized committed indexed sources.
 
         Raises ``IndexIncomplete`` when the manifest cannot be read, the same
