@@ -137,7 +137,11 @@ class InMemoryPassageStore:
         sparse_vector: Mapping[int, float],
         top_k: int,
         source_ids: Collection[str] | None = None,
+        *,
+        pool: int | None = None,
     ) -> tuple[RetrievalCandidate, ...]:
+        """One combined score; ``pool`` replaces ``top_k`` as the size of the
+        result, as it replaces the cut of the fused list in Qdrant."""
         scored: list[tuple[float, RetrievalCandidate]] = []
         for passage, source, stored_dense, stored_sparse in self._items.values():
             if source_ids is not None and source.source_id not in source_ids:
@@ -162,7 +166,7 @@ class InMemoryPassageStore:
                 pair[1].passage.passage_id,
             )
         )
-        return tuple(candidate for _, candidate in scored[:top_k])
+        return tuple(candidate for _, candidate in scored[: pool or top_k])
 
     def probe_channels(
         self,

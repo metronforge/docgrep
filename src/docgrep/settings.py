@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     chunk_overlap: int = Field(default=64, ge=0)
     upsert_batch_size: int = Field(default=256, gt=0)
     top_k: int = Field(default=100, gt=0)
+    # Fused first-stage candidates the reranker scores; each channel still
+    # keeps top_k, so at most 2 * top_k. Unset: top_k (ADR-0025).
+    rerank_pool: int | None = Field(default=None, gt=0)
     top_n: int = Field(default=10, gt=0)
     top_n_max: int = Field(default=50, gt=0)
     max_query_len: int = Field(default=1000, gt=0)
@@ -95,6 +98,11 @@ class Settings(BaseSettings):
     _corpus_roots: CorpusRoots | None = PrivateAttr(default=None)
 
     @property
+    def effective_rerank_pool(self) -> int:
+        """The rerank pool in use: the setting, or top_k when unset."""
+        return self.top_k if self.rerank_pool is None else self.rerank_pool
+
+    @property
     def chosen_corpus_roots(self) -> CorpusRoots | None:
         return self._corpus_roots
 
@@ -130,6 +138,8 @@ class Settings(BaseSettings):
             raise ValueError("top_n must not exceed top_n_max")
         if self.top_n > self.top_k:
             raise ValueError("top_n must not exceed top_k")
+        if self.rerank_pool is not None and self.rerank_pool > 2 * self.top_k:
+            raise ValueError("rerank_pool must not exceed 2 * top_k")
         if self.context_window_tokens > self.context_max_window_tokens:
             raise ValueError(
                 "context_window_tokens must not exceed context_max_window_tokens"
