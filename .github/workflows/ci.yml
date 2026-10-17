@@ -26,6 +26,23 @@ jobs:
           done
           echo "Qdrant did not become ready" >&2
           exit 1
-      - run: scripts/check.sh
+      - name: Check
+        shell: bash
         env:
           DOCGREP_TEST_QDRANT_URL: http://localhost:6333
+          PYTEST_ADDOPTS: "--junitxml=reports/junit.xml -rfE --durations=20"
+        run: |
+          mkdir -p reports
+          scripts/check.sh 2>&1 | tee reports/check.log
+      # Failing tests become check-run annotations, readable through the REST
+      # API without the job log (#34).
+      - name: Annotate failing tests
+        if: failure()
+        run: python3 scripts/ci_annotate_failures.py reports/junit.xml
+      - name: Keep the test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-reports-${{ github.event_name }}-${{ github.run_attempt }}
+          path: reports/
+          retention-days: 14
