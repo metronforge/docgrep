@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v1.19.0 (2026-10-17)
+
+### Documentation
+
+- Describe corpus roots
+  ([`b9a4431`](https://github.com/metronforge/docgrep/commit/b9a4431c32ba82505fd09f14c140a40a048eefc8))
+
+### Features
+
+- **adapters**: Resolve stored paths through the corpus roots
+  ([`46fc750`](https://github.com/metronforge/docgrep/commit/46fc750ca06e5ade13075229e1850d63f8fb7796))
+
+- **api**: Roots commands, root parameters, root filter and per-root status
+  ([`b8bf2e0`](https://github.com/metronforge/docgrep/commit/b8bf2e0219c14aca0e67772aafed5ba56f99c752))
+
+- **domain**: Model corpus roots and their stored identity
+  ([`3125b88`](https://github.com/metronforge/docgrep/commit/3125b889d380e981f0e4b887e7ccba20dc6153dd))
+
+- **settings**: Store several corpus roots in a roots file
+  ([`2253527`](https://github.com/metronforge/docgrep/commit/225352745fbe129f9a7c3d9fb2240b0dcc33ce28))
+
+- **usecases**: Index, update and report across roots
+  ([`6858b6e`](https://github.com/metronforge/docgrep/commit/6858b6e3a8537f1cb4d493a16526cef33e3c19a8))
+
+
 ## v1.18.0 (2026-10-17)
 
 ### Documentation
