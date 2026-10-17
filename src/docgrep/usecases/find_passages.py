@@ -95,6 +95,37 @@ class RequestSanitizer:
         ).source
 
 
+@dataclass(frozen=True, slots=True)
+class Diagnosis:
+    """The whole ranking of one query, for evaluation (ADR-0024).
+
+    ``passages`` is the public order after rerank and duplicate collapse,
+    over every first-stage candidate, not cut to ``top_n``; the sources are
+    not sanitized. ``stage1_ranks`` maps the passage id of every valid
+    candidate, collapsed duplicates included, to its zero-based first-stage
+    position. ``hint`` says why nothing was retrieved, when it is known.
+    """
+
+    passages: tuple[RankedPassage, ...]
+    stage1_ranks: Mapping[str, int]
+    top_k: int
+    rerank_skipped: bool = False
+    rerank_skip_reason: str | None = None
+    hint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Ranking:
+    """The ordered candidates of one query, before the result is cut."""
+
+    ordered: tuple[RankedPassage, ...]
+    stage1_ranks: Mapping[str, int]
+    valid: int
+    removed: int
+    rerank_skipped: bool
+    rerank_skip_reason: str | None
+
+
 def _committed(manifest: CommittedSourceReader) -> tuple[ManifestSourceRecord, ...]:
     """The committed sources; raises ``IndexIncomplete`` when the manifest
     cannot be read, the same category as a search without a published
@@ -205,13 +236,7 @@ class FindPassages:
             if collapse_duplicates is None
             else collapse_duplicates
         )
-        if not query.strip():
-            raise ValidationError("query is required")
-        if len(query) > self.max_query_len:
-            raise ValidationError(
-                f"query must be at most {self.max_query_len} characters",
-                details={"max_query_len": self.max_query_len},
-            )
+        self._check_query(query)
         limit = self.default_top_n if top_n is None else top_n
         if not 1 <= limit <= self.top_n_max:
             raise ValidationError(
@@ -219,30 +244,7 @@ class FindPassages:
                 details={"minimum": 1, "maximum": self.top_n_max},
             )
 
-        metadata = self.retriever.read_completion_metadata()
-        if metadata is None or not isinstance(metadata.get("embedding_model"), str):
-            raise IndexIncomplete("Index has no valid completion metadata")
-        indexed_model = metadata["embedding_model"]
-        if indexed_model != self.embedder.model_name:
-            raise ConfigDrift(
-                "Index embedding model differs from runtime model; rebuild the index",
-                details={
-                    "indexed_model": indexed_model,
-                    "configured_model": self.embedder.model_name,
-                },
-            )
-        indexed_dimension = metadata.get("embedding_dimension")
-        if (
-            indexed_dimension is not None
-            and indexed_dimension != self.embedder.dimension
-        ):
-            raise ConfigDrift(
-                "Index embedding dimension differs from runtime; rebuild the index",
-                details={
-                    "indexed_dimension": indexed_dimension,
-                    "configured_dimension": self.embedder.dimension,
-                },
-            )
+        self._check_index()
         applied_config: tuple[tuple[str, str | int | float | bool], ...] = (
             ("embedding_model", self.embedder.model_name),
             ("max_query_len", self.max_query_len),
@@ -308,6 +310,113 @@ class FindPassages:
             # Nothing can match, so no model and no retrieval is needed.
             return result((), 0, hint=NO_MATCHING_SOURCES_HINT)
 
+        ranking = self._rank(query, self._embed(query), scope, collapsing=collapsing)
+        if ranking is None:
+            return result((), 0)
+        # Only the returned passages are sanitized, not every candidate.
+        returned = tuple(
+            replace(item, source=sanitizer.clean(item.source))
+            for item in ranking.ordered[:limit]
+        )
+        return result(
+            returned,
+            ranking.valid,
+            rerank_skipped=ranking.rerank_skipped,
+            rerank_skip_reason=ranking.rerank_skip_reason,
+            collapsed_duplicates=ranking.removed,
+        )
+
+    def diagnose(
+        self,
+        query: str,
+        *,
+        dense_vector: Sequence[float] | None = None,
+        collapse_duplicates: bool | None = None,
+        source_filter: SourceFilter | None = None,
+    ) -> Diagnosis:
+        """Rank one query as ``run`` does and return every candidate.
+
+        The same validation, scope and ranking as ``run``, without the cut
+        to ``top_n`` and without sanitizing sources; nothing is logged per
+        query. ``dense_vector`` is the query embedding when the caller has
+        embedded several queries at once; otherwise the query is embedded
+        here.
+        """
+        collapsing = (
+            self.collapse_duplicates
+            if collapse_duplicates is None
+            else collapse_duplicates
+        )
+        self._check_query(query)
+        self._check_index()
+        scope = None
+        if source_filter is not None and source_filter.applied():
+            sanitizer = RequestSanitizer(self.now().year, self.ocr, self.manifest)
+            roots = CorpusRoots() if self.roots is None else self.roots.roots()
+            scope = self._scope(source_filter, sanitizer, roots)
+        if self.retriever.count_passages() == 0:
+            return Diagnosis((), {}, self.top_k, hint="The index is empty")
+        if scope is not None and scope.matched == 0:
+            return Diagnosis((), {}, self.top_k, hint=NO_MATCHING_SOURCES_HINT)
+        if dense_vector is None:
+            dense_vector = self._embed(query)
+        elif len(dense_vector) != self.embedder.dimension:
+            raise ModelUnavailable(
+                "Query embedding failed",
+                details={
+                    "model": self.embedder.model_name,
+                    "reason": "embedder returned an invalid query vector",
+                },
+            )
+        ranking = self._rank(query, dense_vector, scope, collapsing=collapsing)
+        if ranking is None:
+            return Diagnosis((), {}, self.top_k)
+        return Diagnosis(
+            ranking.ordered,
+            ranking.stage1_ranks,
+            self.top_k,
+            ranking.rerank_skipped,
+            ranking.rerank_skip_reason,
+        )
+
+    def _check_query(self, query: str) -> None:
+        if not query.strip():
+            raise ValidationError("query is required")
+        if len(query) > self.max_query_len:
+            raise ValidationError(
+                f"query must be at most {self.max_query_len} characters",
+                details={"max_query_len": self.max_query_len},
+            )
+
+    def _check_index(self) -> None:
+        """Refuse an index without completion metadata or built with another
+        embedding model or dimension."""
+        metadata = self.retriever.read_completion_metadata()
+        if metadata is None or not isinstance(metadata.get("embedding_model"), str):
+            raise IndexIncomplete("Index has no valid completion metadata")
+        indexed_model = metadata["embedding_model"]
+        if indexed_model != self.embedder.model_name:
+            raise ConfigDrift(
+                "Index embedding model differs from runtime model; rebuild the index",
+                details={
+                    "indexed_model": indexed_model,
+                    "configured_model": self.embedder.model_name,
+                },
+            )
+        indexed_dimension = metadata.get("embedding_dimension")
+        if (
+            indexed_dimension is not None
+            and indexed_dimension != self.embedder.dimension
+        ):
+            raise ConfigDrift(
+                "Index embedding dimension differs from runtime; rebuild the index",
+                details={
+                    "indexed_dimension": indexed_dimension,
+                    "configured_dimension": self.embedder.dimension,
+                },
+            )
+
+    def _embed(self, query: str) -> tuple[float, ...]:
         try:
             vectors = self.embedder.embed((query,))
             if len(vectors) != 1 or len(vectors[0]) != self.embedder.dimension:
@@ -322,15 +431,27 @@ class FindPassages:
                 "Query embedding failed",
                 details={"model": self.embedder.model_name, "reason": str(error)},
             ) from error
+        return vectors[0]
+
+    def _rank(
+        self,
+        query: str,
+        dense_vector: Sequence[float],
+        scope: _Scope | None,
+        *,
+        collapsing: bool,
+    ) -> _Ranking | None:
+        """Recall, rerank and order the candidates of one query; None when
+        no valid candidate was found."""
         sparse = self.sparse_encoder.encode(query)
         if scope is None or scope.source_ids is None:
-            candidates = self.retriever.retrieve(vectors[0], sparse, self.top_k)
+            candidates = self.retriever.retrieve(dense_vector, sparse, self.top_k)
         else:
             candidates = self.retriever.retrieve(
-                vectors[0], sparse, self.top_k, source_ids=scope.source_ids
+                dense_vector, sparse, self.top_k, source_ids=scope.source_ids
             )
         if not candidates:
-            return result((), 0)
+            return None
 
         valid: list[RetrievalCandidate] = []
         for candidate in candidates:
@@ -343,7 +464,7 @@ class FindPassages:
                     extra={"passage_id": candidate.passage.passage_id},
                 )
         if not valid:
-            return result((), 0)
+            return None
 
         rerank_skipped = False
         rerank_skip_reason: str | None = None
@@ -395,17 +516,19 @@ class FindPassages:
             # Grouping follows the final order, so the cut below keeps the
             # best member of each group and refills the slots of the others.
             ordered, removed = collapse(ordered)
-        # Only the returned passages are sanitized, not every candidate.
-        returned = tuple(
-            replace(item, source=sanitizer.clean(item.source))
-            for item in ordered[:limit]
-        )
-        return result(
-            returned,
+        # A retriever that gives no position lists its candidates in
+        # first-stage order, so the list position stands in.
+        stage1_ranks: dict[str, int] = {}
+        for position, item in enumerate(valid):
+            rank = position if item.stage1_rank is None else item.stage1_rank
+            stage1_ranks.setdefault(item.passage.passage_id, rank)
+        return _Ranking(
+            ordered,
+            stage1_ranks,
             len(valid),
-            rerank_skipped=rerank_skipped,
-            rerank_skip_reason=rerank_skip_reason,
-            collapsed_duplicates=removed,
+            removed,
+            rerank_skipped,
+            rerank_skip_reason,
         )
 
     def _scope(
