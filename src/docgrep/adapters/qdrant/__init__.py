@@ -23,6 +23,7 @@ from docgrep.domain.errors import (
     StoreUnavailable,
     ValidationError,
 )
+from docgrep.domain.evaluation import MAX_PROBE_DEPTH, ChannelLists, ProbeHit
 from docgrep.domain.models import (
     FileType,
     Passage,
@@ -94,6 +95,9 @@ _PASSAGE_FIELDS = [
     "page_number",
     "heading_path",
 ]
+# The payload fields of a probe hit, without and with its text.
+_PROBE_FIELDS = ["passage_id", "source_id"]
+_PROBE_TEXT_FIELDS = [*_PROBE_FIELDS, "text"]
 # The payload fields that order the passages of a source.
 _OUTLINE_FIELDS = ["passage_id", "chunk_offset", "token_count"]
 
@@ -796,6 +800,126 @@ class QdrantPassageStore:
             replace(candidate, stage1_rank=rank)
             for rank, (_, candidate) in enumerate(scored)
         )
+
+    @_domain_errors
+    def probe_channels(
+        self,
+        dense_vector: Sequence[float],
+        sparse_vector: Mapping[int, float],
+        depth: int,
+        *,
+        source_ids: Collection[str] | None = None,
+        with_text: bool = False,
+    ) -> ChannelLists:
+        """The dense, sparse and fused lists of a query in one batch request.
+
+        The fused list is the query ``retrieve`` sends, with ``depth`` in
+        place of ``top_k`` in every stage. Only the passage id, the source id
+        and, ``with_text``, the text are read; no vectors.
+        """
+        if not 0 < depth <= MAX_PROBE_DEPTH:
+            raise ValidationError(
+                f"depth must be between 1 and {MAX_PROBE_DEPTH}",
+                details={"minimum": 1, "maximum": MAX_PROBE_DEPTH},
+            )
+        collection = self._active_collection()
+        if collection is None:
+            return ChannelLists((), (), ())
+        info = self._client.get_collection(collection)
+        sparse_channel = "sparse" in (info.config.params.sparse_vectors or {})
+        if source_ids is not None and not source_ids:
+            return ChannelLists((), () if sparse_channel else None, ())
+        if not sparse_channel:
+            # Without a sparse channel the fusion has the dense list alone.
+            sparse_vector = {}
+        allowed = _allowed_passages_filter(source_ids)
+        fields = _PROBE_TEXT_FIELDS if with_text else _PROBE_FIELDS
+        dense = models.Prefetch(
+            query=list(dense_vector), using="dense", limit=depth, filter=allowed
+        )
+        prefetch = [dense]
+        sparse: models.Prefetch | None = None
+        if sparse_vector:
+            indices = sorted(sparse_vector)
+            sparse = models.Prefetch(
+                query=models.SparseVector(
+                    indices=indices,
+                    values=[sparse_vector[index] for index in indices],
+                ),
+                using="sparse",
+                limit=depth,
+                filter=allowed,
+            )
+            prefetch.append(sparse)
+
+        def request(**query: Any) -> models.QueryRequest:
+            return models.QueryRequest(
+                **query,
+                filter=allowed,
+                limit=depth,
+                with_payload=fields,
+                with_vector=False,
+            )
+
+        requests = [
+            request(query=dense.query, using="dense"),
+            request(
+                prefetch=prefetch,
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+            ),
+        ]
+        if sparse is not None:
+            requests.append(request(query=sparse.query, using="sparse"))
+        responses = self._client.query_batch_points(self._alias, requests=requests)
+        dense_hits, fused_hits, *sparse_hits = (
+            self._probe_hits(response.points, with_text) for response in responses
+        )
+        # Fused ties break as in ``retrieve``: by dense similarity, then by
+        # passage id. A hit missing from the dense list is less similar than
+        # every hit in it.
+        similarity = {hit.passage_id: score for score, hit in dense_hits}
+        fused_hits.sort(
+            key=lambda item: (
+                -item[0],
+                -similarity.get(item[1].passage_id, -math.inf),
+                item[1].passage_id,
+            )
+        )
+        sparse_list: tuple[ProbeHit, ...] | None = None
+        if sparse_hits:
+            sparse_list = tuple(hit for _, hit in sparse_hits[0])
+        elif sparse_channel:
+            sparse_list = ()
+        return ChannelLists(
+            tuple(hit for _, hit in dense_hits),
+            sparse_list,
+            tuple(hit for _, hit in fused_hits),
+        )
+
+    @staticmethod
+    def _probe_hits(
+        points: Sequence[models.ScoredPoint], with_text: bool
+    ) -> list[tuple[float, ProbeHit]]:
+        """The hits of one probe list with their scores, best first; ties keep
+        the store's order, which is the order the fusion ranks them in."""
+        scored: list[tuple[float, ProbeHit]] = []
+        for point in points:
+            payload = point.payload or {}
+            try:
+                hit = ProbeHit(
+                    str(payload["passage_id"]),
+                    str(payload["source_id"]),
+                    str(payload["text"]) if with_text else None,
+                )
+            except KeyError as error:
+                _LOG.warning(
+                    "invalid_passage_payload",
+                    extra={"point_id": str(point.id), "reason": str(error)},
+                )
+                continue
+            scored.append((point.score, hit))
+        scored.sort(key=lambda item: -item[0])
+        return scored
 
     def _published_points(
         self, passage_ids: Collection[str], fields: list[str] | bool

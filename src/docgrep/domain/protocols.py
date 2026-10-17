@@ -5,6 +5,7 @@ from contextlib import AbstractContextManager
 from typing import Literal, Protocol
 
 from docgrep.domain.context import OutlineEntry
+from docgrep.domain.evaluation import ChannelLists
 from docgrep.domain.models import (
     FileType,
     ManifestRunRecord,
@@ -352,6 +353,29 @@ class PassageRetriever(Protocol):
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None: ...
 
     def count_passages(self) -> int: ...
+
+
+class ChannelProbe(Protocol):
+    """Read the first-stage channels of a query apart, for evaluation only.
+
+    The same passages are eligible as for ``PassageRetriever.retrieve``:
+    passage records only, and with ``source_ids`` only those sources (an
+    empty allow-list returns nothing). Each list holds at most ``depth``
+    hits, best first; the fused list breaks ties as ``retrieve`` does, so
+    at depth ``top_k`` it is the first stage. The text of each hit is
+    read only ``with_text``. Raises ``StoreUnavailable`` when the store
+    cannot be read; with no published index every list is empty.
+    """
+
+    def probe_channels(
+        self,
+        dense_vector: Sequence[float],
+        sparse_vector: Mapping[int, float],
+        depth: int,
+        *,
+        source_ids: Collection[str] | None = None,
+        with_text: bool = False,
+    ) -> ChannelLists: ...
 
 
 class StatusStore(PassageRetriever, Protocol):
