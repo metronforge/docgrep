@@ -519,6 +519,14 @@ Filters (`source_ids`, `authors`, `year_from`, `year_to`, `file_types`, `path_pr
 - Paths are matched as stored and shown in results: relative to the corpus root with `/` separators. A prefix is a case-sensitive string prefix (`Books/Math/`); a glob follows the [include and exclude pattern](#include-and-exclude-patterns) rules.
 - `has_metadata` keeps sources with a year (`with_year`), an author (`with_author`), both (`with_both`) or neither (`without_any`); the default `any` keeps all.
 
+Titles, authors and years are shown and matched after junk values are dropped: impossible years (such as `101`, or `1601`, the Windows epoch), placeholder authors and titles (`Unknown`, `python-docx`, `book title`), bare numbers and titles that only repeat the file name. A dropped value is shown as null; nothing is guessed. An OCR output takes a missing or dropped value from its original. The stored values do not change. To judge the rules on your library, each entry of the JSON body carries a `metadata_dropped` object when something was dropped or inherited, with the raw value and a reason, and `--dropped-metadata` (`"metadata_dropped": true`) lists only those sources:
+
+```sh
+uv run docgrep sources --dropped-metadata --json
+```
+
+The rules are recorded in [ADR-0021](docs/adr/0021-sanitize-source-metadata-on-read.md).
+
 The response holds the page (`sources`), `total_hits`, `page`, `page_size`, `aggregates` (`total_sources` and `by_file_type`, over every match) and the canonical `applied_filters`. Pages start at 1 and hold 1 to 500 sources (default 50); `sort_by` is `path` (default), `indexed_at`, `passage_count`, `year` or `title`, with ties broken by source id and missing values last. Passage counts are counted in the index at query time for the page only; sorting by `passage_count` counts every match and is the slow case. A count that fails gives that source `passage_count: null` and `degraded: true`. Unknown fields are rejected. The design is recorded in [ADR-0020](docs/adr/0020-shared-source-filter-and-browse.md).
 
 ## HTTP API
