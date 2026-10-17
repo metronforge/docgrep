@@ -67,6 +67,31 @@ class CollectionView:
 
 
 @dataclass(frozen=True, slots=True)
+class ReencodeView:
+    """The latest sparse re-encode while it runs or after it stopped early;
+    ``passages_done`` of ``passages_total`` are written."""
+
+    run_id: str
+    state: str
+    passages_done: int
+    passages_total: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SparseView:
+    """The sparse weighting the index records (ADR-0025); ``encoder`` is the
+    recorded name, ``tf-v1`` when none is recorded. ``hint`` says what to run
+    to change it, when there is something to do."""
+
+    encoder: str
+    k1: float | None = None
+    b: float | None = None
+    avgdl: float | None = None
+    reencode: ReencodeView | None = None
+    hint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DriftView:
     field: str
     indexed: str | int | float
@@ -141,6 +166,8 @@ class StatusReport:
     sources: SourcesView | None = None
     # None when the roots are not known to the report (ADR-0023).
     roots: tuple[RootStatusView, ...] | None = None
+    # None without a completed index (ADR-0025).
+    sparse: SparseView | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """The JSON form; its key names are stable and documented in the README."""
@@ -199,8 +226,28 @@ class StatusReport:
             ],
             "warnings": [{"code": w.code, "message": w.message} for w in self.warnings],
             "sources": None if self.sources is None else _sources(self.sources),
+            "sparse": None if self.sparse is None else _sparse(self.sparse),
             **({} if self.roots is None else {"roots": _roots(self.roots)}),
         }
+
+
+def _sparse(view: SparseView) -> dict[str, Any]:
+    reencode = view.reencode
+    return {
+        "encoder": view.encoder,
+        "bm25_k1": view.k1,
+        "bm25_b": view.b,
+        "bm25_avgdl": view.avgdl,
+        "reencode": None
+        if reencode is None
+        else {
+            "run_id": reencode.run_id,
+            "state": reencode.state,
+            "passages_done": reencode.passages_done,
+            "passages_total": reencode.passages_total,
+        },
+        "hint": view.hint,
+    }
 
 
 def _roots(roots: tuple[RootStatusView, ...]) -> list[dict[str, Any]]:

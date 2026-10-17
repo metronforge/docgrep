@@ -31,6 +31,7 @@ from docgrep.api.container import (
     open_context,
     open_evaluation,
     open_ocr_registry_view,
+    open_reencode,
 )
 from docgrep.api.http import (
     BrowseSourcesRequest,
@@ -69,6 +70,7 @@ from docgrep.domain.evaluation import (
 )
 from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.sources import HAS_METADATA_VALUES, SORT_KEYS, SourceFilter
+from docgrep.domain.sparse import DEFAULT_B, DEFAULT_K1, TF_V1, SparseWeighting
 from docgrep.settings import Settings
 from docgrep.usecases.cancel_index import CancelIndex, CancelResult
 from docgrep.usecases.discover_scans import DiscoverScans
@@ -82,6 +84,11 @@ from docgrep.usecases.process_scans import (
     OcrRequest,
     OcrSummary,
     ProcessScans,
+)
+from docgrep.usecases.reencode_sparse import (
+    ReencodePlan,
+    ReencodeSparse,
+    ReencodeSummary,
 )
 from docgrep.usecases.update_index import UpdatePlan, UpdateSummary
 
@@ -271,6 +278,13 @@ def _parser() -> argparse.ArgumentParser:
         help="First-stage candidates (default DOCGREP_TOP_K)",
     )
     evaluate.add_argument(
+        "--rerank-pool",
+        dest="rerank_pool",
+        type=int,
+        help="Fused candidates the reranker scores, at most twice top_k "
+        "(default DOCGREP_RERANK_POOL, else top_k)",
+    )
+    evaluate.add_argument(
         "--depth",
         type=int,
         default=DEFAULT_PROBE_DEPTH,
@@ -282,6 +296,31 @@ def _parser() -> argparse.ArgumentParser:
         dest="control",
         action="store_false",
         help="Skip the search restricted to the expected sources",
+    )
+    reencode = commands.add_parser(
+        "reencode-sparse",
+        help="Re-encode the stored sparse vectors with BM25 weights "
+        "(no model, CPU only)",
+        description="Computes every passage's sparse vector again from its "
+        "stored text with BM25 weights; dense vectors and payloads stay as they "
+        "are. Without --yes only the plan is shown. A cancelled or interrupted "
+        "run continues from its checkpoint when run again; search keeps working "
+        "meanwhile.",
+    )
+    reencode.add_argument(
+        "--yes", action="store_true", help="Re-encode; without it, only show the plan"
+    )
+    reencode.add_argument(
+        "--k1",
+        type=float,
+        default=DEFAULT_K1,
+        help=f"BM25 term-frequency saturation (default {DEFAULT_K1})",
+    )
+    reencode.add_argument(
+        "--b",
+        type=float,
+        default=DEFAULT_B,
+        help=f"BM25 length normalization, 0 to 1 (default {DEFAULT_B})",
     )
     commands.add_parser(
         "cancel", help="Ask a running index build to stop after its current batch"
@@ -680,6 +719,13 @@ def _format_cancel(result: CancelResult) -> tuple[str, int]:
             "`docgrep ocr` again to continue.\n",
             0,
         )
+    if result.outcome == "interrupted" and result.kind == "reencode_sparse":
+        return (
+            f"Sparse re-encode run {result.run_id} was interrupted: its process "
+            "is gone and nothing holds the index lock. Run `docgrep "
+            "reencode-sparse --yes` again to continue from its checkpoint.\n",
+            0,
+        )
     if result.outcome == "interrupted" and result.kind == "update":
         return (
             f"Update run {result.run_id} was interrupted: its process is gone and "
@@ -695,6 +741,119 @@ def _format_cancel(result: CancelResult) -> tuple[str, int]:
             0,
         )
     return "Nothing is running.\n", 1
+
+
+def _weighting(encoder: str, k1: object, b: object, avgdl: object) -> str:
+    """A sparse weighting in words: ``tf-v1``, or ``bm25-v2`` with its
+    parameters."""
+    if encoder == TF_V1 or k1 is None:
+        return encoder
+    shown = f"{avgdl:.2f}" if isinstance(avgdl, float) else str(avgdl)
+    return f"{encoder} (k1 {k1}, b {b}, avgdl {shown})"
+
+
+def _sparse_status_lines(sparse: dict[str, Any] | None) -> list[str]:
+    if sparse is None:
+        return []
+    reencode = sparse["reencode"]
+    if reencode is not None and reencode["state"] == "running":
+        total = reencode["passages_total"]
+        line = (
+            f"Sparse encoder: reencoding ({reencode['passages_done']} of "
+            f"{total if total is not None else '?'})"
+        )
+    else:
+        line = "Sparse encoder: " + _weighting(
+            sparse["encoder"], sparse["bm25_k1"], sparse["bm25_b"], sparse["bm25_avgdl"]
+        )
+        if reencode is not None:
+            line += (
+                f"; re-encode run {reencode['run_id']} {reencode['state']} at "
+                f"{reencode['passages_done']} of {reencode['passages_total']}"
+            )
+    lines = [line]
+    if sparse["hint"]:
+        lines.append(f"  hint: {sparse['hint']}")
+    return lines
+
+
+def _plan_weighting(weighting: SparseWeighting) -> str:
+    return _weighting(weighting.encoder, weighting.k1, weighting.b, weighting.avgdl)
+
+
+def _format_reencode_plan(plan: ReencodePlan) -> str:
+    if plan.noop:
+        return (
+            f"The index already has {_plan_weighting(plan.current)} for its "
+            f"{plan.passages} passages; nothing to re-encode.\n"
+        )
+    lines = [
+        f"Sparse re-encode of {plan.passages} passages",
+        f"  current: {_plan_weighting(plan.current)}",
+        f"  new:     {_plan_weighting(plan.target)}",
+    ]
+    if plan.resumes is not None:
+        lines.append(
+            f"  continues run {plan.resumes} from {plan.done} of {plan.passages} "
+            "passages, with the average length it started with"
+        )
+    lines.append(
+        "  No model is loaded (CPU only); dense vectors and payloads stay as "
+        "they are, and search keeps working on mixed vectors while it runs."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _format_reencode(summary: ReencodeSummary) -> str:
+    if summary.cancelled:
+        return (
+            f"Sparse re-encode run {summary.run_id} cancelled after "
+            f"{summary.written} passages in {summary.elapsed_seconds:.2f}s. "
+            "Search keeps working; continue with `docgrep reencode-sparse --yes`.\n"
+        )
+    return (
+        f"Sparse re-encode run {summary.run_id}: {summary.written} passages "
+        f"written in {summary.elapsed_seconds:.2f}s; the index now has "
+        f"{_plan_weighting(summary.plan.target)}.\n"
+    )
+
+
+def _reencode(
+    args: argparse.Namespace,
+    settings: Settings,
+    factory: Callable[[Settings], AbstractContextManager[ReencodeSparse]],
+    register_signal: Register,
+) -> int:
+    """Run ``docgrep reencode-sparse``: 0 when planned, done or nothing to do,
+    2 for invalid parameters or when cancelled; refusals raise and exit 1."""
+    with factory(settings) as reencode:
+        try:
+            if not args.yes:
+                plan = reencode.plan(k1=args.k1, b=args.b)
+                _emit(_format_reencode_plan(plan))
+                if not plan.noop:
+                    _emit("Run again with --yes to re-encode.\n")
+                return 0
+            with graceful_cancel(
+                reencode.request_cancel,
+                _warn_user,
+                register=register_signal,
+                operation="sparse re-encode",
+                notice="Cancel requested: the sparse re-encode stops after the "
+                "current page. Press Ctrl-C again to stop immediately.",
+            ):
+                summary = reencode.run(
+                    k1=args.k1,
+                    b=args.b,
+                    on_plan=lambda plan: _emit(_format_reencode_plan(plan)),
+                )
+        except ValidationError as error:
+            sys.stderr.write(f"usage: {_describe(error)}\n")
+            return 2
+    if summary.plan.noop:
+        return 0
+    _emit(_format_reencode(summary))
+    return 2 if summary.cancelled else 0
 
 
 def _duration(seconds: float | None) -> str:
@@ -748,6 +907,12 @@ def _format_status(report: dict[str, Any]) -> str:
                 )
             )
         )
+    elif run["kind"] == "reencode_sparse":
+        lines.append(
+            f"Latest run: {run['run_id']} (reencode_sparse) {run['state']}, "
+            f"started {run['started_at']}, finished {run['finished_at'] or '-'}"
+            + (f", resumed from {run['resumed_from']}" if run["resumed_from"] else "")
+        )
     elif run["kind"] == "update":
         totals = run["totals"]
         lines.append(
@@ -773,10 +938,15 @@ def _format_status(report: dict[str, Any]) -> str:
     active = report["active_operation"]
     if active is not None:
         total = active["sources_total"] if active["sources_total"] is not None else "?"
+        done = (
+            f"{active['sources_done']}/{total} passages"
+            if active["kind"] == "reencode_sparse"
+            else f"{active['sources_done']}/{total} sources, "
+            f"{active['passages_written']} passages"
+        )
         lines.append(
             f"Active operation: {active['kind']} (run {active['run_id']}), "
-            f"{active['sources_done']}/{total} sources, "
-            f"{active['passages_written']} passages, elapsed "
+            f"{done}, elapsed "
             f"{_duration(active['elapsed_seconds'])}, ETA "
             f"{_duration(active['eta_seconds'])}"
             + (
@@ -817,6 +987,7 @@ def _format_status(report: dict[str, Any]) -> str:
                 + (f": {entry['reason']}" if entry["reason"] else "")
                 for entry in sources["failed"]
             )
+    lines.extend(_sparse_status_lines(report.get("sparse")))
     lines.extend(root_status_lines(report.get("roots")))
     for entry in report["drift"]:
         lines.append(
@@ -1141,6 +1312,13 @@ def _format_eval(report: dict[str, Any]) -> str:
         f"{'on' if settings['control'] else 'off'}; duplicates "
         f"{'collapsed' if settings['collapse_duplicates'] else 'separate'}"
         + ("" if settings["sparse_channel"] else "; no sparse channel"),
+        f"rerank pool {settings['rerank_pool']}; sparse "
+        + _weighting(
+            settings["sparse_encoder"],
+            settings["bm25_k1"],
+            settings["bm25_b"],
+            settings["bm25_avgdl"],
+        ),
         "",
     ]
     for case in report["cases"]:
@@ -1227,6 +1405,9 @@ def _evaluate(
         if value is not None and not 1 <= value <= MAX_PROBE_DEPTH:
             sys.stderr.write(f"usage: {name} must be between 1 and {MAX_PROBE_DEPTH}\n")
             return 2
+    if args.rerank_pool is not None and args.rerank_pool < 1:
+        sys.stderr.write("usage: --rerank-pool must be at least 1\n")
+        return 2
     try:
         text = Path(args.cases_file).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
@@ -1234,7 +1415,9 @@ def _evaluate(
         return 2
     try:
         cases = parse_cases(text)
-        with factory(settings, top_k=args.top_k) as evaluation:
+        with factory(
+            settings, top_k=args.top_k, rerank_pool=args.rerank_pool
+        ) as evaluation:
             report = evaluation.run(cases, depth=args.depth, control=args.control)
     except ValidationError as error:
         sys.stderr.write(f"{args.cases_file}: {_describe(error)}\n")
@@ -1582,6 +1765,9 @@ def main(
     evaluation_factory: Callable[
         ..., AbstractContextManager[EvaluateRetrieval]
     ] = open_evaluation,
+    reencode_factory: Callable[
+        [Settings], AbstractContextManager[ReencodeSparse]
+    ] = open_reencode,
     register_signal: Register = signal.signal,
 ) -> int:
     """Run one CLI command and return a process exit status.
@@ -1597,7 +1783,7 @@ def main(
         if args.command == "roots":
             return _roots(args, settings)
         selection = RootSelection(roots=CorpusRoots(), origin="none")
-        if args.command != "cancel":
+        if args.command not in ("cancel", "reencode-sparse"):
             selection = select_roots(settings, getattr(args, "root_params", None) or ())
             for warning in selection.warnings:
                 # A server runs until stopped: its warning comes first.
@@ -1679,6 +1865,12 @@ def main(
 
         if args.command == "eval":
             return _evaluate(args, settings, evaluation_factory)
+
+        if args.command == "reencode-sparse":
+            if index_missing(settings):
+                sys.stderr.write("index_incomplete: no index has been built yet\n")
+                return 1
+            return _reencode(args, settings, reencode_factory, register_signal)
 
         if args.command == "cancel":
             text, status = _format_cancel(cancel_factory(settings).run())

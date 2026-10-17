@@ -394,6 +394,13 @@ class EvalSettings:
     collapse_duplicates: bool
     sparse_channel: bool
     control: bool
+    # The fused candidates reranked, and the sparse weighting of the index
+    # with its BM25 parameters (None for tf-v1; ADR-0025).
+    rerank_pool: int | None = None
+    sparse_encoder: str = "tf-v1"
+    bm25_k1: float | None = None
+    bm25_b: float | None = None
+    bm25_avgdl: float | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -401,10 +408,15 @@ class EvalSettings:
             "embedding_model": self.embedding_model,
             "reranker_model": self.reranker_model,
             "top_k": self.top_k,
+            "rerank_pool": self.top_k if self.rerank_pool is None else self.rerank_pool,
             "depth": self.depth,
             "collapse_duplicates": self.collapse_duplicates,
             "sparse_channel": self.sparse_channel,
             "control": self.control,
+            "sparse_encoder": self.sparse_encoder,
+            "bm25_k1": self.bm25_k1,
+            "bm25_b": self.bm25_b,
+            "bm25_avgdl": self.bm25_avgdl,
         }
 
 

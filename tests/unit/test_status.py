@@ -439,5 +439,6 @@ def test_the_json_form_names_every_section() -> None:
         "drift",
         "warnings",
         "sources",
+        "sparse",
     ]
     assert data["drift"] == [{"field": "chunk_size", "indexed": 10, "runtime": 11}]

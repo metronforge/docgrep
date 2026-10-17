@@ -39,7 +39,7 @@ from docgrep.adapters.scans import FileScanProbe
 from docgrep.api.log_config import configure_logging
 from docgrep.api.roots import corpus_roots
 from docgrep.domain.context import ContextResult, OutlineEntry
-from docgrep.domain.errors import IndexIncomplete
+from docgrep.domain.errors import IndexIncomplete, ValidationError
 from docgrep.domain.models import (
     FileType,
     ManifestSourceRecord,
@@ -75,6 +75,7 @@ from docgrep.usecases.expand_context import ExpandContext
 from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
 from docgrep.usecases.process_scans import ProcessScans
+from docgrep.usecases.reencode_sparse import ReencodeSparse
 from docgrep.usecases.update_index import UpdateIndex, UpdatePlan, UpdateSummary
 
 _LOG = logging.getLogger(__name__)
@@ -596,19 +597,31 @@ def _models(
 
 @contextmanager
 def open_evaluation(
-    settings: Settings, *, top_k: int | None = None
+    settings: Settings,
+    *,
+    top_k: int | None = None,
+    rerank_pool: int | None = None,
 ) -> Iterator[EvaluateRetrieval]:
     """Wire the retrieval evaluation (ADR-0024) for a process of its own.
 
     Read-only: no lock is taken, the manifest and the OCR registry are
     opened without migrating them, and the store is only queried. The
-    models are those of search, loaded once; ``top_k`` replaces the
-    configured first-stage size. Raises ``IndexIncomplete`` when no index
-    was ever built, before anything is opened. The store is closed on exit.
+    models are those of search, loaded once; ``top_k`` and ``rerank_pool``
+    replace the configured first-stage size and rerank pool. Raises
+    ``IndexIncomplete`` when no index was ever built, before anything is
+    opened, and ``ValidationError`` for a pool above twice the first-stage
+    size. The store is closed on exit.
     """
     configure_logging(settings.log_level)
     if index_missing(settings):
         raise IndexIncomplete("No index has been built yet")
+    first_stage = settings.top_k if top_k is None else top_k
+    pool = settings.rerank_pool if rerank_pool is None else rerank_pool
+    if pool is not None and pool > 2 * first_stage:
+        raise ValidationError(
+            f"rerank_pool must not exceed 2 * top_k ({2 * first_stage})",
+            details={"rerank_pool": pool, "top_k": first_stage},
+        )
     manifest = SQLiteManifest(settings.data_dir, read_only=True)
     store = (
         QdrantPassageStore(url=settings.qdrant_url, alias=settings.qdrant_alias)
@@ -626,7 +639,8 @@ def open_evaluation(
                 sparse_encoders=SparseEncoderSet(),
                 retriever=store,
                 reranker=reranker,
-                top_k=settings.top_k if top_k is None else top_k,
+                top_k=first_stage,
+                rerank_pool=pool,
                 default_top_n=settings.top_n,
                 top_n_max=settings.top_n_max,
                 max_query_len=settings.max_query_len,
@@ -636,6 +650,36 @@ def open_evaluation(
                 roots=_RootCatalog(settings),
             ),
             probe=store,
+        )
+    finally:
+        store.close()
+
+
+@contextmanager
+def open_reencode(settings: Settings) -> Iterator[ReencodeSparse]:
+    """Wire the sparse re-encode (ADR-0025) for a process of its own.
+
+    It loads no model: only the store, the manifest, the index lock and the
+    sparse tokenizer. Raises ``IndexIncomplete`` when no index was ever
+    built, before anything is opened or created. The store is closed on
+    exit.
+    """
+    configure_logging(settings.log_level)
+    if index_missing(settings):
+        raise IndexIncomplete("No index has been built yet")
+    store = (
+        QdrantPassageStore(url=settings.qdrant_url, alias=settings.qdrant_alias)
+        if settings.qdrant_url
+        else QdrantPassageStore(
+            settings.data_dir / "qdrant", alias=settings.qdrant_alias
+        )
+    )
+    try:
+        yield ReencodeSparse(
+            lock=FileIndexLock(settings.data_dir / "index.lock"),
+            index=store,
+            manifest=SQLiteManifest(settings.data_dir),
+            encoders=SparseEncoderSet(),
         )
     finally:
         store.close()

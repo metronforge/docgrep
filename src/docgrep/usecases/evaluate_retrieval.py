@@ -125,6 +125,7 @@ class EvaluateRetrieval:
                     details={"line": case.line, "max_query_len": search.max_query_len},
                 )
         metadata = search.check_index()
+        weighting = search.sparse_weighting(metadata)
         sparse_query = search.query_encoder(metadata)
         passages = search.retriever.count_passages()
         vectors = self._embed([case.query for case in cases])
@@ -148,6 +149,11 @@ class EvaluateRetrieval:
                 collapse_duplicates=search.collapse_duplicates,
                 sparse_channel=sparse_channel,
                 control=control,
+                rerank_pool=search.rerank_pool,
+                sparse_encoder=weighting.encoder,
+                bm25_k1=weighting.k1,
+                bm25_b=weighting.b,
+                bm25_avgdl=weighting.avgdl,
             ),
             tuple(results),
             aggregate(results),
