@@ -18,6 +18,8 @@ from docgrep.adapters.qdrant import QdrantPassageStore
 from docgrep.domain.evaluation import ProbeHit
 from docgrep.domain.models import FileType, Passage, Source, make_passage_id
 
+# The alias the server-mode tests own (see qdrant_server_guard).
+ALIAS = "alpha"
 TERM = 7
 QUERY_DENSE = (1.0, 0.0)
 QUERY_SPARSE = {TERM: 1.0}
@@ -99,3 +101,19 @@ def dense_only_index(path: Path, alias: str = "docgrep") -> None:
 def texts(hits: Sequence[ProbeHit] | None) -> list[str]:
     by_id = {passage_of(text).passage_id: text for text, *_ in LAYOUT}
     return [by_id[hit.passage_id] for hit in hits or ()]
+
+
+def wipe(client: QdrantClient) -> None:
+    """Remove the suite's alias and collections from a test server."""
+    for alias in client.get_aliases().aliases:
+        if alias.alias_name == ALIAS:
+            client.update_collection_aliases(
+                [
+                    models.DeleteAliasOperation(
+                        delete_alias=models.DeleteAlias(alias_name=ALIAS)
+                    )
+                ]
+            )
+    for collection in client.get_collections().collections:
+        if collection.name.startswith(f"{ALIAS}_"):
+            client.delete_collection(collection.name)

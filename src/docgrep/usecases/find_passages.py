@@ -103,7 +103,9 @@ class Diagnosis:
     over every first-stage candidate, not cut to ``top_n``; the sources are
     not sanitized. ``stage1_ranks`` maps the passage id of every valid
     candidate, collapsed duplicates included, to its zero-based first-stage
-    position. ``hint`` says why nothing was retrieved, when it is known.
+    position. ``source_ids`` is the allow-list the filter resolved to, None
+    when every source is eligible. ``hint`` says why nothing was retrieved,
+    when it is known.
     """
 
     passages: tuple[RankedPassage, ...]
@@ -112,6 +114,7 @@ class Diagnosis:
     rerank_skipped: bool = False
     rerank_skip_reason: str | None = None
     hint: str | None = None
+    source_ids: frozenset[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +247,7 @@ class FindPassages:
                 details={"minimum": 1, "maximum": self.top_n_max},
             )
 
-        self._check_index()
+        self.check_index()
         applied_config: tuple[tuple[str, str | int | float | bool], ...] = (
             ("embedding_model", self.embedder.model_name),
             ("max_query_len", self.max_query_len),
@@ -348,16 +351,25 @@ class FindPassages:
             else collapse_duplicates
         )
         self._check_query(query)
-        self._check_index()
+        self.check_index()
         scope = None
         if source_filter is not None and source_filter.applied():
             sanitizer = RequestSanitizer(self.now().year, self.ocr, self.manifest)
             roots = CorpusRoots() if self.roots is None else self.roots.roots()
             scope = self._scope(source_filter, sanitizer, roots)
+        allowed = None if scope is None else scope.source_ids
         if self.retriever.count_passages() == 0:
-            return Diagnosis((), {}, self.top_k, hint="The index is empty")
+            return Diagnosis(
+                (), {}, self.top_k, hint="The index is empty", source_ids=allowed
+            )
         if scope is not None and scope.matched == 0:
-            return Diagnosis((), {}, self.top_k, hint=NO_MATCHING_SOURCES_HINT)
+            return Diagnosis(
+                (),
+                {},
+                self.top_k,
+                hint=NO_MATCHING_SOURCES_HINT,
+                source_ids=frozenset(),
+            )
         if dense_vector is None:
             dense_vector = self._embed(query)
         elif len(dense_vector) != self.embedder.dimension:
@@ -370,13 +382,14 @@ class FindPassages:
             )
         ranking = self._rank(query, dense_vector, scope, collapsing=collapsing)
         if ranking is None:
-            return Diagnosis((), {}, self.top_k)
+            return Diagnosis((), {}, self.top_k, source_ids=allowed)
         return Diagnosis(
             ranking.ordered,
             ranking.stage1_ranks,
             self.top_k,
             ranking.rerank_skipped,
             ranking.rerank_skip_reason,
+            source_ids=allowed,
         )
 
     def _check_query(self, query: str) -> None:
@@ -388,9 +401,9 @@ class FindPassages:
                 details={"max_query_len": self.max_query_len},
             )
 
-    def _check_index(self) -> None:
+    def check_index(self) -> None:
         """Refuse an index without completion metadata or built with another
-        embedding model or dimension."""
+        embedding model or dimension: ``IndexIncomplete`` or ``ConfigDrift``."""
         metadata = self.retriever.read_completion_metadata()
         if metadata is None or not isinstance(metadata.get("embedding_model"), str):
             raise IndexIncomplete("Index has no valid completion metadata")

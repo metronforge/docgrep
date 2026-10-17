@@ -6,13 +6,14 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from qdrant_client import QdrantClient, models
+from qdrant_client import QdrantClient
 
 from docgrep.adapters.qdrant import QdrantPassageStore
 from docgrep.domain.errors import ValidationError
 from docgrep.domain.evaluation import MAX_PROBE_DEPTH
 from docgrep.domain.protocols import ChannelProbe
 from eval_support import (
+    ALIAS,
     DENSE_ORDER,
     QUERY_DENSE,
     QUERY_SPARSE,
@@ -20,10 +21,10 @@ from eval_support import (
     build,
     dense_only_index,
     texts,
+    wipe,
 )
 
 URL = os.environ.get("DOCGREP_TEST_QDRANT_URL")
-ALIAS = "alpha"
 _SERVER = pytest.param(
     "server",
     marks=[
@@ -31,21 +32,6 @@ _SERVER = pytest.param(
         pytest.mark.skipif(not URL, reason="DOCGREP_TEST_QDRANT_URL is not set"),
     ],
 )
-
-
-def _wipe(client: QdrantClient) -> None:
-    for alias in client.get_aliases().aliases:
-        if alias.alias_name == ALIAS:
-            client.update_collection_aliases(
-                [
-                    models.DeleteAliasOperation(
-                        delete_alias=models.DeleteAlias(alias_name=ALIAS)
-                    )
-                ]
-            )
-    for collection in client.get_collections().collections:
-        if collection.name.startswith(f"{ALIAS}_"):
-            client.delete_collection(collection.name)
 
 
 @pytest.fixture(params=["local", _SERVER])
@@ -59,11 +45,11 @@ def store(
         return
     assert URL is not None
     raw = QdrantClient(url=URL)
-    _wipe(raw)
+    wipe(raw)
     remote = QdrantPassageStore(url=URL, alias=ALIAS)
     yield remote
     remote.close()
-    _wipe(raw)
+    wipe(raw)
     raw.close()
 
 

@@ -13,6 +13,7 @@ from docgrep.domain.errors import (
     StoreUnavailable,
     ValidationError,
 )
+from docgrep.domain.evaluation import ChannelLists, ProbeHit
 from docgrep.domain.models import (
     ManifestRunRecord,
     ManifestSourceRecord,
@@ -45,6 +46,9 @@ class InMemoryPassageStore:
         self.passage_fetches: list[tuple[str, ...]] = []
         self.outline_reads: list[str] = []
         self.text_fetches: list[tuple[str, ...]] = []
+        # The depth of each channel probe; False reads as no sparse channel.
+        self.probes: list[int] = []
+        self.sparse_channel = True
 
     def _target(
         self,
@@ -159,6 +163,72 @@ class InMemoryPassageStore:
             )
         )
         return tuple(candidate for _, candidate in scored[:top_k])
+
+    def probe_channels(
+        self,
+        dense_vector: Sequence[float],
+        sparse_vector: Mapping[int, float],
+        depth: int,
+        *,
+        source_ids: Collection[str] | None = None,
+        with_text: bool = False,
+    ) -> ChannelLists:
+        """Dense and sparse dot products ranked apart and fused as Qdrant
+        does, by the sum of 1 / (rank + 1); ``sparse_channel`` False reads
+        like an index without one."""
+        self.probes.append(depth)
+        eligible = [
+            (passage, source, dense, sparse)
+            for passage, source, dense, sparse in self._items.values()
+            if source_ids is None or source.source_id in source_ids
+        ]
+
+        def ranked(scores: list[tuple[float, Passage]]) -> list[Passage]:
+            scores.sort(key=lambda pair: (-pair[0], pair[1].passage_id))
+            return [passage for _, passage in scores[:depth]]
+
+        dense_list = ranked(
+            [
+                (sum(a * b for a, b in zip(dense_vector, dense, strict=True)), passage)
+                for passage, _, dense, _ in eligible
+            ]
+        )
+        sparse_list: list[Passage] = []
+        if sparse_vector and self.sparse_channel:
+            sparse_list = ranked(
+                [
+                    (score, passage)
+                    for passage, _, _, sparse in eligible
+                    if (
+                        score := sum(
+                            weight * sparse.get(index, 0.0)
+                            for index, weight in sparse_vector.items()
+                        )
+                    )
+                    > 0
+                ]
+            )
+        fusion: dict[str, float] = {}
+        by_id: dict[str, Passage] = {}
+        for found in (dense_list, sparse_list):
+            for rank, passage in enumerate(found, start=1):
+                fusion[passage.passage_id] = fusion.get(passage.passage_id, 0.0) + 1 / (
+                    rank + 1
+                )
+                by_id[passage.passage_id] = passage
+        fused = ranked([(score, by_id[key]) for key, score in fusion.items()])
+
+        def hits(found: list[Passage]) -> tuple[ProbeHit, ...]:
+            return tuple(
+                ProbeHit(p.passage_id, p.source_id, p.text if with_text else None)
+                for p in found
+            )
+
+        return ChannelLists(
+            hits(dense_list),
+            hits(sparse_list) if self.sparse_channel else None,
+            hits(fused),
+        )
 
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None:
         return dict(self._completion) if self._completion is not None else None
