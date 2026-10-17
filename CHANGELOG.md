@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v1.17.0 (2026-10-17)
+
+### Documentation
+
+- Describe metadata sanitizing
+  ([`de557b7`](https://github.com/metronforge/docgrep/commit/de557b7c5ddca8ddc09e2afcb93cbcef94390cb1))
+
+### Features
+
+- **api**: Expose dropped-metadata audit and filter
+  ([`ad8e93a`](https://github.com/metronforge/docgrep/commit/ad8e93a0d4edacbdfca85b8027175bbad8ab69a2))
+
+- **domain**: Sanitize implausible source metadata
+  ([`4fa8894`](https://github.com/metronforge/docgrep/commit/4fa88942d174cbb6c4b9edae3d1a614ff8c13995))
+
+- **usecases**: Apply sanitized metadata to filters, browse and search results
+  ([`066b326`](https://github.com/metronforge/docgrep/commit/066b326bd6e4c7288aa5b07514d5ca56b5c6938d))
+
+
 ## v1.16.0 (2026-10-17)
 
 ### Documentation
