@@ -594,6 +594,11 @@ class ManifestWriter(Protocol):
         """Close a running or swapped run with a final status."""
         ...
 
+    def set_checkpoint(self, run_id: str, checkpoint: str) -> None:
+        """Remember where a run that works in pages has got to; an opaque
+        value that the run's own kind reads back."""
+        ...
+
 
 class Manifest(ManifestReader, ManifestWriter, Protocol):
     """Both sides of the manifest, for operations that read what they wrote."""

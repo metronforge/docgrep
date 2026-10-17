@@ -87,6 +87,39 @@ def latest_build_run(manifest: ManifestReader) -> ManifestRunRecord | None:
     return manifest.latest_run_of_kind("build")
 
 
+REENCODE_SPARSE = "reencode_sparse"
+
+
+def _run_order(run: ManifestRunRecord) -> tuple[int, str]:
+    """Run ids are increasing integers, compared as such."""
+    return len(run.run_id), run.run_id
+
+
+def unfinished_reencode(
+    manifest: ManifestReader, *, lock_held: bool
+) -> ManifestRunRecord | None:
+    """The latest sparse re-encode when it stopped before the end
+    (aborted, cancelled or interrupted), else None.
+
+    Its index then holds sparse vectors of two weightings until it is run
+    again (ADR-0025). A build completed after it replaced that index, so it
+    no longer counts.
+    """
+    latest = manifest.latest_run_of_kind(REENCODE_SPARSE)
+    if latest is None:
+        return None
+    build = manifest.latest_run_of_kind("build")
+    if (
+        build is not None
+        and build.status == "completed"
+        and _run_order(build) > _run_order(latest)
+    ):
+        return None
+    if run_state(latest, lock_held=lock_held) in RESUMABLE_STATES:
+        return latest
+    return None
+
+
 def latest_root_prefixes(manifest: ManifestReader) -> frozenset[str]:
     """The prefixed root names recorded by the latest build or update.
 
@@ -105,7 +138,7 @@ def latest_root_prefixes(manifest: ManifestReader) -> frozenset[str]:
     if not runs:
         return frozenset()
     # Run ids are increasing integers.
-    latest = max(runs, key=lambda run: (len(run.run_id), run.run_id))
+    latest = max(runs, key=_run_order)
     return recorded_prefixes(dict(latest.config))
 
 

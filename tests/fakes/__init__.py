@@ -508,6 +508,9 @@ class InMemoryManifest:
             for path, record in self._journal.get(run_id, {}).items()
         }
 
+    def set_checkpoint(self, run_id: str, checkpoint: str) -> None:
+        self._update_run(run_id, checkpoint=checkpoint)
+
     def finish_run(
         self,
         run_id: str,

@@ -16,7 +16,7 @@ from docgrep.adapters.models.sparse import (
     TermFrequencyEncoder,
     UniqueTermEncoder,
 )
-from docgrep.domain.errors import ConfigDrift
+from docgrep.domain.errors import ConfigDrift, ResumeAvailable
 from docgrep.domain.models import (
     FileType,
     ParsedDocument,
@@ -262,3 +262,32 @@ def test_search_refuses_an_unknown_recorded_weighting() -> None:
 
     with pytest.raises(ConfigDrift):
         _search(harness).run("alpha")
+
+
+def _unfinished_reencode(harness: Harness) -> str:
+    run_id = harness.manifest.start_run({}, kind="reencode_sparse")
+    harness.manifest.finish_run(run_id, "cancelled", {})
+    return run_id
+
+
+def test_an_update_waits_for_an_unfinished_re_encode() -> None:
+    harness = Harness(FILES)
+    harness.build().run()
+    run_id = _unfinished_reencode(harness)
+    harness.corpus.files["c.txt"] = "gamma"
+
+    with pytest.raises(ResumeAvailable) as refused:
+        harness.update().run()
+
+    assert refused.value.details["run_id"] == run_id
+    assert "reencode-sparse --yes" in str(refused.value)
+
+
+def test_a_completed_build_replaces_the_index_of_an_unfinished_re_encode() -> None:
+    harness = Harness(FILES)
+    harness.build().run()
+    _unfinished_reencode(harness)
+    harness.build().run()
+    harness.corpus.files["c.txt"] = "gamma"
+
+    assert harness.update().run().indexed == 1

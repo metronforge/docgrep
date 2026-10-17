@@ -45,6 +45,7 @@ from docgrep.domain.run_state import (
     config_drift,
     latest_build_run,
     run_state,
+    unfinished_reencode,
 )
 from docgrep.domain.sparse import SparseWeighting
 from docgrep.usecases.build_index import (
@@ -341,8 +342,8 @@ class UpdateIndex(SourceIndexing):
     ) -> Mapping[str, str | int | float]:
         """Refuse an update that cannot run; returns the index metadata.
 
-        Without ``drift`` (a removal, which writes no vectors) the vector
-        settings are not checked.
+        Without ``drift`` (a removal, which writes no vectors) neither the
+        vector settings nor an unfinished re-encode is checked.
         """
         build = latest_build_run(self.manifest)
         if build is not None:
@@ -355,6 +356,14 @@ class UpdateIndex(SourceIndexing):
                     "discard it with `docgrep index --restart`",
                     details={"run_id": build.run_id, "state": state},
                 )
+        reencode = unfinished_reencode(self.manifest, lock_held=False)
+        if drift and reencode is not None:
+            raise ResumeAvailable(
+                "A re-encode of the sparse vectors is unfinished, so new "
+                "passages could get either weighting: finish it with "
+                "`docgrep reencode-sparse --yes` first",
+                details={"run_id": reencode.run_id},
+            )
         metadata = self.index.read_completion_metadata()
         if metadata is None:
             raise IndexIncomplete(
