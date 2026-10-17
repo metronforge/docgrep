@@ -737,6 +737,8 @@ class InfoResponse(BaseModel):
     version: str
     backend: str
     roots: list[InfoRootResponse] = Field(default_factory=list)
+    # The fused first-stage candidates the reranker scores (ADR-0025).
+    rerank_pool: int
 
 
 def service_info(settings: Settings) -> InfoResponse:
@@ -744,6 +746,7 @@ def service_info(settings: Settings) -> InfoResponse:
     return InfoResponse(
         version=__version__,
         backend=settings.backend,
+        rerank_pool=settings.effective_rerank_pool,
         roots=[
             InfoRootResponse(
                 name=root.name,

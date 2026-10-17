@@ -71,6 +71,7 @@ def test_info_keeps_its_keys_and_lists_the_configured_roots(tmp_path: Path) -> N
                 "readable": False,
             },
         ],
+        "rerank_pool": 100,
     }
     assert not (data / "manifest.sqlite3").exists()
 
@@ -104,6 +105,7 @@ def test_the_openapi_schema_describes_info_and_the_filter(tmp_path: Path) -> Non
         "version",
         "backend",
         "roots",
+        "rerank_pool",
     }
     assert set(components["InfoRootResponse"]["properties"]) == {
         "name",

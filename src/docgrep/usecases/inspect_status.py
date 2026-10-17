@@ -18,11 +18,21 @@ from docgrep.domain.protocols import (
 )
 from docgrep.domain.roots import CorpusRoot
 from docgrep.domain.run_state import (
+    REENCODE_SPARSE,
+    RESUMABLE_STATES,
     VECTOR_CONFIG_KEYS,
     latest_build_run,
     latest_root_prefixes,
     run_state,
     swap_already_happened,
+    unfinished_reencode,
+)
+from docgrep.domain.sparse import (
+    BM25_AVGDL_KEY,
+    BM25_B_KEY,
+    BM25_K1_KEY,
+    SPARSE_ENCODER_KEY,
+    TF_V1,
 )
 from docgrep.domain.status import (
     FAILED_SOURCES_LIMIT,
@@ -33,13 +43,16 @@ from docgrep.domain.status import (
     CollectionView,
     DriftView,
     FailedSourceView,
+    ReencodeView,
     RootStatusView,
     RunView,
     SourcesView,
+    SparseView,
     StatusReport,
     StatusWarning,
     StoreView,
 )
+from docgrep.usecases.reencode_sparse import reencode_progress
 
 _LOG = logging.getLogger(__name__)
 _REASON_LIMIT = 200
@@ -251,6 +264,15 @@ class InspectStatus:
         if manifest_ok and manifest is not None:
             sources = self._sources(manifest)
         roots = self._roots(manifest if manifest_ok else None, warn)
+        sparse = self._sparse(metadata, manifest if manifest_ok else None, lock_held)
+        if sparse is not None and sparse.reencode is not None:
+            if sparse.reencode.state in RESUMABLE_STATES:
+                warn(
+                    "reencode_unfinished",
+                    "The latest sparse re-encode did not finish; the index holds "
+                    "vectors of two weightings, search still works, and "
+                    "`docgrep reencode-sparse --yes` continues it",
+                )
         return StatusReport(
             index_state,
             run_view,
@@ -261,6 +283,48 @@ class InspectStatus:
             tuple(warnings),
             sources,
             roots,
+            sparse,
+        )
+
+    @staticmethod
+    def _sparse(
+        metadata: Mapping[str, str | int | float] | None,
+        manifest: ManifestReader | None,
+        lock_held: bool,
+    ) -> SparseView | None:
+        """The recorded weighting, a running or unfinished re-encode, and a
+        hint for a tf-v1 index; None without a completed index."""
+        if metadata is None:
+            return None
+        reencode = None
+        if manifest is not None:
+            try:
+                latest = manifest.latest_run_of_kind(REENCODE_SPARSE)
+                unfinished = unfinished_reencode(manifest, lock_held=lock_held)
+            except Exception:
+                _LOG.debug("status_reencode_unreadable", exc_info=True)
+                latest = unfinished = None
+            state = None if latest is None else run_state(latest, lock_held=lock_held)
+            stopped = unfinished is not None and latest == unfinished
+            if latest is not None and (state == "running" or stopped):
+                done, total = reencode_progress(latest)
+                reencode = ReencodeView(latest.run_id, str(state), done, total)
+        encoder = str(metadata.get(SPARSE_ENCODER_KEY, TF_V1))
+        hint = None
+        if reencode is not None and reencode.state != "running":
+            hint = "Continue the re-encode with `docgrep reencode-sparse --yes`"
+        elif reencode is None and encoder == TF_V1:
+            hint = (
+                "The sparse vectors hold raw term counts; `docgrep reencode-sparse` "
+                "shows the plan to re-encode them with BM25 weights"
+            )
+        return SparseView(
+            encoder,
+            _float(metadata, BM25_K1_KEY),
+            _float(metadata, BM25_B_KEY),
+            _float(metadata, BM25_AVGDL_KEY),
+            reencode,
+            hint,
         )
 
     def _roots(
@@ -462,6 +526,10 @@ class InspectStatus:
         except Exception:
             journal = []
         done = len(journal)
+        written = sum(r.passages or 0 for r in journal)
+        if run.kind == REENCODE_SPARSE:
+            # Counted in passages, from the checkpoint; it has no journal.
+            done = written = reencode_progress(run)[0]
         started = _parse(run.started_at)
         elapsed = (
             None
@@ -480,13 +548,13 @@ class InspectStatus:
         )
         return ActiveOperation(
             kind=run.kind
-            if run.kind in ("update", "ocr")
+            if run.kind in ("update", "ocr", REENCODE_SPARSE)
             else ("resume" if run.resumed_from else "build"),
             run_id=run.run_id,
             started_at=run.started_at,
             sources_done=done,
             sources_total=run.total_sources,
-            passages_written=sum(r.passages or 0 for r in journal),
+            passages_written=written,
             elapsed_seconds=None if elapsed is None else round(elapsed, 1),
             eta_seconds=None if eta is None else round(eta),
             cancel_requested_at=run.cancel_requested_at,
@@ -496,6 +564,11 @@ class InspectStatus:
 def _text(metadata: Mapping[str, str | int | float] | None, key: str) -> str | None:
     value = None if metadata is None else metadata.get(key)
     return None if value is None else str(value)
+
+
+def _float(metadata: Mapping[str, str | int | float], key: str) -> float | None:
+    value = metadata.get(key)
+    return float(value) if isinstance(value, int | float) else None
 
 
 def _number(metadata: Mapping[str, str | int | float] | None, key: str) -> int | None:

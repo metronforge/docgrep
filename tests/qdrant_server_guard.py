@@ -19,7 +19,9 @@ from dataclasses import dataclass
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException
 
-SUITE_ALIASES = frozenset({"alpha", "beta", "upclean", "upupdated", "rsclean", "rsint"})
+SUITE_ALIASES = frozenset(
+    {"alpha", "beta", "upclean", "upupdated", "rsclean", "rsint", "bm25shape"}
+)
 
 _SUITE_COLLECTION = re.compile(
     "(?:" + "|".join(sorted(SUITE_ALIASES)) + r")_[0-9a-f]{32}"

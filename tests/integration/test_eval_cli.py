@@ -106,10 +106,15 @@ def test_the_json_report_has_fixed_keys_in_file_order(
         "embedding_model": "deterministic-hash-v1",
         "reranker_model": "lexical-overlap-v1",
         "top_k": TOP_K,
+        "rerank_pool": TOP_K,
         "depth": 2000,
         "collapse_duplicates": True,
         "sparse_channel": True,
         "control": True,
+        "sparse_encoder": "tf-v1",
+        "bm25_k1": None,
+        "bm25_b": None,
+        "bm25_avgdl": None,
     }
     assert [case["id"] for case in report["cases"]] == [
         "arnold-title",
