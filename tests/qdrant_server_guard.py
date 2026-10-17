@@ -20,7 +20,16 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException
 
 SUITE_ALIASES = frozenset(
-    {"alpha", "beta", "upclean", "upupdated", "rsclean", "rsint", "bm25shape"}
+    {
+        "alpha",
+        "beta",
+        "upclean",
+        "upupdated",
+        "rsclean",
+        "rsint",
+        "bm25shape",
+        "reempty",
+    }
 )
 
 _SUITE_COLLECTION = re.compile(

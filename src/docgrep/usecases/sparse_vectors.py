@@ -48,14 +48,17 @@ def encode_pages(
     start: str | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
     before_page: Callable[[], None] | None = None,
-    after_page: Callable[[str | None, int], None] | None = None,
+    after_page: Callable[[str | None, int, int], None] | None = None,
 ) -> int:
     """Write the sparse vector of every passage from ``start`` on, page by
     page; returns how many were written.
 
-    ``before_page`` runs before each page is read (a cancel check);
-    ``after_page`` gets the offset of the next page (None after the last)
-    and the size of the page just written, once it is durable.
+    A passage without any sparse token has an empty vector, which the
+    store already holds under any weighting (same tokenizer); it is
+    skipped, not written. ``before_page`` runs before each page is read
+    (a cancel check); ``after_page`` gets the offset of the next page (None
+    after the last), the passages of the page written and the passages
+    skipped, once the page is durable.
     """
     offset = start
     written = 0
@@ -63,12 +66,12 @@ def encode_pages(
         if before_page is not None:
             before_page()
         page, following = store.passage_text_page(offset, page_size)
-        store.write_sparse_vectors(
-            [(passage_id, encoder.encode(text)) for passage_id, text in page]
-        )
-        written += len(page)
+        encoded = [(passage_id, encoder.encode(text)) for passage_id, text in page]
+        vectors = [(passage_id, sparse) for passage_id, sparse in encoded if sparse]
+        store.write_sparse_vectors(vectors)
+        written += len(vectors)
         if after_page is not None:
-            after_page(following, len(page))
+            after_page(following, len(vectors), len(page) - len(vectors))
         if following is None:
             return written
         offset = following
