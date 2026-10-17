@@ -686,6 +686,7 @@ def create_container(
             retriever=store,
             reranker=reranker,
             top_k=settings.top_k,
+            rerank_pool=settings.rerank_pool,
             default_top_n=settings.top_n,
             top_n_max=settings.top_n_max,
             max_query_len=settings.max_query_len,

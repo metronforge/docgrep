@@ -385,6 +385,10 @@ class PassageRetriever(Protocol):
     sources are candidates, and the ``top_k`` best are taken from them, so the
     restriction applies before ranking, not to its result. An empty
     allow-list returns nothing.
+
+    Each channel takes its ``top_k`` best; the fused list is cut at ``pool``
+    when given (at most ``2 * top_k``, the size of their union), else at
+    ``top_k``. Callers that keep the default leave ``pool`` out.
     """
 
     def retrieve(
@@ -393,6 +397,8 @@ class PassageRetriever(Protocol):
         sparse_vector: Mapping[int, float],
         top_k: int,
         source_ids: Collection[str] | None = None,
+        *,
+        pool: int | None = None,
     ) -> tuple[RetrievalCandidate, ...]: ...
 
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None: ...

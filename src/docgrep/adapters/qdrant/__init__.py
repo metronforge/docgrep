@@ -809,6 +809,8 @@ class QdrantPassageStore:
         sparse_vector: Mapping[int, float],
         top_k: int,
         source_ids: Collection[str] | None = None,
+        *,
+        pool: int | None = None,
     ) -> tuple[RetrievalCandidate, ...]:
         if self._active_collection() is None or top_k <= 0:
             return ()
@@ -843,7 +845,9 @@ class QdrantPassageStore:
             prefetch=prefetch,
             query=models.FusionQuery(fusion=models.Fusion.RRF),
             query_filter=allowed,
-            limit=top_k,
+            # Each channel keeps top_k; the fused list may keep more of
+            # their union (at most 2 * top_k) for the reranker.
+            limit=top_k if pool is None else pool,
             with_payload=True,
             with_vectors=["dense"],
         )

@@ -201,12 +201,16 @@ class FindPassages:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         roots: RootCatalog | None = None,
         sparse_encoders: SparseEncoders | None = None,
+        rerank_pool: int | None = None,
     ) -> None:
         """With ``sparse_encoders`` the query is encoded for the sparse
         weighting the index records (ADR-0025); without them, always with
-        ``sparse_encoder``."""
+        ``sparse_encoder``. ``rerank_pool`` is how many fused candidates are
+        reranked, at most ``2 * top_k``; unset, ``top_k``."""
         if top_k <= 0 or not 0 < default_top_n <= top_n_max:
             raise ValueError("result limits must be positive")
+        if rerank_pool is not None and not 0 < rerank_pool <= 2 * top_k:
+            raise ValueError("rerank_pool must be between 1 and 2 * top_k")
         if max_query_len <= 0:
             raise ValueError("max_query_len must be positive")
         self.embedder = embedder
@@ -215,6 +219,7 @@ class FindPassages:
         self.retriever = retriever
         self.reranker = reranker
         self.top_k = top_k
+        self.rerank_pool = top_k if rerank_pool is None else rerank_pool
         self.default_top_n = default_top_n
         self.top_n_max = top_n_max
         self.max_query_len = max_query_len
@@ -258,6 +263,9 @@ class FindPassages:
         applied_config: tuple[tuple[str, str | int | float | bool], ...] = (
             ("embedding_model", self.embedder.model_name),
             ("max_query_len", self.max_query_len),
+            # Only a pool that differs from top_k changes the first stage, so
+            # the body of a default search stays as it was.
+            *((("rerank_pool", self.rerank_pool),) if self._pooled() else ()),
             ("reranker_model", self.reranker.model_name),
             ("top_k", self.top_k),
             ("top_n", limit),
@@ -403,6 +411,10 @@ class FindPassages:
             source_ids=allowed,
         )
 
+    def _pooled(self) -> bool:
+        """Whether the reranker sees a fused list cut elsewhere than top_k."""
+        return self.rerank_pool != self.top_k
+
     def _check_query(self, query: str) -> None:
         if not query.strip():
             raise ValidationError("query is required")
@@ -491,11 +503,16 @@ class FindPassages:
         """Recall, rerank and order the candidates of one query; None when
         no valid candidate was found."""
         sparse = sparse_encoder.encode(query)
-        if scope is None or scope.source_ids is None:
+        source_ids = None if scope is None else scope.source_ids
+        if self._pooled():
+            candidates = self.retriever.retrieve(
+                dense_vector, sparse, self.top_k, source_ids, pool=self.rerank_pool
+            )
+        elif source_ids is None:
             candidates = self.retriever.retrieve(dense_vector, sparse, self.top_k)
         else:
             candidates = self.retriever.retrieve(
-                dense_vector, sparse, self.top_k, source_ids=scope.source_ids
+                dense_vector, sparse, self.top_k, source_ids=source_ids
             )
         if not candidates:
             return None
