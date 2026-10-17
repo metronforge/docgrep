@@ -12,3 +12,5 @@ build/
 .pytest_cache/
 .coverage
 data/
+# Retrieval evaluation cases name private files (see README).
+*.private.jsonl

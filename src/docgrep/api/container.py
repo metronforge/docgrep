@@ -70,6 +70,7 @@ from docgrep.usecases.build_index import BuildIndex, BuildSummary
 from docgrep.usecases.cancel_index import CancelIndex
 from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DryRun
+from docgrep.usecases.evaluate_retrieval import EvaluateRetrieval
 from docgrep.usecases.expand_context import ExpandContext
 from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
@@ -578,6 +579,67 @@ def create_cancel(settings: Settings) -> CancelIndex:
     )
 
 
+def _models(
+    settings: Settings,
+) -> tuple[EmbeddingProvider, Reranker, TokenSpanTokenizer]:
+    """The embedder, the reranker and the chunking tokenizer of the backend."""
+    if settings.backend == "fake":
+        return DeterministicEmbedder(), LexicalReranker(), WhitespaceTokenizer()
+    embedder = BgeEmbedder(
+        settings.embedding_model, settings.device, dtype=settings.embedding_dtype
+    )
+    reranker = BgeReranker(
+        settings.reranker_model, settings.device, dtype=settings.reranker_dtype
+    )
+    return embedder, reranker, _LazyModelTokenizer(embedder)
+
+
+@contextmanager
+def open_evaluation(
+    settings: Settings, *, top_k: int | None = None
+) -> Iterator[EvaluateRetrieval]:
+    """Wire the retrieval evaluation (ADR-0024) for a process of its own.
+
+    Read-only: no lock is taken, the manifest and the OCR registry are
+    opened without migrating them, and the store is only queried. The
+    models are those of search, loaded once; ``top_k`` replaces the
+    configured first-stage size. Raises ``IndexIncomplete`` when no index
+    was ever built, before anything is opened. The store is closed on exit.
+    """
+    configure_logging(settings.log_level)
+    if index_missing(settings):
+        raise IndexIncomplete("No index has been built yet")
+    manifest = SQLiteManifest(settings.data_dir, read_only=True)
+    store = (
+        QdrantPassageStore(url=settings.qdrant_url, alias=settings.qdrant_alias)
+        if settings.qdrant_url
+        else QdrantPassageStore(
+            settings.data_dir / "qdrant", alias=settings.qdrant_alias
+        )
+    )
+    try:
+        embedder, reranker, _ = _models(settings)
+        yield EvaluateRetrieval(
+            search=FindPassages(
+                embedder=embedder,
+                sparse_encoder=BM25SparseEncoder(),
+                retriever=store,
+                reranker=reranker,
+                top_k=settings.top_k if top_k is None else top_k,
+                default_top_n=settings.top_n,
+                top_n_max=settings.top_n_max,
+                max_query_len=settings.max_query_len,
+                collapse_duplicates=settings.collapse_duplicates,
+                manifest=manifest,
+                ocr=open_ocr_registry_view(settings),
+                roots=_RootCatalog(settings),
+            ),
+            probe=store,
+        )
+    finally:
+        store.close()
+
+
 def create_container(
     settings: Settings, *, refuse_resumable_by_default: bool = False
 ) -> Services:
@@ -587,23 +649,7 @@ def create_container(
     refuses to discard a resumable run.
     """
     configure_logging(settings.log_level)
-    embedder: EmbeddingProvider
-    reranker: Reranker
-    tokenizer: TokenSpanTokenizer
-    if settings.backend == "fake":
-        embedder = DeterministicEmbedder()
-        reranker = LexicalReranker()
-        tokenizer = WhitespaceTokenizer()
-    else:
-        real_embedder = BgeEmbedder(
-            settings.embedding_model, settings.device, dtype=settings.embedding_dtype
-        )
-        embedder = real_embedder
-        reranker = BgeReranker(
-            settings.reranker_model, settings.device, dtype=settings.reranker_dtype
-        )
-        tokenizer = _LazyModelTokenizer(real_embedder)
-
+    embedder, reranker, tokenizer = _models(settings)
     sparse = BM25SparseEncoder()
     store = (
         QdrantPassageStore(url=settings.qdrant_url, alias=settings.qdrant_alias)

@@ -29,6 +29,7 @@ from docgrep.api.container import (
     index_missing,
     open_browse,
     open_context,
+    open_evaluation,
     open_ocr_registry_view,
 )
 from docgrep.api.http import (
@@ -60,12 +61,19 @@ from docgrep.api.roots import (
 )
 from docgrep.api.signals import Register, graceful_cancel
 from docgrep.domain.errors import DocgrepError, ValidationError
+from docgrep.domain.evaluation import (
+    DEFAULT_PROBE_DEPTH,
+    LOST_IN_RERANK_AFTER,
+    MAX_PROBE_DEPTH,
+    parse_cases,
+)
 from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.sources import HAS_METADATA_VALUES, SORT_KEYS, SourceFilter
 from docgrep.settings import Settings
 from docgrep.usecases.cancel_index import CancelIndex, CancelResult
 from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DEFAULT_LIMIT, DryRun
+from docgrep.usecases.evaluate_retrieval import EvaluateRetrieval
 from docgrep.usecases.inspect_status import InspectStatus
 from docgrep.usecases.process_scans import (
     UPDATE_HINT,
@@ -242,6 +250,38 @@ def _parser() -> argparse.ArgumentParser:
     )
     context.add_argument(
         "--json", action="store_true", help="Print the body of POST /passages/context"
+    )
+    evaluate = commands.add_parser(
+        "eval",
+        help="Report where known passages rank at every search stage (read-only)",
+        description="Runs each case of a JSON Lines file through search and "
+        "reports the rank of its expected passage in the dense and sparse "
+        "channels and their fusion at --depth, in the first stage at top_k and "
+        "in the final order, with a control search restricted to the expected "
+        "sources. Search itself is unchanged.",
+    )
+    evaluate.add_argument("cases_file", metavar="CASES_FILE")
+    evaluate.add_argument(
+        "--json", action="store_true", help="Print one JSON object with fixed keys"
+    )
+    evaluate.add_argument(
+        "--top-k",
+        dest="top_k",
+        type=int,
+        help="First-stage candidates (default DOCGREP_TOP_K)",
+    )
+    evaluate.add_argument(
+        "--depth",
+        type=int,
+        default=DEFAULT_PROBE_DEPTH,
+        help=f"Candidates read from each channel (default {DEFAULT_PROBE_DEPTH}, "
+        f"at most {MAX_PROBE_DEPTH})",
+    )
+    evaluate.add_argument(
+        "--no-control",
+        dest="control",
+        action="store_false",
+        help="Skip the search restricted to the expected sources",
     )
     commands.add_parser(
         "cancel", help="Ask a running index build to stop after its current batch"
@@ -1063,6 +1103,149 @@ def _format_search(response: SearchResponse) -> str:
     return "".join(lines)
 
 
+_EVAL_TEXT_WIDTH = 72
+
+
+def _clip(text: str, width: int = _EVAL_TEXT_WIDTH) -> str:
+    """One line of at most ``width`` characters, cut with an ellipsis."""
+    line = " ".join(text.split())
+    return line if len(line) <= width else line[: width - 1] + "…"
+
+
+def _number(value: object, digits: int = 3) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def _ids(values: object) -> str:
+    return (
+        ", ".join(str(value) for value in values)
+        if isinstance(values, list) and values
+        else "-"
+    )
+
+
+def _format_eval(report: dict[str, Any]) -> str:
+    """Render an evaluation report: the settings, one block per case and the
+    aggregates."""
+    settings = report["settings"]
+    lines = [
+        f"Evaluation of {len(report['cases'])} cases over "
+        f"{settings['passages']} passages",
+        f"Models: {settings['embedding_model']} (embedding), "
+        f"{settings['reranker_model']} (reranker)",
+        f"top_k {settings['top_k']}; depth {settings['depth']}; control "
+        f"{'on' if settings['control'] else 'off'}; duplicates "
+        f"{'collapsed' if settings['collapse_duplicates'] else 'separate'}"
+        + ("" if settings["sparse_channel"] else "; no sparse channel"),
+        "",
+    ]
+    for case in report["cases"]:
+        lines.append(f"== {case['id']} (line {case['line']})")
+        lines.append(f"Query: {_clip(case['query'])}")
+        if case["note"]:
+            lines.append(f"Note: {_clip(case['note'])}")
+        expected = case["expected"]
+        wanted = [
+            f"{label} {expected[key]}"
+            for key, label in (
+                ("source", "source"),
+                ("source_glob", "glob"),
+                ("fragment", "fragment"),
+            )
+            if expected[key]
+        ]
+        if expected["filters"]:
+            wanted.append(f"filters {format_filters(expected['filters'])}")
+        if expected["sources"] is not None:
+            roots = ", ".join(expected["roots"]) or "-"
+            wanted.append(f"indexed sources: {expected['sources']} (roots {roots})")
+        elif expected["roots"]:
+            wanted.append(f"root {', '.join(expected['roots'])}")
+        lines.append(f"Expected: {_clip('; '.join(wanted), 120)}")
+        lines.append(f"  {'LIST':<12}{'RANK':>6}{'SOURCE':>8}")
+        for name, rank in case["ranks"].items():
+            row = (
+                f"  {name:<12}{_number(rank['rank']):>6}"
+                f"{_number(rank['source_rank']):>8}"
+            )
+            if rank["reason"]:
+                row += f"  ({rank['reason'].replace('_', ' ')})"
+            lines.append(row)
+        control = (
+            f"rank {_number(case['control_rank'])}, "
+            f"score {_number(case['control_score'])}"
+            if settings["control"] and (expected["source"] or expected["source_glob"])
+            else "not run"
+        )
+        lines.append(
+            f"  within top_k: {'yes' if case['within_top_k'] else 'no'}; "
+            f"rerank score: {_number(case['rerank_score'])}; control: {control}"
+        )
+        lines.append("")
+    figures = report["aggregates"]
+    found = figures["found"]
+    lines.append(f"Aggregates over {figures['cases']} cases")
+    lines.append(
+        "  found: " + ", ".join(f"{name} {count}" for name, count in found.items())
+    )
+    lines.append(
+        "  final recall: "
+        + ", ".join(f"@{k} {_number(v)}" for k, v in figures["recall_at"].items())
+        + f"; MRR {_number(figures['mrr'])}"
+    )
+    lines.append(
+        f"  recall within top_k (stage1) {_number(figures['recall_stage1_top_k'])}; "
+        f"within depth: dense {_number(figures['recall_dense_depth'])}, "
+        f"sparse {_number(figures['recall_sparse_depth'])}, "
+        f"fused_deep {_number(figures['recall_fused_deep_depth'])}"
+    )
+    lines.append(
+        "Lost in the first stage (found at depth, not within top_k): "
+        + _ids(figures["lost_in_first_stage"])
+    )
+    lines.append(
+        f"Lost in rerank (within top_k, final rank above {LOST_IN_RERANK_AFTER}): "
+        + _ids(figures["lost_in_rerank"])
+    )
+    lines.append("Not found in any list: " + _ids(figures["not_found"]))
+    return "\n".join(lines) + "\n"
+
+
+def _evaluate(
+    args: argparse.Namespace,
+    settings: Settings,
+    factory: Callable[..., AbstractContextManager[EvaluateRetrieval]],
+) -> int:
+    """Run ``docgrep eval``: 0 when the run completed, also when cases are
+    not found; 2 for invalid arguments or a malformed cases file. Runtime
+    failures raise and exit with 1."""
+    for name, value in (("--top-k", args.top_k), ("--depth", args.depth)):
+        if value is not None and not 1 <= value <= MAX_PROBE_DEPTH:
+            sys.stderr.write(f"usage: {name} must be between 1 and {MAX_PROBE_DEPTH}\n")
+            return 2
+    try:
+        text = Path(args.cases_file).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        sys.stderr.write(f"usage: cannot read the cases file: {error}\n")
+        return 2
+    try:
+        cases = parse_cases(text)
+        with factory(settings, top_k=args.top_k) as evaluation:
+            report = evaluation.run(cases, depth=args.depth, control=args.control)
+    except ValidationError as error:
+        sys.stderr.write(f"{args.cases_file}: {_describe(error)}\n")
+        return 2
+    if args.json:
+        _emit(json.dumps(report.as_dict(), indent=2) + "\n")
+    else:
+        _emit(_format_eval(report.as_dict()))
+    return 0
+
+
 def _is_closed_pipe(error: OSError) -> bool:
     return isinstance(error, BrokenPipeError) or error.errno == errno.EPIPE
 
@@ -1396,6 +1579,9 @@ def main(
     context_factory: Callable[
         [Settings], AbstractContextManager[ContextOperation]
     ] = open_context,
+    evaluation_factory: Callable[
+        ..., AbstractContextManager[EvaluateRetrieval]
+    ] = open_evaluation,
     register_signal: Register = signal.signal,
 ) -> int:
     """Run one CLI command and return a process exit status.
@@ -1490,6 +1676,9 @@ def main(
         if args.command == "context":
             with context_factory(settings) as context:
                 return _context(args, context)
+
+        if args.command == "eval":
+            return _evaluate(args, settings, evaluation_factory)
 
         if args.command == "cancel":
             text, status = _format_cancel(cancel_factory(settings).run())
@@ -1594,7 +1783,8 @@ def main(
         # configuration errors with 2, like usage errors.
         return (
             2
-            if args.command in ("discover-scans", "ocr", "mcp", "sources", "context")
+            if args.command
+            in ("discover-scans", "ocr", "mcp", "sources", "context", "eval")
             else 1
         )
     except OSError as error:
