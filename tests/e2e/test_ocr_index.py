@@ -22,6 +22,7 @@ from docgrep.usecases.update_index import UpdateSummary
 from ocr_support import CopyConverter, TextLayerEngine
 from pdf_support import pdf_bytes, prose, write_pdf
 from resume_support import close, dump_points, settings_for, write_corpus
+from sparse_support import as_tf_v1_build
 from update_support import sources_table, update_services
 
 STAMP = 1_700_000_000
@@ -125,7 +126,14 @@ def test_ocr_then_update_indexes_the_sibling_instead_of_the_original(
 
 
 def test_the_updated_index_equals_a_clean_build(settings: Settings) -> None:
-    _build(settings)
+    # A bm25-v2 update keeps the average length the index records, which a
+    # clean build computes anew; tf-v1 weights depend on no average, so both
+    # indexes are built as tf-v1, and the update keeps that (ADR-0025).
+    services = update_services(settings)
+    try:
+        as_tf_v1_build(services.build).run()
+    finally:
+        close(services)
     _ocr(settings, "scan.pdf", "partial.pdf")
     _update(settings)
     points = dump_points(settings)
@@ -133,7 +141,7 @@ def test_the_updated_index_equals_a_clean_build(settings: Settings) -> None:
 
     services = update_services(settings)
     try:
-        services.build.run(refuse_resumable=False)
+        as_tf_v1_build(services.build).run(refuse_resumable=False)
     finally:
         close(services)
 

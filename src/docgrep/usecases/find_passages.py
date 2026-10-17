@@ -31,10 +31,12 @@ from docgrep.domain.protocols import (
     Reranker,
     RootCatalog,
     SparseEncoder,
+    SparseEncoders,
     ranked_passage_key,
 )
 from docgrep.domain.roots import CorpusRoots, known_root_names
 from docgrep.domain.sources import SourceFilter, check_roots, matches
+from docgrep.domain.sparse import SparseWeighting
 
 _LOG = logging.getLogger(__name__)
 
@@ -198,13 +200,18 @@ class FindPassages:
         ocr: OcrOutputOwners | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         roots: RootCatalog | None = None,
+        sparse_encoders: SparseEncoders | None = None,
     ) -> None:
+        """With ``sparse_encoders`` the query is encoded for the sparse
+        weighting the index records (ADR-0025); without them, always with
+        ``sparse_encoder``."""
         if top_k <= 0 or not 0 < default_top_n <= top_n_max:
             raise ValueError("result limits must be positive")
         if max_query_len <= 0:
             raise ValueError("max_query_len must be positive")
         self.embedder = embedder
         self.sparse_encoder = sparse_encoder
+        self.sparse_encoders = sparse_encoders
         self.retriever = retriever
         self.reranker = reranker
         self.top_k = top_k
@@ -247,7 +254,7 @@ class FindPassages:
                 details={"minimum": 1, "maximum": self.top_n_max},
             )
 
-        self.check_index()
+        sparse_query = self.query_encoder(self.check_index())
         applied_config: tuple[tuple[str, str | int | float | bool], ...] = (
             ("embedding_model", self.embedder.model_name),
             ("max_query_len", self.max_query_len),
@@ -313,7 +320,9 @@ class FindPassages:
             # Nothing can match, so no model and no retrieval is needed.
             return result((), 0, hint=NO_MATCHING_SOURCES_HINT)
 
-        ranking = self._rank(query, self._embed(query), scope, collapsing=collapsing)
+        ranking = self._rank(
+            query, self._embed(query), scope, sparse_query, collapsing=collapsing
+        )
         if ranking is None:
             return result((), 0)
         # Only the returned passages are sanitized, not every candidate.
@@ -351,7 +360,7 @@ class FindPassages:
             else collapse_duplicates
         )
         self._check_query(query)
-        self.check_index()
+        sparse_query = self.query_encoder(self.check_index())
         scope = None
         if source_filter is not None and source_filter.applied():
             sanitizer = RequestSanitizer(self.now().year, self.ocr, self.manifest)
@@ -380,7 +389,9 @@ class FindPassages:
                     "reason": "embedder returned an invalid query vector",
                 },
             )
-        ranking = self._rank(query, dense_vector, scope, collapsing=collapsing)
+        ranking = self._rank(
+            query, dense_vector, scope, sparse_query, collapsing=collapsing
+        )
         if ranking is None:
             return Diagnosis((), {}, self.top_k, source_ids=allowed)
         return Diagnosis(
@@ -401,9 +412,10 @@ class FindPassages:
                 details={"max_query_len": self.max_query_len},
             )
 
-    def check_index(self) -> None:
+    def check_index(self) -> Mapping[str, str | int | float]:
         """Refuse an index without completion metadata or built with another
-        embedding model or dimension: ``IndexIncomplete`` or ``ConfigDrift``."""
+        embedding model or dimension: ``IndexIncomplete`` or ``ConfigDrift``.
+        Returns the completion metadata."""
         metadata = self.retriever.read_completion_metadata()
         if metadata is None or not isinstance(metadata.get("embedding_model"), str):
             raise IndexIncomplete("Index has no valid completion metadata")
@@ -428,6 +440,27 @@ class FindPassages:
                     "configured_dimension": self.embedder.dimension,
                 },
             )
+        return metadata
+
+    def sparse_weighting(
+        self, metadata: Mapping[str, str | int | float]
+    ) -> SparseWeighting:
+        """The sparse weighting an index records; ``ConfigDrift`` for one
+        this version does not know."""
+        try:
+            return SparseWeighting.from_metadata(metadata)
+        except ValueError as error:
+            raise ConfigDrift(
+                "The index records a sparse weighting this version cannot "
+                "query; rebuild the index with `docgrep index`",
+                details={"reason": str(error)},
+            ) from error
+
+    def query_encoder(self, metadata: Mapping[str, str | int | float]) -> SparseEncoder:
+        """The encoder of the query side of an index's sparse channel."""
+        if self.sparse_encoders is None:
+            return self.sparse_encoder
+        return self.sparse_encoders.query_encoder(self.sparse_weighting(metadata))
 
     def _embed(self, query: str) -> tuple[float, ...]:
         try:
@@ -451,12 +484,13 @@ class FindPassages:
         query: str,
         dense_vector: Sequence[float],
         scope: _Scope | None,
+        sparse_encoder: SparseEncoder,
         *,
         collapsing: bool,
     ) -> _Ranking | None:
         """Recall, rerank and order the candidates of one query; None when
         no valid candidate was found."""
-        sparse = self.sparse_encoder.encode(query)
+        sparse = sparse_encoder.encode(query)
         if scope is None or scope.source_ids is None:
             candidates = self.retriever.retrieve(dense_vector, sparse, self.top_k)
         else:

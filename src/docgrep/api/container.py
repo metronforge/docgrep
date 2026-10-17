@@ -26,7 +26,7 @@ from docgrep.adapters.models.real import (
     BgeReranker,
     load_tokenizer,
 )
-from docgrep.adapters.models.sparse import BM25SparseEncoder
+from docgrep.adapters.models.sparse import SparseEncoderSet, TermFrequencyEncoder
 from docgrep.adapters.ocrmypdf import DdjvuConverter, LocalOcrFiles, OcrmypdfEngine
 from docgrep.adapters.parsers.djvu import DjvuParser
 from docgrep.adapters.parsers.docx import DocxParser
@@ -622,7 +622,8 @@ def open_evaluation(
         yield EvaluateRetrieval(
             search=FindPassages(
                 embedder=embedder,
-                sparse_encoder=BM25SparseEncoder(),
+                sparse_encoder=TermFrequencyEncoder(),
+                sparse_encoders=SparseEncoderSet(),
                 retriever=store,
                 reranker=reranker,
                 top_k=settings.top_k if top_k is None else top_k,
@@ -650,7 +651,8 @@ def create_container(
     """
     configure_logging(settings.log_level)
     embedder, reranker, tokenizer = _models(settings)
-    sparse = BM25SparseEncoder()
+    sparse = TermFrequencyEncoder()
+    encoders = SparseEncoderSet()
     store = (
         QdrantPassageStore(url=settings.qdrant_url, alias=settings.qdrant_alias)
         if settings.qdrant_url
@@ -680,6 +682,7 @@ def create_container(
         search=FindPassages(
             embedder=embedder,
             sparse_encoder=sparse,
+            sparse_encoders=encoders,
             retriever=store,
             reranker=reranker,
             top_k=settings.top_k,
@@ -708,6 +711,8 @@ def create_container(
             delegations=delegations,
             roots=catalog,
             availability=corpus,
+            sparse_encoders=encoders,
+            sparse_store=store,
         ),
         update=UpdateIndex(
             lock=lock,
@@ -724,6 +729,7 @@ def create_container(
             delegations=delegations,
             roots=catalog,
             availability=corpus,
+            sparse_encoders=encoders,
         ),
         # The search store is shared, so a local store is never opened twice.
         browse=BrowseSources(

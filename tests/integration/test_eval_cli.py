@@ -16,6 +16,7 @@ from docgrep.api.container import create_container
 from mcp_support import environment, snapshot
 from resume_support import close
 from search_filter_support import TOP_K, filter_settings, write_filter_library
+from sparse_support import as_tf_v1_build
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "eval-cases.example.jsonl"
 
@@ -23,7 +24,8 @@ EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "eval-cases.example
 def _built(root: Path) -> Path:
     write_filter_library(root / "corpus")
     services = create_container(filter_settings(root))
-    summary = services.build.run()
+    # The expected ranks were recorded on a tf-v1 index (ADR-0025).
+    summary = as_tf_v1_build(services.build).run()
     assert (summary.indexed, summary.failed) == (16, 0), summary
     close(services)
     cases = root / "cases.private.jsonl"

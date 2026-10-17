@@ -40,6 +40,8 @@ from docgrep.domain.protocols import (
     PassageWriter,
     RootCatalog,
     SparseEncoder,
+    SparseEncoders,
+    SparseVectorStore,
     parser_version,
 )
 from docgrep.domain.roots import (
@@ -58,6 +60,14 @@ from docgrep.domain.run_state import (
     run_state,
     swap_already_happened,
 )
+from docgrep.domain.sparse import (
+    DEFAULT_B,
+    DEFAULT_K1,
+    PROVISIONAL_AVGDL,
+    SparseWeighting,
+    check_bm25_parameters,
+)
+from docgrep.usecases.sparse_vectors import average_length, encode_pages
 
 _LOG = logging.getLogger(__name__)
 _T = TypeVar("_T")
@@ -227,6 +237,13 @@ class SourceIndexing:
     # The roots of the run (ADR-0023); None: one unnamed root, as before.
     roots: RootCatalog | None = None
     availability: CorpusAvailability | None = None
+    # The document encoder of the weighting this run writes (ADR-0025),
+    # chosen when the run starts; None: ``sparse_encoder``.
+    _run_sparse_encoder: SparseEncoder | None = None
+
+    def document_sparse_encoder(self) -> SparseEncoder:
+        """The encoder that new passages of this run are written with."""
+        return self._run_sparse_encoder or self.sparse_encoder
 
     def run_roots(self) -> CorpusRoots | None:
         """The roots of the run, knowing every prefix the index records.
@@ -348,8 +365,9 @@ class SourceIndexing:
             except Exception as error:
                 return Prepared(parsed, "failed:embedding_error", error=error)
             all_vectors.extend(vectors)
+        sparse = self.document_sparse_encoder()
         items = tuple(
-            (passage, parsed, vector, self.sparse_encoder.encode(passage.text))
+            (passage, parsed, vector, sparse.encode(passage.text))
             for passage, vector in zip(passages, all_vectors, strict=True)
         )
         return Prepared(parsed, "indexed", items)
@@ -427,7 +445,14 @@ class BuildIndex(SourceIndexing):
         delegations: OcrDelegations | None = None,
         roots: RootCatalog | None = None,
         availability: CorpusAvailability | None = None,
+        sparse_encoders: SparseEncoders | None = None,
+        sparse_store: SparseVectorStore | None = None,
+        bm25_k1: float = DEFAULT_K1,
+        bm25_b: float = DEFAULT_B,
     ) -> None:
+        """With ``sparse_encoders`` and ``sparse_store`` the index gets
+        ``bm25-v2`` sparse vectors (ADR-0025); without them every passage
+        is written with ``sparse_encoder`` and no weighting is recorded."""
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if upsert_batch_size <= 0:
@@ -436,6 +461,11 @@ class BuildIndex(SourceIndexing):
             raise ValueError("progress_every_sources must be positive")
         if progress_every_seconds <= 0:
             raise ValueError("progress_every_seconds must be positive")
+        check_bm25_parameters(bm25_k1, bm25_b)
+        self.sparse_encoders = sparse_encoders
+        self.sparse_store = sparse_store
+        self.bm25_k1 = bm25_k1
+        self.bm25_b = bm25_b
         self.delegations = delegations
         self.roots = roots
         self.availability = availability
@@ -463,6 +493,51 @@ class BuildIndex(SourceIndexing):
     def _finish_swapped_run(self) -> ManifestRunRecord | None:
         """Finish the latest build if it only lacks its commit; see the function."""
         return finish_swapped_run(self.manifest, self.passage_writer)
+
+    def _writes_bm25(self) -> bool:
+        return self.sparse_encoders is not None and self.sparse_store is not None
+
+    def _choose_sparse_encoder(self) -> None:
+        """Passages are written with BM25 weights under a provisional average
+        length while the sources stream in; ``_final_sparse_weighting``
+        computes the true one from the staging collection and re-encodes
+        every passage before the index is published."""
+        self._run_sparse_encoder = None
+        if self.sparse_encoders is not None and self._writes_bm25():
+            self._run_sparse_encoder = self.sparse_encoders.document_encoder(
+                SparseWeighting.bm25(self.bm25_k1, self.bm25_b, PROVISIONAL_AVGDL)
+            )
+
+    def _final_sparse_weighting(self, run_id: str) -> SparseWeighting | None:
+        """Re-encode the whole staging collection with its own average
+        length; None when this build records no weighting.
+
+        Every passage is encoded again, those carried over from an earlier
+        run included, so a resumed build never mixes average lengths. A
+        cancel is honoured between pages; the staging collection then stays
+        resumable.
+        """
+        encoders, store = self.sparse_encoders, self.sparse_store
+        if encoders is None or store is None:
+            return None
+
+        def check() -> None:
+            self._check_cancel(run_id)
+
+        started = self.clock()
+        avgdl, passages = average_length(store, encoders, between_pages=check)
+        weighting = SparseWeighting.bm25(self.bm25_k1, self.bm25_b, avgdl)
+        encode_pages(store, encoders.document_encoder(weighting), before_page=check)
+        _LOG.info(
+            "sparse_vectors_encoded",
+            extra={
+                "run_id": run_id,
+                "passages": passages,
+                "bm25_avgdl": round(avgdl, 3),
+                "elapsed_seconds": round(self.clock() - started, 1),
+            },
+        )
+        return weighting
 
     def _drop_orphaned_staging_collections(self) -> None:
         for name in self.passage_writer.staging_collections():
@@ -555,6 +630,7 @@ class BuildIndex(SourceIndexing):
                 self._refuse_if_resumable()
             roots = self.run_roots()
             self._refuse_dropping_other_roots(roots)
+            self._choose_sparse_encoder()
             run_id = self.manifest.start_run(
                 {**self.run_config, **self.roots_config(roots)}
             )
@@ -650,6 +726,7 @@ class BuildIndex(SourceIndexing):
                 )
             journal = self.manifest.run_sources(latest.run_id)
             self._check_staging(latest, journal)
+            self._choose_sparse_encoder()
             sources = self.enumerator.enumerate()
             carried, retried, removed = self._split_journal(
                 journal, sources, retry_failed
@@ -846,7 +923,10 @@ class BuildIndex(SourceIndexing):
                 progress.advance(written, totals["failed"])
             progress.finish(totals["failed"])
             self._check_cancel(run_id)
+            weighting = self._final_sparse_weighting(run_id)
             metadata = dict(self.config)
+            if weighting is not None:
+                metadata.update(weighting.metadata())
             metadata.update(
                 embedding_model=self.embedder.model_name,
                 embedding_dimension=self.embedder.dimension,

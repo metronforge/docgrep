@@ -24,6 +24,7 @@ from docgrep.domain.models import (
 )
 from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.scans import PageSample
+from docgrep.domain.sparse import SparseWeighting
 
 
 class DocumentParser(Protocol):
@@ -185,6 +186,50 @@ class SparseEncoder(Protocol):
     """Encode document or query text into stable sparse term weights."""
 
     def encode(self, text: str) -> Mapping[int, float]: ...
+
+
+class SparseEncoders(Protocol):
+    """The sparse encoders of every weighting, on one tokenizer (ADR-0025).
+
+    The tokenizer and the term indices are the same for every weighting;
+    only the values differ.
+    """
+
+    def document_encoder(self, weighting: SparseWeighting) -> SparseEncoder: ...
+
+    def query_encoder(self, weighting: SparseWeighting) -> SparseEncoder: ...
+
+    def document_length(self, text: str) -> int:
+        """The number of tokens of a passage under the sparse tokenizer."""
+        ...
+
+
+class SparseVectorStore(Protocol):
+    """Read passage texts and rewrite sparse vectors in place (ADR-0025).
+
+    Every call works on the collection being built when one is open, and on
+    the published collection otherwise; ``StoreUnavailable`` when there is
+    neither.
+    """
+
+    def target_passage_count(self) -> int:
+        """The number of passages in that collection."""
+        ...
+
+    def passage_text_page(
+        self, offset: str | None, limit: int
+    ) -> tuple[tuple[tuple[str, str], ...], str | None]:
+        """Up to ``limit`` passages as ``(passage_id, text)``, starting at
+        ``offset`` (None: the beginning) in a stable order, and the offset of
+        the next page (None after the last one)."""
+        ...
+
+    def write_sparse_vectors(
+        self, vectors: Sequence[tuple[str, Mapping[int, float]]]
+    ) -> None:
+        """Replace the sparse vector of each passage, by passage id; dense
+        vectors and payloads stay as they are. Durable on return."""
+        ...
 
 
 class PassageWriter(Protocol):

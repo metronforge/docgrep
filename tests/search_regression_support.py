@@ -35,6 +35,7 @@ from docgrep.settings import Settings
 from docgrep.usecases.find_passages import FindPassages
 from resume_support import close
 from search_filter_support import filter_settings, write_filter_library
+from sparse_support import as_tf_v1_build
 
 FIXTURE = Path(__file__).resolve().parent / "search_bodies.json"
 
@@ -84,7 +85,8 @@ def http_client(root: Path) -> Iterator[TestClient]:
     write_library(root / "corpus")
     settings: Settings = filter_settings(root)
     services = create_container(settings)
-    summary = services.build.run()
+    # The bodies were recorded on a tf-v1 index (ADR-0025).
+    summary = as_tf_v1_build(services.build).run()
     assert (summary.indexed, summary.failed) == (18, 0), summary
     try:
         yield TestClient(
