@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.21.1 (2026-10-17)
+
+### Bug Fixes
+
+- **usecases**: Skip empty sparse vectors when re-encoding
+  ([`4f87673`](https://github.com/metronforge/docgrep/commit/4f87673796c4cff316e2f84469b7740800d4aa6c))
+
+
 ## v1.21.0 (2026-10-17)
 
 ### Documentation
