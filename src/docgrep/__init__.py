@@ -1,3 +1,3 @@
 """Local document corpus search."""
 
-__version__ = "1.15.0"
+__version__ = "1.16.0"

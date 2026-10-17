@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v1.16.0 (2026-10-17)
+
+### Documentation
+
+- Describe filtered search
+  ([`c0d61b6`](https://github.com/metronforge/docgrep/commit/c0d61b6871785db312d6c9d688cd2d57a5f6feb4))
+
+### Features
+
+- **adapters**: Restrict first-stage retrieval to an allow-list of sources
+  ([`2fa8409`](https://github.com/metronforge/docgrep/commit/2fa8409c1165a275eb7dd80650d99441b621a417))
+
+- **api**: Structured filters in /search, find_passages and the CLI
+  ([`84dfc40`](https://github.com/metronforge/docgrep/commit/84dfc401044d2b193afd04a5afc182e7c8581b4a))
+
+- **usecases**: Filter search by source metadata
+  ([`706912b`](https://github.com/metronforge/docgrep/commit/706912b7cbd6421be410decd8762d21c0fdc3e5a))
+
+
 ## v1.15.0 (2026-10-16)
 
 ### Documentation
