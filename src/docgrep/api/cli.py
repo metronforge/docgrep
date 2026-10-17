@@ -805,15 +805,21 @@ def _format_reencode_plan(plan: ReencodePlan) -> str:
 
 
 def _format_reencode(summary: ReencodeSummary) -> str:
+    skipped = (
+        f" ({summary.skipped} skipped: no sparse token, vector already empty)"
+        if summary.skipped
+        else ""
+    )
     if summary.cancelled:
         return (
             f"Sparse re-encode run {summary.run_id} cancelled after "
-            f"{summary.written} passages in {summary.elapsed_seconds:.2f}s. "
+            f"{summary.written} passages{skipped} in "
+            f"{summary.elapsed_seconds:.2f}s. "
             "Search keeps working; continue with `docgrep reencode-sparse --yes`.\n"
         )
     return (
         f"Sparse re-encode run {summary.run_id}: {summary.written} passages "
-        f"written in {summary.elapsed_seconds:.2f}s; the index now has "
+        f"written{skipped} in {summary.elapsed_seconds:.2f}s; the index now has "
         f"{_plan_weighting(summary.plan.target)}.\n"
     )
 

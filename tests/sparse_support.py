@@ -1,6 +1,7 @@
 """Indexes with the sparse weighting of release 1.20.0, and the corpus shape
 that made it fail (ADR-0025)."""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -44,3 +45,39 @@ def write_issue_shape(corpus: Path) -> None:
     (corpus / SHAPE_SHORT).write_text(
         "notes on context engineering for the test platform", "utf-8"
     )
+
+
+# A passage without any token of the sparse tokenizer (GitHub issue #48).
+NO_TOKEN_TEXT = "— · — · …"
+
+
+def record_aborted_1_21_run(
+    manifest: Any,
+    *,
+    completed_at: str,
+    avgdl: float,
+    total: int,
+    offset: str,
+    done: int,
+) -> str:
+    """Journal a re-encode run exactly as release 1.21.0 left it after the
+    422 of issue #48: aborted, with its parameters, the index it re-encodes
+    and a checkpoint (without the later ``skipped`` key) after ``done``
+    passages; returns its run id."""
+    run_id: str = manifest.start_run(
+        {
+            "sparse_encoder": "bm25-v2",
+            "bm25_k1": 1.2,
+            "bm25_b": 0.75,
+            "bm25_avgdl": avgdl,
+            "index_completed_at": completed_at,
+        },
+        kind="reencode_sparse",
+    )
+    manifest.set_total_sources(run_id, total)
+    manifest.set_checkpoint(
+        run_id,
+        json.dumps({"offset": offset, "done": done, "scanned": False}, sort_keys=True),
+    )
+    manifest.finish_run(run_id, "aborted", {"passages": done})
+    return run_id

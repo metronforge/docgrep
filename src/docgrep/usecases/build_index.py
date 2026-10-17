@@ -148,6 +148,8 @@ class Progress:
     """Emit ``index_progress`` records on a count and a time cadence.
 
     Only counters and timings are logged, never paths, titles or text.
+    ``unit`` names the counted units in the record (``sources_done``,
+    ``passages_done``); the rate and ETA run from ``started``.
     """
 
     def __init__(
@@ -160,8 +162,10 @@ class Progress:
         every_sources: int,
         every_seconds: float,
         carried: int = 0,
+        unit: str = "sources",
     ) -> None:
         self._carried = carried
+        self._unit = unit
         self._run_id = run_id
         self._total = total
         self._clock = clock
@@ -202,8 +206,8 @@ class Progress:
             "index_progress",
             extra={
                 "run_id": self._run_id,
-                "sources_done": self.done,
-                "sources_total": self._total,
+                f"{self._unit}_done": self.done,
+                f"{self._unit}_total": self._total,
                 "passages_written": self.passages,
                 "elapsed_seconds": round(elapsed, 1),
                 "passages_per_second": (

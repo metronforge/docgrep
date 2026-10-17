@@ -87,28 +87,43 @@ class ReencodePlan:
 
 @dataclass(frozen=True, slots=True)
 class ReencodeSummary:
-    """The outcome of a re-encode run; ``run_id`` is None for a no-op."""
+    """The outcome of a re-encode run; ``run_id`` is None for a no-op.
+
+    ``skipped`` counts the passages of this run without any sparse token,
+    whose stored vector is already empty and is left as it is.
+    """
 
     plan: ReencodePlan
     run_id: str | None = None
     written: int = 0
     elapsed_seconds: float = 0.0
     cancelled: bool = False
+    skipped: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class _Checkpoint:
     """Where a run has got to: the offset of the next page (None at the
-    start or after the last page), the passages written, and whether the
-    last page is written."""
+    start or after the last page), the passages done (written or skipped),
+    whether the last page is written, and the passages skipped so far.
+
+    ``skipped`` is absent from checkpoints written before it existed, which
+    load with 0.
+    """
 
     offset: str | None = None
     done: int = 0
     scanned: bool = False
+    skipped: int = 0
 
     def dumps(self) -> str:
         return json.dumps(
-            {"offset": self.offset, "done": self.done, "scanned": self.scanned},
+            {
+                "offset": self.offset,
+                "done": self.done,
+                "scanned": self.scanned,
+                "skipped": self.skipped,
+            },
             sort_keys=True,
         )
 
@@ -122,6 +137,7 @@ class _Checkpoint:
             None if offset is None else str(offset),
             int(data.get("done", 0)),
             bool(data.get("scanned", False)),
+            int(data.get("skipped", 0)),
         )
 
 
@@ -135,6 +151,11 @@ class _Resume:
 def _index_identity(metadata: Mapping[str, str | int | float]) -> str:
     """What tells one published index from the next: its build time."""
     return str(metadata.get("completed_at", ""))
+
+
+def _totals(state: _Checkpoint) -> dict[str, int]:
+    """The run journal totals: passages done and those skipped as empty."""
+    return {"passages": state.done, "skipped_empty": state.skipped}
 
 
 def reencode_progress(run: ManifestRunRecord) -> tuple[int, int | None]:
@@ -335,25 +356,34 @@ class ReencodeSparse:
                 BM25_AVGDL_KEY: target.avgdl,
             },
         )
+        # The rate and ETA cover the writing only, not the planning scan.
         progress = Progress(
             run_id=run_id,
             total=plan.passages,
             clock=self.clock,
-            started=started,
+            started=self.clock(),
             every_sources=self.progress_every_passages,
             every_seconds=self.progress_every_seconds,
             carried=checkpoint.done,
+            unit="passages",
         )
         written = 0
+        skipped = 0
         state = checkpoint
         cancelled = False
 
-        def after_page(following: str | None, count: int) -> None:
-            nonlocal state, written
+        def after_page(following: str | None, count: int, empty: int) -> None:
+            nonlocal state, written, skipped
             written += count
-            state = _Checkpoint(following, state.done + count, following is None)
+            skipped += empty
+            state = _Checkpoint(
+                following,
+                state.done + count + empty,
+                following is None,
+                state.skipped + empty,
+            )
             self.manifest.set_checkpoint(run_id, state.dumps())
-            progress.advance(count, 0, done=count)
+            progress.advance(count, 0, done=count + empty)
 
         try:
             if not state.scanned:
@@ -368,12 +398,12 @@ class ReencodeSparse:
             progress.finish(0)
             self._check_cancel(run_id)
             self.index.merge_completion_metadata(target.metadata())
-            self.manifest.finish_run(run_id, "completed", {"passages": state.done})
+            self.manifest.finish_run(run_id, "completed", _totals(state))
         except Cancelled:
-            self.manifest.finish_run(run_id, "cancelled", {"passages": state.done})
+            self.manifest.finish_run(run_id, "cancelled", _totals(state))
             cancelled = True
         except Exception as error:
-            self.manifest.finish_run(run_id, "aborted", {"passages": state.done})
+            self.manifest.finish_run(run_id, "aborted", _totals(state))
             if isinstance(error, DocgrepError):
                 raise
             raise BuildFailed(
@@ -388,7 +418,8 @@ class ReencodeSparse:
             extra={
                 "run_id": run_id,
                 "passages_written": written,
+                "passages_skipped_empty": skipped,
                 "duration_ms": round(elapsed * 1000, 1),
             },
         )
-        return ReencodeSummary(plan, run_id, written, elapsed, cancelled)
+        return ReencodeSummary(plan, run_id, written, elapsed, cancelled, skipped)

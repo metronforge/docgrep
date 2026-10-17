@@ -751,11 +751,19 @@ class QdrantPassageStore:
     def write_sparse_vectors(
         self, vectors: Sequence[tuple[str, Mapping[int, float]]]
     ) -> None:
-        """Replace only the ``sparse`` vector of each point and wait."""
-        if not vectors:
-            return
+        """Replace only the ``sparse`` vector of each point and wait.
+
+        An empty vector is dropped with a debug record: a point with no
+        vector to update is rejected by Qdrant, and an empty sparse vector
+        stays empty under any weighting.
+        """
         points = []
         for passage_id, sparse in vectors:
+            if not sparse:
+                _LOG.debug(
+                    "empty_sparse_vector_skipped", extra={"passage_id": passage_id}
+                )
+                continue
             indices = sorted(sparse)
             points.append(
                 models.PointVectors(
@@ -767,6 +775,8 @@ class QdrantPassageStore:
                     },
                 )
             )
+        if not points:
+            return
         self._client.update_vectors(self._sparse_target(), points=points, wait=True)
 
     @_domain_errors
