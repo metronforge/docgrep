@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v1.18.0 (2026-10-17)
+
+### Documentation
+
+- Describe passage context
+  ([`6108296`](https://github.com/metronforge/docgrep/commit/6108296d168a610c07c2f4ccfbbddebd6aad4ff4))
+
+### Features
+
+- **adapters**: Read passages and source outlines for context
+  ([`0ccfeb8`](https://github.com/metronforge/docgrep/commit/0ccfeb82ee12576762e84e9dd5bb5ddc9accf0b5))
+
+- **api**: Expand passage context over HTTP, MCP and the CLI
+  ([`2cb172f`](https://github.com/metronforge/docgrep/commit/2cb172fbe6e8cdbc13473b9df9a6c966e56c36b5))
+
+- **domain**: Assemble passage context from neighbouring passages
+  ([`a1ca54d`](https://github.com/metronforge/docgrep/commit/a1ca54d54df5212be817755e5fec8bdd3855f7c5))
+
+- **usecases**: Expand the context around passages
+  ([`4b0ba77`](https://github.com/metronforge/docgrep/commit/4b0ba770b4e4a6f00b2122e9ba74c2dc0d9e88ac))
+
+
 ## v1.17.0 (2026-10-17)
 
 ### Documentation
