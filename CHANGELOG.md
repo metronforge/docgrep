@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v1.20.0 (2026-10-17)
+
+### Documentation
+
+- Describe the retrieval evaluation harness
+  ([`0ed12dd`](https://github.com/metronforge/docgrep/commit/0ed12dd55bd3a26d6131bcfd6c8dc4de75f7555a))
+
+### Features
+
+- **adapters**: Probe the dense, sparse and fused channels
+  ([`01cb309`](https://github.com/metronforge/docgrep/commit/01cb3091ef55acd75aaa68b0997012fa6d4f88fa))
+
+- **api**: Add the docgrep eval command
+  ([`50638b3`](https://github.com/metronforge/docgrep/commit/50638b32963ba57c473d3136ceebbc0f61719ff1))
+
+- **usecases**: Evaluate known-item retrieval cases
+  ([`146cae8`](https://github.com/metronforge/docgrep/commit/146cae85710e8a765ecaa024fc3e546f6c39fae1))
+
+- **usecases**: Expose the full ranked pipeline for diagnostics
+  ([`0e6c033`](https://github.com/metronforge/docgrep/commit/0e6c033ac54574f0ebb7ddc7b6c7eb22a453fd51))
+
+
 ## v1.19.0 (2026-10-17)
 
 ### Documentation
