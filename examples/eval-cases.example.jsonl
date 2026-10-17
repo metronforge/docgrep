@@ -1,0 +1,8 @@
+# Known-item cases for `docgrep eval`, one JSON object per line.
+# Built for the synthetic library of tests/search_filter_support.py; keep
+# real cases, which name private files, in a *.private.jsonl file.
+{"id": "arnold-title", "query": "mathematical methods of classical mechanics", "source": "books/arnold.md", "note": "words of the passage itself"}
+{"id": "arnold-comet", "query": "comet orbit", "source": "books/arnold.md", "fragment": "mention a comet once", "note": "decoys outrank it in the first stage"}
+{"id": "late-lectures", "query": "differential equations", "source_glob": "books/*.md", "fragment": "ordinary differential equations"}
+{"id": "kepler-mars", "query": "orbit of Mars", "fragment": "Kepler on the orbit", "filters": {"file_types": ["txt"]}}
+{"id": "punctuation", "query": "?!", "source": "notes/plain.md", "note": "no sparse terms"}
