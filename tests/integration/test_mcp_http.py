@@ -216,13 +216,21 @@ def test_status_never_opens_the_models_or_the_search_store(tmp_path: Path) -> No
     assert structured(result)["sources"]["total"] == 5
 
 
+# Document N holds the first N + 1 terms of the query, so the lexical reranker
+# of the fake backend gives every document a different score and the order of
+# the results does not rest on ties (#42).
+_LONG_TERMS = tuple(["heron", *(f"plume{index:02d}" for index in range(1, 30))])
+_LONG_QUERY = " ".join(_LONG_TERMS)
+
+
 def _long_library(root: Path) -> Settings:
     corpus = root / "corpus"
     corpus.mkdir(parents=True)
     words = " ".join(f"word{index:05d}" for index in range(1200))
     for number in range(30):
+        terms = " ".join(_LONG_TERMS[: number + 1])
         (corpus / f"long{number:02d}.txt").write_text(
-            f"heron marker{number} {words}", encoding="utf-8"
+            f"{terms} marker{number} {words}", encoding="utf-8"
         )
     return Settings(
         corpus_root=corpus,
@@ -242,19 +250,26 @@ def test_a_large_result_drops_whole_passages_to_stay_within_the_budget(
     services.build.run()
     try:
         server = create_mcp_server(settings, services=lambda: services)
-        result: Any = anyio.run(
-            server.call_tool, "find_passages", {"query": "heron", "top_n": 25}
-        )
+        arguments = {"query": _LONG_QUERY, "top_n": 25}
+        result: Any = anyio.run(server.call_tool, "find_passages", arguments)
         with TestClient(
             create_app(settings, services=services), base_url="http://127.0.0.1"
         ) as client:
-            rest = client.post("/search", json={"query": "heron", "top_n": 25}).json()
+            rest = client.post("/search", json=arguments).json()
     finally:
         close(services)
 
     body = structured(result)
     kept = len(body["results"])
     assert 1 <= kept < 25 == len(rest["results"])
+    by_id = {item["passage"]["passage_id"]: item for item in rest["results"]}
+    kept_ids = {item["passage"]["passage_id"] for item in body["results"]}
+    assert len(by_id) == 25 and len(kept_ids) == kept
+    assert kept_ids <= by_id.keys()
+    for item in body["results"]:
+        assert item == by_id[item["passage"]["passage_id"]]
+    scores = [item["score"] for item in rest["results"]]
+    assert scores == sorted(set(scores), reverse=True)
     assert body["results"] == rest["results"][:kept]
     assert "left out" in body["hint"]
     rendered = text(result)
