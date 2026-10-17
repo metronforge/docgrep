@@ -626,6 +626,7 @@ uv run docgrep eval my-cases.private.jsonl
 uv run docgrep eval my-cases.private.jsonl --json > eval.json
 uv run docgrep eval my-cases.private.jsonl --top-k 300 --depth 5000 --no-control
 uv run docgrep eval my-cases.private.jsonl --rerank-pool 150
+uv run docgrep eval my-cases.private.jsonl --dense-hnsw-ef exact --hnsw-recall
 ```
 
 The cases file is JSON Lines: one JSON object per line; blank lines and lines starting with `#` are skipped. Fields:
@@ -649,14 +650,16 @@ Each case reports a rank (1-based; `-` or `null` when not found) in five lists, 
 
 - `dense` and `sparse`: each first-stage channel alone, read to `--depth` candidates (default 2000, at most 10000). `sparse` has no rank and a reason when the query has no sparse terms (`no_sparse_terms`) or the index has no sparse channel (`sparse_unavailable`); the fusion then has the dense list alone and carries the same reason;
 - `fused_deep`: the fusion of both channels at `--depth`, the first stage as search computes it, only deeper;
-- `stage1`: the position among the first-stage candidates the search reranks: `top_k` of them, or the [rerank pool](#rerank-pool) when one is set (`--top-k` replaces `DOCGREP_TOP_K`, `--rerank-pool` replaces `DOCGREP_RERANK_POOL`);
+- `stage1`: the position among the first-stage candidates the search reranks: the [rerank pool](#rerank-pool) (`--top-k` replaces `DOCGREP_TOP_K`, `--rerank-pool` replaces `DOCGREP_RERANK_POOL`, `--dense-hnsw-ef` replaces `DOCGREP_DENSE_HNSW_EF`);
 - `final`: the position in the search order after rerank and duplicate collapse, over all `top_k` candidates, not only the first `top_n`. A passage collapsed into a duplicate counts at the position of the passage that carries it.
 
 `within_top_k` says whether a hit is among the `top_k` candidates; `rerank_score` is the `score` search returns for the best-placed hit (empty when it is not within `top_k` or rerank was skipped). Unless `--no-control` is given, a case with `source` or `source_glob` also runs a control search restricted to those sources, through filtered search: `control_rank` and `control_score` show whether the passage can be retrieved at all when the other sources are out of the way.
 
 Reading the result: a hit in a channel or in `fused_deep` that is not within `top_k` is lost in the first stage; a hit within `top_k` with a poor `final` rank is demoted by the reranker; a good control rank with no `stage1` rank means the competing sources crowd it out of the first stage. The aggregates give, over all cases, how many are found in each list, recall@1, 3, 5, 10 and 25 and MRR on `final` (a case not found counts 0), recall within `top_k` and within the depth, and the ids of the cases lost in the first stage, lost in rerank (within `top_k`, final rank above 10) and not found in any list.
 
-The text output starts with the index summary (passage count, models, `top_k`, depth, rerank pool and the [sparse weighting](#sparse-weights-bm25) of the index) and cuts long queries and notes with `…`. `--json` prints one object with `settings` (among them `top_k`, `rerank_pool`, `sparse_encoder`, `bm25_k1`, `bm25_b` and `bm25_avgdl`), `cases` (in file order, never cut) and `aggregates`, in a fixed key order and without timings, so two runs over the same index and settings give identical output. All queries are embedded in one call. The design is recorded in [ADR-0024](docs/adr/0024-retrieval-evaluation-through-a-diagnostic-seam.md).
+`--hnsw-recall` also measures, for every case, the recall of the dense channel at `top_k` against exact search: the share of the exact `top_k` nearest passages that the configured [search effort](#dense-search-effort) returns. It is reported per case and as a mean and a minimum (`hnsw_recall` in `--json`, after the aggregates); a value well below 1 means the dense channel loses passages before the fusion.
+
+The text output starts with the index summary (passage count, models, `top_k`, depth, rerank pool, dense search effort and the [sparse weighting](#sparse-weights-bm25) of the index) and cuts long queries and notes with `…`. `--json` prints one object with `settings` (among them `top_k`, `rerank_pool`, `dense_hnsw_ef`, `sparse_encoder`, `bm25_k1`, `bm25_b` and `bm25_avgdl`), `cases` (in file order, never cut), `aggregates` and, with `--hnsw-recall`, `hnsw_recall`, in a fixed key order and without timings, so two runs over the same index and settings give identical output. All queries are embedded in one call. The design is recorded in [ADR-0024](docs/adr/0024-retrieval-evaluation-through-a-diagnostic-seam.md).
 
 ## Sparse weights (BM25)
 
@@ -671,13 +674,27 @@ uv run docgrep reencode-sparse --yes           # re-encode
 
 `--k1` and `--b` choose other BM25 parameters, for example `docgrep reencode-sparse --yes --k1 1.5 --b 0.5`.
 
-The plan reads the text of every passage once to compute the average length. With `--yes` the command takes the index lock (it refuses while a build, update or OCR run holds it, and while a build is unfinished), reads the passages again and rewrites only the sparse vector of each point, in pages of 512; dense vectors and payloads are not touched and no model is loaded, so it needs no GPU. On the reference server it took about 2 minutes 20 seconds per 100,000 passages against a Qdrant server (15 seconds to compute the average length, the rest to rewrite), so a library of 870,000 passages takes 20 to 25 minutes. It logs `index_progress` records like a build, with `sources_done` and `sources_total` counting passages, and is recorded as a run of kind `reencode_sparse`. Search keeps working throughout; until the run ends some passages carry the new weights and some the old, and the index still records the old weighting. Ctrl-C or `docgrep cancel` stops it after the current page; running `docgrep reencode-sparse --yes` again continues from the last page written, with the average length and parameters the run started with (other `--k1` or `--b` values start over). While a re-encode is unfinished `docgrep update` refuses to run, so new passages never get the weighting being replaced. At the end the weighting is recorded in the index. Running it again with the same parameters does nothing; other parameters re-encode every passage again.
+The plan reads the text of every passage once to compute the average length. With `--yes` the command takes the index lock (it refuses while a build, update or OCR run holds it, and while a build is unfinished), reads the passages again and rewrites only the sparse vector of each point, in pages of 512; dense vectors and payloads are not touched and no model is loaded, so it needs no GPU. On the reference server it took about 2 minutes 20 seconds per 100,000 passages against a Qdrant server (15 seconds to compute the average length, the rest to rewrite), so a library of 870,000 passages takes 20 to 25 minutes. It logs `index_progress` records like a build, counting `passages_done` of `passages_total`, and is recorded as a run of kind `reencode_sparse`. Search keeps working throughout; until the run ends some passages carry the new weights and some the old, and the index still records the old weighting. Ctrl-C or `docgrep cancel` stops it after the current page; running `docgrep reencode-sparse --yes` again continues from the last page written, with the average length and parameters the run started with (other `--k1` or `--b` values start over). While a re-encode is unfinished `docgrep update` refuses to run, so new passages never get the weighting being replaced. At the end the weighting is recorded in the index. Running it again with the same parameters does nothing; other parameters re-encode every passage again.
 
 A full `docgrep index` writes `bm25-v2` itself: it writes BM25 weights under a provisional average length while it streams the sources, then computes the true average over everything it wrote and re-encodes every passage of the new collection before publishing it, so a resumed build equals an uninterrupted one. `docgrep update` keeps the average length the index records, so after many updates it may drift from the true average; a re-encode with the same parameters does nothing, while a rebuild or a re-encode with other parameters computes it anew.
 
 ### Rerank pool
 
-Each channel contributes its `top_k` best passages (`DOCGREP_TOP_K`, default 100), and their fusion is cut before the reranker. `DOCGREP_RERANK_POOL` sets how many fused candidates the reranker scores: a positive number, at most twice `top_k` (the size of the union of the two channels). Unset, it equals `top_k`, and search behaves exactly as before. A larger pool rescues a passage that one channel ranks well but the fusion pushes below `top_k`, at the cost of reranking more candidates per query. The pool appears in `GET /info` and, when it differs from `top_k`, in the `applied_config` of a search. The default stays at `top_k` until measurements decide otherwise.
+Each channel contributes its `top_k` best passages (`DOCGREP_TOP_K`, default 100), and their fusion is cut before the reranker. `DOCGREP_RERANK_POOL` sets how many fused candidates the reranker scores: a positive number, at most twice `top_k` (the size of the union of the two channels). Unset, it is 150, or twice `top_k` when that is smaller (since 1.22.0; earlier releases reranked `top_k`). A larger pool rescues a passage that one channel ranks well but the fusion pushes below `top_k`, at the cost of reranking more candidates per query. On the reference library a pool of 150 recovered a case lost at fused rank 128 and changed no other case, and 200 added nothing. The pool appears in `GET /info` and, when it differs from `top_k`, in the `applied_config` of a search. Set `DOCGREP_RERANK_POOL` to `top_k` for the reranking of earlier releases.
+
+### Dense search effort
+
+Qdrant searches the dense vectors approximately (HNSW). With its default search parameters the dense channel of the reference library (870,000 passages, 1024 dimensions) returned on average only 80% of its true 100 nearest passages, and as little as 46% for some queries, so passages were lost before the fusion. `DOCGREP_DENSE_HNSW_EF` sets the search effort of the dense channel: an `hnsw_ef` value (default 1024; a request for more hits than that searches with its own limit) or `exact` for exact search. Measured on the same library, recall at 100 and mean time per dense query:
+
+| `DOCGREP_DENSE_HNSW_EF` | recall@100 | time |
+|---|---|---|
+| Qdrant default | 0.80 | 21 ms |
+| 512 | 0.97 | 34 ms |
+| 1024 | 0.99 | 42 ms |
+| 2048 | 0.995 | 62 ms |
+| `exact` | 1.00 | about 150 ms |
+
+The reranker takes far longer per query than any of these, so the default favours recall. The effort applies to search and to `docgrep eval` (whose `--hnsw-recall` measures it on your own cases), appears in `GET /info` and in the `applied_config` of a search, and needs no reindex. In local mode Qdrant always searches exactly, so the setting has no effect there. The design is recorded in [ADR-0026](docs/adr/0026-dense-search-effort-and-the-rerank-pool-default.md).
 
 ### Measuring the effect
 
@@ -691,7 +708,7 @@ uv run docgrep eval my-cases.private.jsonl --rerank-pool 150 --json > pool-150.j
 uv run docgrep eval my-cases.private.jsonl --rerank-pool 200 --json > pool-200.json
 ```
 
-The `settings` of each report name the sparse weighting and the rerank pool it ran with. Back up the data directory and the Qdrant storage before a re-encode of a large library.
+The `settings` of each report name the sparse weighting, the rerank pool and the dense search effort it ran with. Back up the data directory and the Qdrant storage before a re-encode of a large library.
 
 ## HTTP API
 
