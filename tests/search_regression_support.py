@@ -61,10 +61,16 @@ _MASKS = (
 )
 
 
+# Release 1.22.0 reports the search effort of the dense channel (ADR-0026).
+# In local mode Qdrant searches exactly, so the effort cannot change these
+# results; the key is removed before the comparison.
+_EFFORT = re.compile(rb'"dense_hnsw_ef":(?:[0-9]+|"exact"),')
+
+
 def mask(body: bytes) -> bytes:
     for pattern, replacement in _MASKS:
         body = pattern.sub(replacement, body)
-    return body
+    return _EFFORT.sub(b"", body)
 
 
 def write_library(corpus: Path) -> None:
@@ -83,7 +89,10 @@ def write_library(corpus: Path) -> None:
 @contextmanager
 def http_client(root: Path) -> Iterator[TestClient]:
     write_library(root / "corpus")
+    # The bodies were recorded with the reranker seeing top_k candidates; the
+    # default pool of 1.22.0 is larger (ADR-0026), so it is set to top_k.
     settings: Settings = filter_settings(root)
+    settings = filter_settings(root, rerank_pool=settings.top_k)
     services = create_container(settings)
     # The bodies were recorded on a tf-v1 index (ADR-0025).
     summary = as_tf_v1_build(services.build).run()

@@ -273,3 +273,35 @@ def test_case_filters_apply_to_every_list() -> None:
     (result,) = report.cases
     assert all(rank == ListRank() for name, rank in result.lists.items())
     assert result.expected_sources == DECOYS
+
+
+def test_the_dense_recall_is_measured_per_case_on_request() -> None:
+    store, manifest = _library()
+    store.recall_override = 0.5
+    other = EvalCase("other", 2, "rigid bodies", source=TARGET)
+    filtered = EvalCase(
+        "filtered", 3, "comet", filters=SourceFilter(source_ids=(TARGET,))
+    )
+
+    plain = _evaluation(store, manifest, top_k=3).run([CASE], depth=50)
+    report = _evaluation(store, manifest, top_k=3).run(
+        [CASE, other, filtered], depth=50, hnsw_recall=True
+    )
+
+    assert plain.hnsw_recall is None
+    assert "hnsw_recall" not in plain.as_dict()
+    assert report.hnsw_recall is not None
+    assert report.hnsw_recall.as_dict() == {
+        "limit": 3,
+        "mean": 0.5,
+        "min": 0.5,
+        "cases": [
+            {"id": "target", "recall": 0.5},
+            {"id": "other", "recall": 0.5},
+            {"id": "filtered", "recall": 0.5},
+        ],
+    }
+    # The recall is measured at top_k, once per case.
+    assert store.recall_probes == [3, 3, 3]
+    # Measuring changes nothing else.
+    assert report.cases[0] == plain.cases[0]

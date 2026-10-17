@@ -397,6 +397,9 @@ class EvalSettings:
     # The fused candidates reranked, and the sparse weighting of the index
     # with its BM25 parameters (None for tf-v1; ADR-0025).
     rerank_pool: int | None = None
+    # The search effort of the dense channel: hnsw_ef, "exact", or None for
+    # the store's own default (ADR-0026).
+    dense_hnsw_ef: int | str | None = None
     sparse_encoder: str = "tf-v1"
     bm25_k1: float | None = None
     bm25_b: float | None = None
@@ -409,6 +412,7 @@ class EvalSettings:
             "reranker_model": self.reranker_model,
             "top_k": self.top_k,
             "rerank_pool": self.top_k if self.rerank_pool is None else self.rerank_pool,
+            "dense_hnsw_ef": self.dense_hnsw_ef,
             "depth": self.depth,
             "collapse_duplicates": self.collapse_duplicates,
             "sparse_channel": self.sparse_channel,
@@ -421,15 +425,41 @@ class EvalSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class HnswRecall:
+    """Recall at ``limit`` of the dense channel as search runs it, against
+    exact search, per case (None when nothing was eligible) and summed up."""
+
+    limit: int
+    cases: tuple[tuple[str, float | None], ...]
+
+    def as_dict(self) -> dict[str, object]:
+        measured = [value for _, value in self.cases if value is not None]
+        return {
+            "limit": self.limit,
+            "mean": round(sum(measured) / len(measured), 4) if measured else None,
+            "min": round(min(measured), 4) if measured else None,
+            "cases": [
+                {"id": case_id, "recall": None if value is None else round(value, 4)}
+                for case_id, value in self.cases
+            ],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class EvalReport:
     settings: EvalSettings
     cases: tuple[CaseResult, ...]
     aggregates: Aggregates
+    hnsw_recall: HnswRecall | None = None
 
     def as_dict(self) -> dict[str, object]:
-        """The report with a fixed key order and the cases in file order."""
-        return {
+        """The report with a fixed key order and the cases in file order;
+        ``hnsw_recall`` only when it was measured."""
+        body: dict[str, object] = {
             "settings": self.settings.as_dict(),
             "cases": [item.as_dict() for item in self.cases],
             "aggregates": self.aggregates.as_dict(),
         }
+        if self.hnsw_recall is not None:
+            body["hnsw_recall"] = self.hnsw_recall.as_dict()
+        return body

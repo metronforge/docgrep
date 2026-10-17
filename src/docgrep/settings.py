@@ -8,6 +8,11 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from docgrep.domain.ocr import parse_languages
 from docgrep.domain.roots import CorpusRoots
+from docgrep.domain.search_effort import (
+    DEFAULT_DENSE_HNSW_EF,
+    MAX_DENSE_HNSW_EF,
+    default_rerank_pool,
+)
 from docgrep.domain.sources import MAX_PAGE_SIZE
 
 # The MCP tools return this many passages by default, and at most
@@ -40,8 +45,13 @@ class Settings(BaseSettings):
     upsert_batch_size: int = Field(default=256, gt=0)
     top_k: int = Field(default=100, gt=0)
     # Fused first-stage candidates the reranker scores; each channel still
-    # keeps top_k, so at most 2 * top_k. Unset: top_k (ADR-0025).
+    # keeps top_k, so at most 2 * top_k (ADR-0025). Unset: 150, or 2 * top_k
+    # when that is smaller (ADR-0026).
     rerank_pool: int | None = Field(default=None, gt=0)
+    # Search effort of the dense channel: Qdrant's hnsw_ef (raised to the
+    # prefetch limit when that is larger) or "exact" for exact search
+    # (ADR-0026).
+    dense_hnsw_ef: int | Literal["exact"] = DEFAULT_DENSE_HNSW_EF
     top_n: int = Field(default=10, gt=0)
     top_n_max: int = Field(default=50, gt=0)
     max_query_len: int = Field(default=1000, gt=0)
@@ -99,8 +109,10 @@ class Settings(BaseSettings):
 
     @property
     def effective_rerank_pool(self) -> int:
-        """The rerank pool in use: the setting, or top_k when unset."""
-        return self.top_k if self.rerank_pool is None else self.rerank_pool
+        """The rerank pool in use: the setting, or the default when unset."""
+        if self.rerank_pool is not None:
+            return self.rerank_pool
+        return default_rerank_pool(self.top_k)
 
     @property
     def chosen_corpus_roots(self) -> CorpusRoots | None:
@@ -111,6 +123,26 @@ class Settings(BaseSettings):
         chosen = self.model_copy()
         chosen._corpus_roots = roots
         return chosen
+
+    @field_validator("dense_hnsw_ef", mode="before")
+    @classmethod
+    def parse_dense_hnsw_ef(cls, value: object) -> object:
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text == "exact":
+                return "exact"
+            if text.isdigit():
+                return int(text)
+        return value
+
+    @field_validator("dense_hnsw_ef")
+    @classmethod
+    def check_dense_hnsw_ef(cls, value: int | str) -> int | str:
+        if isinstance(value, int) and not 1 <= value <= MAX_DENSE_HNSW_EF:
+            raise ValueError(
+                f"dense_hnsw_ef must be between 1 and {MAX_DENSE_HNSW_EF} or exact"
+            )
+        return value
 
     @field_validator("log_level", mode="before")
     @classmethod

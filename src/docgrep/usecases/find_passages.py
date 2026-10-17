@@ -35,6 +35,7 @@ from docgrep.domain.protocols import (
     ranked_passage_key,
 )
 from docgrep.domain.roots import CorpusRoots, known_root_names
+from docgrep.domain.search_effort import DenseSearchEffort
 from docgrep.domain.sources import SourceFilter, check_roots, matches
 from docgrep.domain.sparse import SparseWeighting
 
@@ -202,11 +203,14 @@ class FindPassages:
         roots: RootCatalog | None = None,
         sparse_encoders: SparseEncoders | None = None,
         rerank_pool: int | None = None,
+        dense_hnsw_ef: DenseSearchEffort | None = None,
     ) -> None:
         """With ``sparse_encoders`` the query is encoded for the sparse
         weighting the index records (ADR-0025); without them, always with
         ``sparse_encoder``. ``rerank_pool`` is how many fused candidates are
-        reranked, at most ``2 * top_k``; unset, ``top_k``."""
+        reranked, at most ``2 * top_k``; unset, ``top_k``. ``dense_hnsw_ef``
+        is the search effort the retriever applies to the dense channel, for
+        the applied configuration only (ADR-0026)."""
         if top_k <= 0 or not 0 < default_top_n <= top_n_max:
             raise ValueError("result limits must be positive")
         if rerank_pool is not None and not 0 < rerank_pool <= 2 * top_k:
@@ -220,6 +224,7 @@ class FindPassages:
         self.reranker = reranker
         self.top_k = top_k
         self.rerank_pool = top_k if rerank_pool is None else rerank_pool
+        self.dense_hnsw_ef = dense_hnsw_ef
         self.default_top_n = default_top_n
         self.top_n_max = top_n_max
         self.max_query_len = max_query_len
@@ -261,6 +266,11 @@ class FindPassages:
 
         sparse_query = self.query_encoder(self.check_index())
         applied_config: tuple[tuple[str, str | int | float | bool], ...] = (
+            *(
+                (("dense_hnsw_ef", self.dense_hnsw_ef),)
+                if self.dense_hnsw_ef is not None
+                else ()
+            ),
             ("embedding_model", self.embedder.model_name),
             ("max_query_len", self.max_query_len),
             # Only a pool that differs from top_k changes the first stage, so

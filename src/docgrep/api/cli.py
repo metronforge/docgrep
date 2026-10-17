@@ -69,6 +69,7 @@ from docgrep.domain.evaluation import (
     parse_cases,
 )
 from docgrep.domain.roots import CorpusRoots
+from docgrep.domain.search_effort import parse_dense_effort
 from docgrep.domain.sources import HAS_METADATA_VALUES, SORT_KEYS, SourceFilter
 from docgrep.domain.sparse import DEFAULT_B, DEFAULT_K1, TF_V1, SparseWeighting
 from docgrep.settings import Settings
@@ -282,7 +283,21 @@ def _parser() -> argparse.ArgumentParser:
         dest="rerank_pool",
         type=int,
         help="Fused candidates the reranker scores, at most twice top_k "
-        "(default DOCGREP_RERANK_POOL, else top_k)",
+        "(default DOCGREP_RERANK_POOL, else 150 or twice top_k if smaller)",
+    )
+    evaluate.add_argument(
+        "--dense-hnsw-ef",
+        dest="dense_hnsw_ef",
+        metavar="EF",
+        help="Search effort of the dense channel: an hnsw_ef value or exact "
+        "(default DOCGREP_DENSE_HNSW_EF)",
+    )
+    evaluate.add_argument(
+        "--hnsw-recall",
+        dest="hnsw_recall",
+        action="store_true",
+        help="Also measure the recall at top_k of the dense channel against "
+        "exact search for every case",
     )
     evaluate.add_argument(
         "--depth",
@@ -1318,7 +1333,8 @@ def _format_eval(report: dict[str, Any]) -> str:
         f"{'on' if settings['control'] else 'off'}; duplicates "
         f"{'collapsed' if settings['collapse_duplicates'] else 'separate'}"
         + ("" if settings["sparse_channel"] else "; no sparse channel"),
-        f"rerank pool {settings['rerank_pool']}; sparse "
+        f"rerank pool {settings['rerank_pool']}; dense hnsw_ef "
+        f"{_number(settings['dense_hnsw_ef'])}; sparse "
         + _weighting(
             settings["sparse_encoder"],
             settings["bm25_k1"],
@@ -1396,6 +1412,15 @@ def _format_eval(report: dict[str, Any]) -> str:
         + _ids(figures["lost_in_rerank"])
     )
     lines.append("Not found in any list: " + _ids(figures["not_found"]))
+    recall = report.get("hnsw_recall")
+    if recall is not None:
+        lines.append("")
+        lines.append(
+            f"Dense recall@{recall['limit']} against exact search: mean "
+            f"{_number(recall['mean'])}, min {_number(recall['min'])}"
+        )
+        for entry in recall["cases"]:
+            lines.append(f"  {entry['id']}: {_number(entry['recall'])}")
     return "\n".join(lines) + "\n"
 
 
@@ -1414,6 +1439,16 @@ def _evaluate(
     if args.rerank_pool is not None and args.rerank_pool < 1:
         sys.stderr.write("usage: --rerank-pool must be at least 1\n")
         return 2
+    overrides: dict[str, Any] = {"top_k": args.top_k, "rerank_pool": args.rerank_pool}
+    if args.dense_hnsw_ef is not None:
+        try:
+            overrides["dense_hnsw_ef"] = parse_dense_effort(args.dense_hnsw_ef)
+        except ValueError as error:
+            sys.stderr.write(f"usage: --dense-hnsw-ef {error}\n")
+            return 2
+    run_options: dict[str, Any] = {"depth": args.depth, "control": args.control}
+    if args.hnsw_recall:
+        run_options["hnsw_recall"] = True
     try:
         text = Path(args.cases_file).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
@@ -1421,10 +1456,8 @@ def _evaluate(
         return 2
     try:
         cases = parse_cases(text)
-        with factory(
-            settings, top_k=args.top_k, rerank_pool=args.rerank_pool
-        ) as evaluation:
-            report = evaluation.run(cases, depth=args.depth, control=args.control)
+        with factory(settings, **overrides) as evaluation:
+            report = evaluation.run(cases, **run_options)
     except ValidationError as error:
         sys.stderr.write(f"{args.cases_file}: {_describe(error)}\n")
         return 2

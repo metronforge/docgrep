@@ -737,8 +737,10 @@ class InfoResponse(BaseModel):
     version: str
     backend: str
     roots: list[InfoRootResponse] = Field(default_factory=list)
-    # The fused first-stage candidates the reranker scores (ADR-0025).
+    # The fused first-stage candidates the reranker scores (ADR-0025) and
+    # the search effort of the dense channel, hnsw_ef or "exact" (ADR-0026).
     rerank_pool: int
+    dense_hnsw_ef: int | Literal["exact"]
 
 
 def service_info(settings: Settings) -> InfoResponse:
@@ -747,6 +749,7 @@ def service_info(settings: Settings) -> InfoResponse:
         version=__version__,
         backend=settings.backend,
         rerank_pool=settings.effective_rerank_pool,
+        dense_hnsw_ef=settings.dense_hnsw_ef,
         roots=[
             InfoRootResponse(
                 name=root.name,

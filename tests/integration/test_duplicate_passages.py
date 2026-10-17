@@ -85,8 +85,18 @@ _PREVIOUS_RELEASE: dict[str, Any] = {
     ],
     "total_hits": 4,
 }
-# Release 1.16.0 adds applied_filters, {} for an unfiltered search (UC-02).
-_UNFILTERED = {**_PREVIOUS_RELEASE, "applied_filters": {}}
+# Release 1.16.0 adds applied_filters, {} for an unfiltered search (UC-02);
+# release 1.22.0 reports the dense search effort and the default rerank pool
+# (ADR-0026). The results are unchanged.
+_UNFILTERED = {
+    **_PREVIOUS_RELEASE,
+    "applied_config": {
+        "dense_hnsw_ef": 1024,
+        **_PREVIOUS_RELEASE["applied_config"],
+        "rerank_pool": 150,
+    },
+    "applied_filters": {},
+}
 
 
 def _corpus(root: Path, files: dict[str, str] = _FILES) -> Path:
