@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pymupdf
 
+from docgrep.adapters.corpus import as_roots, source_file
 from docgrep.adapters.djvulibre import (
     DJVUTXT,
     CommandRunner,
@@ -21,8 +22,9 @@ from docgrep.adapters.djvulibre import (
     page_count as djvu_page_count,
 )
 from docgrep.adapters.parsers.text_quality import classify_page, remove_soft_hyphens
-from docgrep.domain.errors import InspectionFailed
+from docgrep.domain.errors import InspectionFailed, ValidationError
 from docgrep.domain.models import FileType
+from docgrep.domain.roots import ROOT_NOT_AVAILABLE, CorpusRoots
 from docgrep.domain.scans import PageSample
 
 _LOG = logging.getLogger(__name__)
@@ -50,12 +52,20 @@ def _failed(path: str, reason: str, message: str) -> InspectionFailed:
 class FileScanProbe:
     """Count characters on sampled pages of corpus files; never writes."""
 
-    def __init__(self, corpus_root: Path, runner: CommandRunner | None = None) -> None:
-        self.corpus_root = corpus_root
+    def __init__(
+        self, corpus_root: CorpusRoots | Path, runner: CommandRunner | None = None
+    ) -> None:
+        self.roots = as_roots(corpus_root)
         self.runner: CommandRunner = runner or SubprocessRunner()
 
     def _absolute(self, path: str) -> Path:
-        return (self.corpus_root / path).resolve()
+        try:
+            file, _ = source_file(self.roots, path)
+        except ValidationError as error:
+            raise _failed(
+                path, ROOT_NOT_AVAILABLE, "the root of the file is not available"
+            ) from error
+        return file.resolve()
 
     def _open_pdf(self, path: str) -> pymupdf.Document:
         try:

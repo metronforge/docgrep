@@ -22,7 +22,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import IO, Protocol
 
-from docgrep.adapters.corpus import file_content_hash
+from docgrep.adapters.corpus import as_roots, file_content_hash, source_file
 from docgrep.adapters.djvulibre import (
     MAX_ERROR_BYTES,
     CommandResult,
@@ -47,6 +47,7 @@ from docgrep.domain.ocr import (
     TIMEOUT,
 )
 from docgrep.domain.protocols import StopCheck
+from docgrep.domain.roots import ROOT_NOT_AVAILABLE, CorpusRoots
 
 _LOG = logging.getLogger(__name__)
 
@@ -214,6 +215,19 @@ def _failed(reason: str, message: str) -> OcrFailed:
     return OcrFailed(message, details={"reason": reason})
 
 
+def _absolute(
+    roots: CorpusRoots, path: str, *, resolve: bool = True
+) -> tuple[Path, Path]:
+    """The file of a stored path and the folder of its root."""
+    try:
+        file, root = source_file(roots, path)
+    except ValidationError as error:
+        raise _failed(
+            ROOT_NOT_AVAILABLE, "the root of the file is not available"
+        ) from error
+    return (file.resolve() if resolve else file), root
+
+
 class OcrmypdfEngine:
     """The ``ocrmypdf`` command, with Tesseract for the text recognition."""
 
@@ -221,12 +235,12 @@ class OcrmypdfEngine:
 
     def __init__(
         self,
-        corpus_root: Path,
+        corpus_root: CorpusRoots | Path,
         *,
         supervisor: SupervisedRunner | None = None,
         runner: CommandRunner | None = None,
     ) -> None:
-        self.corpus_root = corpus_root
+        self.roots = as_roots(corpus_root)
         self.supervisor: SupervisedRunner = supervisor or SubprocessSupervisor()
         self.runner: CommandRunner = runner or SubprocessRunner(
             timeout=QUERY_TIMEOUT_SECONDS
@@ -302,8 +316,8 @@ class OcrmypdfEngine:
         deadline: float | None,
         should_stop: StopCheck,
     ) -> None:
-        absolute_source = (self.corpus_root / source).resolve()
-        absolute_target = (self.corpus_root / target).resolve()
+        absolute_source, root = _absolute(self.roots, source)
+        absolute_target, _ = _absolute(self.roots, target)
         args = self.arguments(
             absolute_source, absolute_target, languages=languages, mode=mode, jobs=jobs
         )
@@ -331,7 +345,7 @@ class OcrmypdfEngine:
         lines = [line for line in text.splitlines() if line.strip()]
         detail = scrub_tool_output(
             lines[-1] if lines else "",
-            (absolute_source, absolute_target, self.corpus_root),
+            (absolute_source, absolute_target, root),
         )
         raise _failed(
             ENGINE_ERROR, f"ocrmypdf exited with status {result.returncode}: {detail}"
@@ -342,9 +356,12 @@ class DdjvuConverter:
     """``ddjvu -format=pdf``: a DjVu file as a PDF of page images."""
 
     def __init__(
-        self, corpus_root: Path, *, supervisor: SupervisedRunner | None = None
+        self,
+        corpus_root: CorpusRoots | Path,
+        *,
+        supervisor: SupervisedRunner | None = None,
     ) -> None:
-        self.corpus_root = corpus_root
+        self.roots = as_roots(corpus_root)
         self.supervisor: SupervisedRunner = supervisor or SubprocessSupervisor()
 
     def convert(
@@ -355,8 +372,8 @@ class DdjvuConverter:
         deadline: float | None,
         should_stop: StopCheck,
     ) -> None:
-        absolute_source = (self.corpus_root / source).resolve()
-        absolute_target = (self.corpus_root / target).resolve()
+        absolute_source, root = _absolute(self.roots, source)
+        absolute_target, _ = _absolute(self.roots, target)
         args = [DDJVU, "-format=pdf", str(absolute_source), str(absolute_target)]
         try:
             result = self.supervisor.run(
@@ -378,38 +395,61 @@ class DdjvuConverter:
         text = _decode(result.stderr)
         if _disk_full(text):
             raise _failed(DISK_FULL, "no space left on device")
-        detail = scrub_tool_output(
-            text, (absolute_source, absolute_target, self.corpus_root)
-        )
+        detail = scrub_tool_output(text, (absolute_source, absolute_target, root))
         raise _failed(
             DJVU_CONVERSION, f"ddjvu exited with status {result.returncode}: {detail}"
         )
 
 
 class LocalOcrFiles:
-    """OCR inputs and outputs under the corpus root on the local disk."""
+    """OCR inputs and outputs inside the corpus roots on the local disk.
 
-    def __init__(self, corpus_root: Path) -> None:
-        self.corpus_root = corpus_root
+    Paths are stored paths: an output written next to its original is in
+    the same root and carries the same prefix.
+    """
+
+    def __init__(self, corpus_root: CorpusRoots | Path) -> None:
+        self.roots = as_roots(corpus_root)
 
     def _absolute(self, path: str) -> Path:
-        return self.corpus_root / path
+        return _absolute(self.roots, path, resolve=False)[0]
 
     def locate(self, path: str) -> str:
-        root = self.corpus_root.resolve()
         given = Path(path)
-        resolved = (given if given.is_absolute() else root / given).resolve()
-        if not resolved.is_relative_to(root):
+        stored: str | None
+        if given.is_absolute():
+            resolved = given.resolve()
+            stored = None
+            for root in self.roots:
+                base = root.path.resolve()
+                if resolved.is_relative_to(base) and resolved != base:
+                    stored = root.stored_path(resolved.relative_to(base).as_posix())
+                    break
+        else:
+            stored = self._inside(given.as_posix())
+        if stored is None:
             raise ValidationError(
                 "the path is outside the corpus root",
                 details={"reason": "outside_corpus", "path": path},
             )
-        if not resolved.is_file():
+        if not self._absolute(stored).is_file():
             raise ValidationError(
                 "the path is not an existing file",
                 details={"reason": "not_found", "path": path},
             )
-        return resolved.relative_to(root).as_posix()
+        return stored
+
+    def _inside(self, path: str) -> str | None:
+        """The stored path of a stored path given by the user, normalised,
+        or None when it leaves its root."""
+        root = self.roots.owner(path)
+        if root is None:
+            return None
+        base = root.path.resolve()
+        resolved = (base / root.relative_path(path)).resolve()
+        if not resolved.is_relative_to(base) or resolved == base:
+            return None
+        return root.stored_path(resolved.relative_to(base).as_posix())
 
     def exists(self, path: str) -> bool:
         return self._absolute(path).is_file()

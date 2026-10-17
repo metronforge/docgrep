@@ -10,10 +10,12 @@ from pathlib import Path
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
-from docgrep.adapters.parsers._common import decode_text
+from docgrep.adapters.corpus import as_roots
+from docgrep.adapters.parsers._common import decode_text, source_location
 from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import FileType, ParsedDocument, ParsedSection, Source
+from docgrep.domain.roots import CorpusRoots
 
 _CONTAINER = "META-INF/container.xml"
 _ENCRYPTION = "META-INF/encryption.xml"
@@ -393,15 +395,16 @@ class EpubParser:
     # extract the sources of this type again.
     version = "1"
 
-    def __init__(self, corpus_root: Path) -> None:
-        self.corpus_root = corpus_root
+    def __init__(self, corpus_root: CorpusRoots | Path) -> None:
+        self.roots = as_roots(corpus_root)
 
     def parse(self, source: Source) -> ParsedDocument:
         """Return text blocks per heading and the package's bibliographic data."""
         if source.file_type is not FileType.EPUB:
             raise ParseError("source is not EPUB", details={"path": source.path})
+        path, root = source_location(self.roots, source)
         try:
-            with zipfile.ZipFile(self.corpus_root / source.path) as archive:
+            with zipfile.ZipFile(path) as archive:
                 return self._parse(_Book(archive, source))
         except ParseError:
             raise
@@ -424,9 +427,7 @@ class EpubParser:
                 details={
                     "path": source.path,
                     "reason": "unreadable",
-                    "error": scrub_tool_output(
-                        str(error), (self.corpus_root / source.path, self.corpus_root)
-                    ),
+                    "error": scrub_tool_output(str(error), (path, root)),
                 },
             ) from error
 

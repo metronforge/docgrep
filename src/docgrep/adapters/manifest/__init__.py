@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
-from docgrep.adapters.corpus import file_content_hash
+from docgrep.adapters.corpus import as_roots, file_content_hash
 from docgrep.domain.errors import ManifestUnavailable
 from docgrep.domain.models import (
     FileType,
@@ -22,6 +22,7 @@ from docgrep.domain.models import (
     RunStatus,
     Source,
 )
+from docgrep.domain.roots import CorpusRoots
 
 _LOG = logging.getLogger(__name__)
 
@@ -442,18 +443,23 @@ class SQLiteManifest:
 class SQLiteOcrRegistry:
     """The OCR registry and the delegation table in the manifest database.
 
-    Liveness is checked on disk under the corpus root: an entry needs its
-    output file, a delegation also needs the original's unchanged content.
-    Reads never raise; they log at DEBUG and read as nothing found.
+    Liveness is checked on disk through the corpus roots: an entry needs its
+    output file, a delegation also needs the original's unchanged content. A
+    file whose root is not configured here is not live. Reads never raise;
+    they log at DEBUG and read as nothing found.
     """
 
     def __init__(
-        self, data_dir: Path, corpus_root: Path, *, read_only: bool = False
+        self,
+        data_dir: Path,
+        corpus_root: CorpusRoots | Path,
+        *,
+        read_only: bool = False,
     ) -> None:
         """Open the registry; unless ``read_only``, create or migrate the
         database first, exactly as the manifest does."""
         self.path = data_dir / "manifest.sqlite3"
-        self.corpus_root = corpus_root
+        self.roots = as_roots(corpus_root)
         if not read_only:
             SQLiteManifest(data_dir)
 
@@ -473,8 +479,9 @@ class SQLiteOcrRegistry:
                 connection.close()
 
     def _exists(self, path: str) -> bool:
+        file = self.roots.locate(path)
         try:
-            return (self.corpus_root / path).is_file()
+            return file is not None and file.is_file()
         except OSError:
             return False
 
@@ -546,8 +553,11 @@ class SQLiteOcrRegistry:
         if not self._exists(delegation.output_path):
             return None
         if content_hash is None:
+            file = self.roots.locate(path)
+            if file is None:
+                return None
             try:
-                content_hash = file_content_hash(self.corpus_root / path)
+                content_hash = file_content_hash(file)
             except OSError:
                 return None
         return delegation if content_hash == delegation.input_hash else None

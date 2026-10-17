@@ -13,9 +13,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
+from docgrep.adapters.corpus import as_roots
+from docgrep.adapters.parsers._common import source_location
 from docgrep.adapters.tool_output import scrub_tool_output
 from docgrep.domain.errors import ParseError
 from docgrep.domain.models import FileType, ParsedDocument, ParsedSection, Source
+from docgrep.domain.roots import CorpusRoots
 
 if TYPE_CHECKING:
     from docx.document import Document
@@ -280,8 +283,8 @@ class DocxParser:
     # extract the sources of this type again.
     version = "1"
 
-    def __init__(self, corpus_root: Path) -> None:
-        self.corpus_root = corpus_root
+    def __init__(self, corpus_root: CorpusRoots | Path) -> None:
+        self.roots = as_roots(corpus_root)
 
     def parse(self, source: Source) -> ParsedDocument:
         """Return text blocks per heading and the core title and author."""
@@ -299,7 +302,7 @@ class DocxParser:
                     "hint": INSTALL_HINT,
                 },
             ) from error
-        path = self.corpus_root / source.path
+        path, _ = source_location(self.roots, source)
         try:
             with path.open("rb") as stream:
                 _check_package(source, stream)
@@ -334,12 +337,12 @@ class DocxParser:
         )
 
     def _unreadable(self, source: Source, error: Exception) -> ParseError:
-        path = self.corpus_root / source.path
+        path, root = source_location(self.roots, source)
         return ParseError(
             "DOCX cannot be parsed",
             details={
                 "path": source.path,
                 "reason": UNREADABLE,
-                "error": scrub_tool_output(str(error), (path, self.corpus_root)),
+                "error": scrub_tool_output(str(error), (path, root)),
             },
         )
