@@ -625,6 +625,7 @@ Measure where known passages rank, to decide changes to retrieval with numbers. 
 uv run docgrep eval my-cases.private.jsonl
 uv run docgrep eval my-cases.private.jsonl --json > eval.json
 uv run docgrep eval my-cases.private.jsonl --top-k 300 --depth 5000 --no-control
+uv run docgrep eval my-cases.private.jsonl --rerank-pool 150
 ```
 
 The cases file is JSON Lines: one JSON object per line; blank lines and lines starting with `#` are skipped. Fields:
@@ -648,14 +649,49 @@ Each case reports a rank (1-based; `-` or `null` when not found) in five lists, 
 
 - `dense` and `sparse`: each first-stage channel alone, read to `--depth` candidates (default 2000, at most 10000). `sparse` has no rank and a reason when the query has no sparse terms (`no_sparse_terms`) or the index has no sparse channel (`sparse_unavailable`); the fusion then has the dense list alone and carries the same reason;
 - `fused_deep`: the fusion of both channels at `--depth`, the first stage as search computes it, only deeper;
-- `stage1`: the position among the `top_k` first-stage candidates of the search (`--top-k` replaces `DOCGREP_TOP_K`);
+- `stage1`: the position among the first-stage candidates the search reranks: `top_k` of them, or the [rerank pool](#rerank-pool) when one is set (`--top-k` replaces `DOCGREP_TOP_K`, `--rerank-pool` replaces `DOCGREP_RERANK_POOL`);
 - `final`: the position in the search order after rerank and duplicate collapse, over all `top_k` candidates, not only the first `top_n`. A passage collapsed into a duplicate counts at the position of the passage that carries it.
 
 `within_top_k` says whether a hit is among the `top_k` candidates; `rerank_score` is the `score` search returns for the best-placed hit (empty when it is not within `top_k` or rerank was skipped). Unless `--no-control` is given, a case with `source` or `source_glob` also runs a control search restricted to those sources, through filtered search: `control_rank` and `control_score` show whether the passage can be retrieved at all when the other sources are out of the way.
 
 Reading the result: a hit in a channel or in `fused_deep` that is not within `top_k` is lost in the first stage; a hit within `top_k` with a poor `final` rank is demoted by the reranker; a good control rank with no `stage1` rank means the competing sources crowd it out of the first stage. The aggregates give, over all cases, how many are found in each list, recall@1, 3, 5, 10 and 25 and MRR on `final` (a case not found counts 0), recall within `top_k` and within the depth, and the ids of the cases lost in the first stage, lost in rerank (within `top_k`, final rank above 10) and not found in any list.
 
-The text output starts with the index summary (passage count, models, `top_k`, depth) and cuts long queries and notes with `…`. `--json` prints one object with `settings`, `cases` (in file order, never cut) and `aggregates`, in a fixed key order and without timings, so two runs over the same index and settings give identical output. All queries are embedded in one call. The design is recorded in [ADR-0024](docs/adr/0024-retrieval-evaluation-through-a-diagnostic-seam.md).
+The text output starts with the index summary (passage count, models, `top_k`, depth, rerank pool and the [sparse weighting](#sparse-weights-bm25) of the index) and cuts long queries and notes with `…`. `--json` prints one object with `settings` (among them `top_k`, `rerank_pool`, `sparse_encoder`, `bm25_k1`, `bm25_b` and `bm25_avgdl`), `cases` (in file order, never cut) and `aggregates`, in a fixed key order and without timings, so two runs over the same index and settings give identical output. All queries are embedded in one call. The design is recorded in [ADR-0024](docs/adr/0024-retrieval-evaluation-through-a-diagnostic-seam.md).
+
+## Sparse weights (BM25)
+
+The first stage of search fuses two channels: dense vectors and sparse term vectors. Since 1.21.0 a new index weighs the sparse vectors of its passages with BM25: a term repeated many times in one passage saturates (`k1`, default 1.2) and the same count weighs more in a shorter passage (`b`, default 0.75, relative to the average passage length of the corpus). Qdrant applies the inverse document frequency. Queries weigh each distinct term once. Earlier releases stored raw term counts (`tf-v1`), so a passage that repeated one query term 30 times outranked a passage that held the whole query once. The weighting is recorded in the index (`sparse_encoder` `tf-v1` or `bm25-v2`, with `bm25_k1`, `bm25_b` and `bm25_avgdl`; an index without the key is `tf-v1`), and search, `docgrep update` and the indexing of OCR outputs always use the weighting the index records. `docgrep status` shows it and suggests a re-encode for a `tf-v1` index; search works on both. The design is recorded in [ADR-0025](docs/adr/0025-bm25-sparse-weights-and-a-rerank-pool.md).
+
+An index built before 1.21.0 does not need to be rebuilt: the sparse vectors are computed again from the passage text stored in the index, without embedding anything.
+
+```sh
+uv run docgrep reencode-sparse                 # the plan: passages, current and new weighting, average length; writes nothing
+uv run docgrep reencode-sparse --yes           # re-encode
+```
+
+`--k1` and `--b` choose other BM25 parameters, for example `docgrep reencode-sparse --yes --k1 1.5 --b 0.5`.
+
+The plan reads the text of every passage once to compute the average length. With `--yes` the command takes the index lock (it refuses while a build, update or OCR run holds it, and while a build is unfinished), reads the passages again and rewrites only the sparse vector of each point, in pages of 512; dense vectors and payloads are not touched and no model is loaded, so it needs no GPU. On the reference server it took about 2 minutes 20 seconds per 100,000 passages against a Qdrant server (15 seconds to compute the average length, the rest to rewrite), so a library of 870,000 passages takes 20 to 25 minutes. It logs `index_progress` records like a build, with `sources_done` and `sources_total` counting passages, and is recorded as a run of kind `reencode_sparse`. Search keeps working throughout; until the run ends some passages carry the new weights and some the old, and the index still records the old weighting. Ctrl-C or `docgrep cancel` stops it after the current page; running `docgrep reencode-sparse --yes` again continues from the last page written, with the average length and parameters the run started with (other `--k1` or `--b` values start over). While a re-encode is unfinished `docgrep update` refuses to run, so new passages never get the weighting being replaced. At the end the weighting is recorded in the index. Running it again with the same parameters does nothing; other parameters re-encode every passage again.
+
+A full `docgrep index` writes `bm25-v2` itself: it writes BM25 weights under a provisional average length while it streams the sources, then computes the true average over everything it wrote and re-encodes every passage of the new collection before publishing it, so a resumed build equals an uninterrupted one. `docgrep update` keeps the average length the index records, so after many updates it may drift from the true average; a re-encode with the same parameters does nothing, while a rebuild or a re-encode with other parameters computes it anew.
+
+### Rerank pool
+
+Each channel contributes its `top_k` best passages (`DOCGREP_TOP_K`, default 100), and their fusion is cut before the reranker. `DOCGREP_RERANK_POOL` sets how many fused candidates the reranker scores: a positive number, at most twice `top_k` (the size of the union of the two channels). Unset, it equals `top_k`, and search behaves exactly as before. A larger pool rescues a passage that one channel ranks well but the fusion pushes below `top_k`, at the cost of reranking more candidates per query. The pool appears in `GET /info` and, when it differs from `top_k`, in the `applied_config` of a search. The default stays at `top_k` until measurements decide otherwise.
+
+### Measuring the effect
+
+Use [retrieval evaluation](#retrieval-evaluation) with the same cases before and after each change:
+
+```sh
+uv run docgrep eval my-cases.private.jsonl --json > before.json
+uv run docgrep reencode-sparse --yes
+uv run docgrep eval my-cases.private.jsonl --json > after.json
+uv run docgrep eval my-cases.private.jsonl --rerank-pool 150 --json > pool-150.json
+uv run docgrep eval my-cases.private.jsonl --rerank-pool 200 --json > pool-200.json
+```
+
+The `settings` of each report name the sparse weighting and the rerank pool it ran with. Back up the data directory and the Qdrant storage before a re-encode of a large library.
 
 ## HTTP API
 
