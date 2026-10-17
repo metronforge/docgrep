@@ -16,6 +16,7 @@ from docgrep.domain.models import (
     ManifestRunRecord,
     ManifestSourceRecord,
     OcrDelegation,
+    OcrOutput,
     OcrRecord,
     Passage,
     RetrievalCandidate,
@@ -392,6 +393,8 @@ class InMemoryOcrRegistry:
         self.exists = exists or (lambda path: True)
         self.content_hash = content_hash
         self.fail_writes = False
+        # How many times live_outputs read the registry.
+        self.live_output_reads = 0
 
     def find_by_input_hash(self, content_hash: str) -> OcrRecord | None:
         for path in sorted(self.records):
@@ -407,6 +410,17 @@ class InMemoryOcrRegistry:
             r.input_path for r in self.records.values() if r.output_path == output_path
         )
         return owners[0] if owners else None
+
+    def live_outputs(self) -> dict[str, OcrOutput]:
+        self.live_output_reads += 1
+        outputs: dict[str, OcrOutput] = {}
+        for path in sorted(self.records):
+            record = self.records[path]
+            if record.output_path not in outputs and self.exists(record.output_path):
+                outputs[record.output_path] = OcrOutput(
+                    record.output_path, record.input_path, record.created_at
+                )
+        return outputs
 
     def live_delegation(
         self, path: str, content_hash: str | None = None

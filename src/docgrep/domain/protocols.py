@@ -10,6 +10,7 @@ from docgrep.domain.models import (
     ManifestSourceRecord,
     OcrDelegation,
     OcrMode,
+    OcrOutput,
     OcrRecord,
     ParsedDocument,
     Passage,
@@ -489,6 +490,11 @@ class OcrOutputOwners(Protocol):
 
     def output_owner(self, output_path: str) -> str | None:
         """The input path of the live entry whose output is ``output_path``."""
+        ...
+
+    def live_outputs(self) -> Mapping[str, OcrOutput]:
+        """Every live entry by output path, read in one query; for an output
+        made from several inputs, the entry of the first input by path."""
         ...
 
 

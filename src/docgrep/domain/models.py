@@ -337,6 +337,16 @@ class OcrRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class OcrOutput:
+    """A live OCR output and the registry entry that made it: its original's
+    path and when it was processed."""
+
+    output_path: str
+    input_path: str
+    created_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OcrDelegation:
     """An original whose text is indexed from its OCR'd sibling instead."""
 

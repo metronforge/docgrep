@@ -561,6 +561,14 @@ def create_mcp_server(
         sort_order: Annotated[
             Literal["asc", "desc"], Field(description="Sort direction.")
         ] = "asc",
+        metadata_dropped: Annotated[
+            bool | None,
+            Field(
+                description="True: only sources whose title, author or year "
+                "was dropped as junk or inherited from an OCR original; false: "
+                "only the others."
+            ),
+        ] = None,
     ) -> Annotated[CallToolResult, BrowseSourcesOutput]:
         arguments = {
             "source_ids": source_ids,
@@ -575,6 +583,7 @@ def create_mcp_server(
             "page_size": page_size,
             "sort_by": sort_by,
             "sort_order": sort_order,
+            "metadata_dropped": metadata_dropped,
         }
         return await guarded(lambda: browse(arguments))
 

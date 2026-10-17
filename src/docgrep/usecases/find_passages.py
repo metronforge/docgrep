@@ -3,8 +3,9 @@
 import logging
 import math
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 
 from docgrep.domain.duplicates import collapse_duplicates as collapse
 from docgrep.domain.errors import (
@@ -13,7 +14,10 @@ from docgrep.domain.errors import (
     ModelUnavailable,
     ValidationError,
 )
+from docgrep.domain.metadata import ocr_origin, sanitize_source
 from docgrep.domain.models import (
+    ManifestSourceRecord,
+    OcrOutput,
     RankedPassage,
     RetrievalCandidate,
     SearchResult,
@@ -22,6 +26,7 @@ from docgrep.domain.models import (
 from docgrep.domain.protocols import (
     CommittedSourceReader,
     EmbeddingProvider,
+    OcrOutputOwners,
     PassageRetriever,
     Reranker,
     SparseEncoder,
@@ -45,6 +50,60 @@ class _Scope:
     source_ids: frozenset[str] | None
     matched: int
     excluded_for_missing_metadata: int | None
+
+
+@dataclass(slots=True)
+class _Sanitizer:
+    """Sanitize source metadata for one request (ADR-0021).
+
+    The OCR registry is read once, on first use; the manifest is read at
+    most once, and only when an OCR output may inherit from its original.
+    """
+
+    current_year: int
+    ocr: OcrOutputOwners | None
+    manifest: CommittedSourceReader | None
+    records: Sequence[ManifestSourceRecord] | None = None
+    _outputs: Mapping[str, OcrOutput] | None = None
+    _originals: dict[str, Source] = field(default_factory=dict)
+    _originals_read: bool = False
+
+    def outputs(self) -> Mapping[str, OcrOutput]:
+        if self._outputs is None:
+            self._outputs = {} if self.ocr is None else self.ocr.live_outputs()
+        return self._outputs
+
+    def originals(self) -> Mapping[str, Source]:
+        if not self._originals_read:
+            self._originals_read = True
+            records = self.records
+            if records is None and self.manifest is not None:
+                records = _committed(self.manifest)
+            for record in records or ():
+                self._originals[record.source.path] = record.source
+        return self._originals
+
+    def clean(self, source: Source) -> Source:
+        outputs = self.outputs()
+        origin = ocr_origin(source, outputs, {})
+        if origin is not None:
+            origin = ocr_origin(source, outputs, self.originals())
+        return sanitize_source(
+            source, current_year=self.current_year, origin=origin
+        ).source
+
+
+def _committed(manifest: CommittedSourceReader) -> tuple[ManifestSourceRecord, ...]:
+    """The committed sources; raises ``IndexIncomplete`` when the manifest
+    cannot be read, the same category as a search without a published
+    index."""
+    try:
+        return manifest.committed_sources()
+    except Exception as error:
+        _LOG.exception("search_manifest_read_failed")
+        raise IndexIncomplete(
+            "The index manifest cannot be read", details={"reason": str(error)}
+        ) from error
 
 
 def _excluded_for_missing_metadata(source_filter: SourceFilter, source: Source) -> bool:
@@ -98,6 +157,8 @@ class FindPassages:
         max_query_len: int,
         collapse_duplicates: bool = True,
         manifest: CommittedSourceReader | None = None,
+        ocr: OcrOutputOwners | None = None,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if top_k <= 0 or not 0 < default_top_n <= top_n_max:
             raise ValueError("result limits must be positive")
@@ -113,6 +174,8 @@ class FindPassages:
         self.max_query_len = max_query_len
         self.collapse_duplicates = collapse_duplicates
         self.manifest = manifest
+        self.ocr = ocr
+        self.now = now
 
     def run(
         self,
@@ -127,6 +190,8 @@ class FindPassages:
         ``collapse_duplicates`` overrides the configured default when given.
         ``source_filter`` restricts the first stage to the indexed sources
         that match it (UC-02); a filter without any field set is no filter.
+        Filters and the returned sources see the sanitized metadata
+        (ADR-0021).
         """
         started = time.monotonic()
         collapsing = (
@@ -182,8 +247,9 @@ class FindPassages:
         applied_filters: Mapping[str, list[str] | int] = (
             source_filter.applied() if source_filter is not None else {}
         )
+        sanitizer = _Sanitizer(self.now().year, self.ocr, self.manifest)
         scope = (
-            self._scope(source_filter)
+            self._scope(source_filter, sanitizer)
             if source_filter is not None and applied_filters
             else None
         )
@@ -315,30 +381,34 @@ class FindPassages:
             # Grouping follows the final order, so the cut below keeps the
             # best member of each group and refills the slots of the others.
             ordered, removed = collapse(ordered)
+        # Only the returned passages are sanitized, not every candidate.
+        returned = tuple(
+            replace(item, source=sanitizer.clean(item.source))
+            for item in ordered[:limit]
+        )
         return result(
-            ordered[:limit],
+            returned,
             len(valid),
             rerank_skipped=rerank_skipped,
             rerank_skip_reason=rerank_skip_reason,
             collapsed_duplicates=removed,
         )
 
-    def _scope(self, source_filter: SourceFilter) -> _Scope:
-        """Resolve the filter against the committed indexed sources.
+    def _scope(self, source_filter: SourceFilter, sanitizer: _Sanitizer) -> _Scope:
+        """Resolve the filter against the sanitized committed indexed sources.
 
         Raises ``IndexIncomplete`` when the manifest cannot be read, the same
         category as a search without a published index.
         """
         if self.manifest is None:
             raise IndexIncomplete("Filtered search needs the index manifest")
-        try:
-            records = self.manifest.committed_sources()
-        except Exception as error:
-            _LOG.exception("search_manifest_read_failed")
-            raise IndexIncomplete(
-                "The index manifest cannot be read", details={"reason": str(error)}
-            ) from error
-        indexed = [record.source for record in records if record.status == "indexed"]
+        records = _committed(self.manifest)
+        sanitizer.records = records
+        indexed = [
+            sanitizer.clean(record.source)
+            for record in records
+            if record.status == "indexed"
+        ]
         allowed = frozenset(
             source.source_id for source in indexed if matches(source_filter, source)
         )

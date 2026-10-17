@@ -13,6 +13,7 @@ from unicodedata import normalize
 
 from docgrep.domain.errors import ValidationError
 from docgrep.domain.globs import matching_pattern
+from docgrep.domain.metadata import MetadataAudit
 from docgrep.domain.models import FileType, Source
 
 # The file types a source can be indexed as; OCR outputs are indexed as pdf.
@@ -29,6 +30,9 @@ HasMetadata = Literal["any", "with_year", "with_author", "with_both", "without_a
 SortKey = Literal["path", "indexed_at", "passage_count", "year", "title"]
 SortOrder = Literal["asc", "desc"]
 OcrStatus = Literal["not_applicable", "processed_via_ocr"]
+
+# A value of the applied browse filters.
+AppliedValue = list[str] | bool | int | str
 
 HAS_METADATA_VALUES: tuple[str, ...] = get_args(HasMetadata)
 SORT_KEYS: tuple[str, ...] = get_args(SortKey)
@@ -205,7 +209,12 @@ def has_metadata(mode: HasMetadata, source: Source) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class BrowseRequest:
-    """A filter, a metadata presence rule, a page and a sort order."""
+    """A filter, a metadata presence rule, a page and a sort order.
+
+    ``metadata_dropped`` keeps, when true, only the sources whose metadata
+    was dropped or inherited when it was sanitized, and when false only the
+    others; None keeps both.
+    """
 
     source_filter: SourceFilter = field(default_factory=SourceFilter)
     has_metadata: HasMetadata = "any"
@@ -213,8 +222,16 @@ class BrowseRequest:
     page_size: int = DEFAULT_PAGE_SIZE
     sort_by: SortKey = "path"
     sort_order: SortOrder = "asc"
+    metadata_dropped: bool | None = None
 
     def __post_init__(self) -> None:
+        if self.metadata_dropped is not None and not isinstance(
+            self.metadata_dropped, bool
+        ):
+            raise ValidationError(
+                "metadata_dropped must be a boolean",
+                details={"field": "metadata_dropped"},
+            )
         if self.has_metadata not in HAS_METADATA_VALUES:
             raise ValidationError(
                 f"has_metadata must be one of: {', '.join(HAS_METADATA_VALUES)}",
@@ -240,17 +257,25 @@ class BrowseRequest:
                 details={"field": "page_size", "minimum": 1, "maximum": MAX_PAGE_SIZE},
             )
 
-    def selects(self, source: Source) -> bool:
-        """Whether a source passes the filter and the metadata rule."""
+    def selects(self, source: Source, audit: MetadataAudit | None = None) -> bool:
+        """Whether a sanitized source passes the filter and the metadata
+        rules; ``audit`` records what sanitizing dropped or inherited."""
+        if self.metadata_dropped is not None and self.metadata_dropped is (
+            audit is None or audit.empty
+        ):
+            return False
         return matches(self.source_filter, source) and has_metadata(
             self.has_metadata, source
         )
 
-    def applied_filters(self) -> dict[str, list[str] | int | str]:
-        """The canonical filter, with ``has_metadata`` unless it is ``any``."""
-        applied: dict[str, list[str] | int | str] = {**self.source_filter.applied()}
+    def applied_filters(self) -> dict[str, AppliedValue]:
+        """The canonical filter, with ``has_metadata`` unless it is ``any``
+        and ``metadata_dropped`` when it is set."""
+        applied: dict[str, AppliedValue] = {**self.source_filter.applied()}
         if self.has_metadata != "any":
             applied["has_metadata"] = self.has_metadata
+        if self.metadata_dropped is not None:
+            applied["metadata_dropped"] = self.metadata_dropped
         return applied
 
 
@@ -259,12 +284,15 @@ class BrowsedSource:
     """An indexed source with its passage count and OCR origin.
 
     ``passage_count`` is None and ``degraded`` true when the count failed.
+    ``source`` holds the sanitized metadata and ``metadata_dropped`` what
+    sanitizing dropped or inherited, None when nothing.
     """
 
     source: Source
     passage_count: int | None
     ocr_status: OcrStatus = "not_applicable"
     degraded: bool = False
+    metadata_dropped: MetadataAudit | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,7 +304,7 @@ class BrowseResult:
     page: int
     page_size: int
     by_file_type: tuple[tuple[str, int], ...]
-    applied_filters: Mapping[str, list[str] | int | str]
+    applied_filters: Mapping[str, AppliedValue]
 
     def __post_init__(self) -> None:
         if self.total_hits < 0 or self.total_hits != sum(
