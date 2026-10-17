@@ -2,6 +2,38 @@
 
 <!-- version list -->
 
+## v1.22.0 (2026-10-17)
+
+### Continuous Integration
+
+- Add a manual flake-hunt workflow
+  ([`6cc3752`](https://github.com/metronforge/docgrep/commit/6cc37529d2908fd7bed3fbaf0766e641e41ac8c3))
+
+- Keep test reports and annotate failing tests
+  ([`7fb5fc6`](https://github.com/metronforge/docgrep/commit/7fb5fc676dc5eabdb59a4ab384396d1a90719f60))
+
+- Report the failure totals first and fit the annotation limit
+  ([`ba2f8e1`](https://github.com/metronforge/docgrep/commit/ba2f8e10d6c34c0ecbf9101e81214fdd341d695f))
+
+### Documentation
+
+- Record the dense search effort and the rerank pool default
+  ([`3885e60`](https://github.com/metronforge/docgrep/commit/3885e607a87867293e03b86f82a900b1ba3fd56d))
+
+### Features
+
+- **adapters**: Search the dense channel with an explicit effort
+  ([`1a3c179`](https://github.com/metronforge/docgrep/commit/1a3c1795c3c2d4102dfb98123e011936c3c602f9))
+
+### Testing
+
+- Make the MCP budget test independent of tie order
+  ([`98a562b`](https://github.com/metronforge/docgrep/commit/98a562bfbf0266cb5dd0e4c63aa63bdb89f0b39c))
+
+- Pin the rerank pool where a test relies on top_k candidates
+  ([`05cc28f`](https://github.com/metronforge/docgrep/commit/05cc28fba7b6cc9b9dc6f29bff296b5686591b32))
+
+
 ## v1.21.1 (2026-10-17)
 
 ### Bug Fixes
