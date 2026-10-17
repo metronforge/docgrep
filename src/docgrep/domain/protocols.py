@@ -4,6 +4,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager
 from typing import Literal, Protocol
 
+from docgrep.domain.context import OutlineEntry
 from docgrep.domain.models import (
     FileType,
     ManifestRunRecord,
@@ -351,6 +352,45 @@ class SourcePassageCounter(Protocol):
         ...
 
 
+class PassageLookup(Protocol):
+    """Read passages of the published index by id, read-only."""
+
+    def fetch_passages(
+        self, passage_ids: Sequence[str]
+    ) -> tuple[tuple[Passage, Source] | None, ...]:
+        """Each passage with the source stored with it, in input order; None
+        for an id the published index lacks, and for every id when no index
+        is published. Raises ``StoreUnavailable`` when the store cannot be
+        read."""
+        ...
+
+
+class SourceOutlineReader(Protocol):
+    """List where the passages of one source sit, without their text."""
+
+    def source_outline(self, source_id: str) -> tuple[OutlineEntry, ...]:
+        """Every passage of the source in the published index, ordered by
+        chunk offset; empty when it has none or no index is published.
+        Raises ``StoreUnavailable`` when the store cannot be read."""
+        ...
+
+
+class PassageTextReader(Protocol):
+    """Read the text and location of passages by id, read-only."""
+
+    def passage_texts(self, passage_ids: Collection[str]) -> Mapping[str, Passage]:
+        """The passages of the published index with these ids, by id; an id
+        it lacks is left out. Raises ``StoreUnavailable`` when the store
+        cannot be read."""
+        ...
+
+
+class PassageContextReader(
+    PassageLookup, SourceOutlineReader, PassageTextReader, Protocol
+):
+    """The reads that assemble the context around passages (UC-12)."""
+
+
 class CommittedSourceReader(Protocol):
     """Read the committed source outcomes of the manifest."""
 
@@ -359,10 +399,16 @@ class CommittedSourceReader(Protocol):
         ...
 
 
-class ManifestReader(CommittedSourceReader, Protocol):
-    """Read committed source outcomes and the most recent indexing run."""
+class SourceRecordReader(CommittedSourceReader, Protocol):
+    """Read committed source outcomes, all of them or one by path."""
 
-    def get_source(self, path: str) -> ManifestSourceRecord | None: ...
+    def get_source(self, path: str) -> ManifestSourceRecord | None:
+        """The committed outcome of the source at ``path``, or None."""
+        ...
+
+
+class ManifestReader(SourceRecordReader, Protocol):
+    """Read committed source outcomes and the most recent indexing run."""
 
     def latest_run(self) -> ManifestRunRecord | None: ...
 
