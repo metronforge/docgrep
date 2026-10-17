@@ -256,6 +256,7 @@ class QdrantPassageStore:
         self._alias = _valid_alias(alias)
         self._staging_pattern = re.compile(re.escape(self._alias) + r"_[0-9a-f]{32}")
         self._local = url is None
+        self._path = path
         self._local_point_limit = local_point_limit
         if url is not None:
             address = _server_address(url)
@@ -687,6 +688,86 @@ class QdrantPassageStore:
             points=[_MARKER_ID],
             wait=True,
         )
+
+    def _sparse_target(self) -> str:
+        """The collection being built, else the published one."""
+        collection = self._staging or self._active_collection()
+        if collection is None:
+            raise StoreUnavailable("No index is published")
+        return collection
+
+    @_domain_errors
+    def target_passage_count(self) -> int:
+        """The passages of the collection being built, else the published one."""
+        return self._client.count(
+            self._sparse_target(), count_filter=_PASSAGE_FILTER, exact=True
+        ).count
+
+    def _reload_local(self) -> None:
+        """Reopen a local store, so every point is held as it was persisted.
+
+        Local mode keeps the points written by this process with their
+        dense vector normalized, but persists and loads them as given; a
+        rewrite of a point persists what is held. Reloading first makes a
+        sparse rewrite leave every dense vector exactly as persisted, as a
+        server does.
+        """
+        if self._local and self._path is not None:
+            self._client.close()
+            self._client = QdrantClient(path=str(self._path))
+
+    @_domain_errors
+    def passage_text_page(
+        self, offset: str | None, limit: int
+    ) -> tuple[tuple[tuple[str, str], ...], str | None]:
+        """One scroll page of passage ids and texts, in point id order.
+
+        A scan from the beginning reloads a local store first (see
+        ``_reload_local``).
+        """
+        if offset is None:
+            self._reload_local()
+        points, following = self._client.scroll(
+            self._sparse_target(),
+            scroll_filter=_PASSAGE_FILTER,
+            limit=limit,
+            offset=offset,
+            with_payload=["passage_id", "text"],
+            with_vectors=False,
+        )
+        page: list[tuple[str, str]] = []
+        for point in points:
+            payload = point.payload or {}
+            try:
+                page.append((str(payload["passage_id"]), str(payload["text"])))
+            except KeyError as error:
+                _LOG.warning(
+                    "invalid_passage_payload",
+                    extra={"point_id": str(point.id), "reason": str(error)},
+                )
+        return tuple(page), None if following is None else str(following)
+
+    @_domain_errors
+    def write_sparse_vectors(
+        self, vectors: Sequence[tuple[str, Mapping[int, float]]]
+    ) -> None:
+        """Replace only the ``sparse`` vector of each point and wait."""
+        if not vectors:
+            return
+        points = []
+        for passage_id, sparse in vectors:
+            indices = sorted(sparse)
+            points.append(
+                models.PointVectors(
+                    id=_point_id(passage_id),
+                    vector={
+                        "sparse": models.SparseVector(
+                            indices=indices, values=[sparse[i] for i in indices]
+                        )
+                    },
+                )
+            )
+        self._client.update_vectors(self._sparse_target(), points=points, wait=True)
 
     @_domain_errors
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None:

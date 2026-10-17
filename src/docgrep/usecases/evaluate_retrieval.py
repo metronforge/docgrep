@@ -25,7 +25,7 @@ from docgrep.domain.evaluation import (
     list_rank,
 )
 from docgrep.domain.models import RankedPassage
-from docgrep.domain.protocols import ChannelProbe
+from docgrep.domain.protocols import ChannelProbe, SparseEncoder
 from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.sources import SourceFilter
 from docgrep.usecases.find_passages import Diagnosis, FindPassages
@@ -124,7 +124,8 @@ class EvaluateRetrieval:
                     f"{search.max_query_len} characters",
                     details={"line": case.line, "max_query_len": search.max_query_len},
                 )
-        search.check_index()
+        metadata = search.check_index()
+        sparse_query = search.query_encoder(metadata)
         passages = search.retriever.count_passages()
         vectors = self._embed([case.query for case in cases])
         roots = CorpusRoots() if search.roots is None else search.roots.roots()
@@ -132,7 +133,9 @@ class EvaluateRetrieval:
         sparse_channel = True
         results: list[CaseResult] = []
         for case, vector in zip(cases, vectors, strict=True):
-            result, lists = self._case(case, vector, depth, control, roots, indexed)
+            result, lists = self._case(
+                case, vector, depth, control, roots, indexed, sparse_query
+            )
             sparse_channel = sparse_channel and lists.sparse is not None
             results.append(result)
         report = EvalReport(
@@ -195,12 +198,14 @@ class EvaluateRetrieval:
         control: bool,
         roots: CorpusRoots,
         indexed: Sequence[str] | None,
+        sparse_query: SparseEncoder,
     ) -> tuple[CaseResult, ChannelLists]:
         search = self.search
         diagnosis = search.diagnose(
             case.query, dense_vector=vector, source_filter=case.filters
         )
-        sparse_terms = search.sparse_encoder.encode(case.query)
+        # The query side of the sparse channel, as search encodes it.
+        sparse_terms = sparse_query.encode(case.query)
         lists = self.probe.probe_channels(
             vector,
             sparse_terms,

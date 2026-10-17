@@ -34,6 +34,7 @@ from docgrep.domain.protocols import (
     OcrDelegations,
     RootCatalog,
     SparseEncoder,
+    SparseEncoders,
     parser_reprocess_reason,
     parser_version,
 )
@@ -45,6 +46,7 @@ from docgrep.domain.run_state import (
     latest_build_run,
     run_state,
 )
+from docgrep.domain.sparse import SparseWeighting
 from docgrep.usecases.build_index import (
     BuildFailure,
     Cancelled,
@@ -175,7 +177,10 @@ class UpdateIndex(SourceIndexing):
         delegations: OcrDelegations | None = None,
         roots: RootCatalog | None = None,
         availability: CorpusAvailability | None = None,
+        sparse_encoders: SparseEncoders | None = None,
     ) -> None:
+        """With ``sparse_encoders`` new passages get the sparse weighting the
+        index records (ADR-0025); without them, ``sparse_encoder``."""
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if upsert_batch_size <= 0:
@@ -193,6 +198,7 @@ class UpdateIndex(SourceIndexing):
         self.chunker = chunker
         self.embedder = embedder
         self.sparse_encoder = sparse_encoder
+        self.sparse_encoders = sparse_encoders
         self.index = index
         self.manifest = manifest
         self.config = dict(config)
@@ -233,7 +239,8 @@ class UpdateIndex(SourceIndexing):
         """
         started = self.clock()
         with self.lock.hold("update"):
-            self._check_preconditions()
+            metadata = self._check_preconditions()
+            self._choose_sparse_encoder(metadata)
             roots = self.run_roots()
             self._close_dead_update()
             run_id = self.manifest.start_run(
@@ -313,7 +320,30 @@ class UpdateIndex(SourceIndexing):
             if record.status == "indexed"
         )
 
-    def _check_preconditions(self, *, drift: bool = True) -> None:
+    def _choose_sparse_encoder(self, metadata: Mapping[str, str | int | float]) -> None:
+        """New passages are encoded with the weighting the index records, so
+        one collection never mixes weightings."""
+        self._run_sparse_encoder = None
+        if self.sparse_encoders is None:
+            return
+        try:
+            weighting = SparseWeighting.from_metadata(metadata)
+        except ValueError as error:
+            raise ConfigDrift(
+                "The index records a sparse weighting this version cannot "
+                "write; rebuild the index with `docgrep index`",
+                details={"reason": str(error)},
+            ) from error
+        self._run_sparse_encoder = self.sparse_encoders.document_encoder(weighting)
+
+    def _check_preconditions(
+        self, *, drift: bool = True
+    ) -> Mapping[str, str | int | float]:
+        """Refuse an update that cannot run; returns the index metadata.
+
+        Without ``drift`` (a removal, which writes no vectors) the vector
+        settings are not checked.
+        """
         build = latest_build_run(self.manifest)
         if build is not None:
             # The lock is held here, so a build stored as running is dead.
@@ -341,6 +371,7 @@ class UpdateIndex(SourceIndexing):
                     "checked": ", ".join(VECTOR_CONFIG_KEYS),
                 },
             )
+        return metadata
 
     def _close_dead_update(self) -> None:
         """Mark an update that lost its process as aborted; its work stays."""

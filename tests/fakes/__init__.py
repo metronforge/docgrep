@@ -344,6 +344,41 @@ class InMemoryPassageStore:
                 fresh = replace(source, size=size, mtime=mtime)
                 published[passage_id] = (passage, fresh, dense, sparse)
 
+    # Sparse vectors in place (ADR-0025): the collection being built, else
+    # the published one; pages follow the passage ids.
+
+    def _sparse_target(
+        self,
+    ) -> dict[str, tuple[Passage, Source, tuple[float, ...], dict[int, float]]]:
+        if self._building:
+            return self._staged
+        return self._published()
+
+    def target_passage_count(self) -> int:
+        return len(self._sparse_target())
+
+    def passage_text_page(
+        self, offset: str | None, limit: int
+    ) -> tuple[tuple[tuple[str, str], ...], str | None]:
+        ids = sorted(self._sparse_target())
+        start = 0 if offset is None else ids.index(offset)
+        page = ids[start : start + limit]
+        target = self._sparse_target()
+        following = ids[start + limit] if start + limit < len(ids) else None
+        return tuple((pid, target[pid][0].text) for pid in page), following
+
+    def write_sparse_vectors(
+        self, vectors: Sequence[tuple[str, Mapping[int, float]]]
+    ) -> None:
+        target = self._sparse_target()
+        for passage_id, sparse in vectors:
+            passage, source, dense, _ = target[passage_id]
+            target[passage_id] = (passage, source, dense, dict(sparse))
+
+    def sparse_vector(self, passage_id: str) -> dict[int, float]:
+        """Test helper: the stored sparse vector of a passage."""
+        return dict(self._target()[passage_id][3])
+
     def merge_completion_metadata(
         self, updates: Mapping[str, str | int | float]
     ) -> None:
