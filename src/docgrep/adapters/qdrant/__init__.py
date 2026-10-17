@@ -32,6 +32,7 @@ from docgrep.domain.models import (
     StagingInfo,
 )
 from docgrep.domain.run_state import VECTOR_CONFIG_KEYS
+from docgrep.domain.search_effort import DenseSearchEffort
 
 _LOG = logging.getLogger(__name__)
 DEFAULT_ALIAS = "docgrep"
@@ -250,7 +251,12 @@ class QdrantPassageStore:
         alias: str = DEFAULT_ALIAS,
         local_point_limit: int = LOCAL_POINT_LIMIT,
         timeout: int | None = None,
+        dense_hnsw_ef: DenseSearchEffort | None = None,
     ) -> None:
+        """``dense_hnsw_ef`` is the search effort of the dense channel in
+        ``retrieve`` and ``probe_channels``: an hnsw_ef value (raised to the
+        limit of the request when that is larger) or "exact"; None leaves
+        Qdrant's default (ADR-0026)."""
         if (path is None) == (url is None):
             raise ValueError("exactly one of path and url is required")
         self._alias = _valid_alias(alias)
@@ -258,6 +264,7 @@ class QdrantPassageStore:
         self._local = url is None
         self._path = path
         self._local_point_limit = local_point_limit
+        self._dense_hnsw_ef = dense_hnsw_ef
         if url is not None:
             address = _server_address(url)
             try:
@@ -289,6 +296,19 @@ class QdrantPassageStore:
     def close(self) -> None:
         """Release the connection or the local storage lock."""
         self._client.close()
+
+    @property
+    def dense_hnsw_ef(self) -> DenseSearchEffort | None:
+        return self._dense_hnsw_ef
+
+    def dense_search_params(self, limit: int) -> models.SearchParams | None:
+        """The search parameters of a dense request returning ``limit`` hits."""
+        effort = self._dense_hnsw_ef
+        if effort is None:
+            return None
+        if effort == "exact":
+            return models.SearchParams(exact=True)
+        return models.SearchParams(hnsw_ef=max(int(effort), limit))
 
     def _active_collection(self) -> str | None:
         for alias in self._client.get_aliases().aliases:
@@ -835,6 +855,7 @@ class QdrantPassageStore:
                 using="dense",
                 limit=top_k,
                 filter=allowed,
+                params=self.dense_search_params(top_k),
             )
         ]
         if sparse_vector:
@@ -929,8 +950,13 @@ class QdrantPassageStore:
             sparse_vector = {}
         allowed = _allowed_passages_filter(source_ids)
         fields = _PROBE_TEXT_FIELDS if with_text else _PROBE_FIELDS
+        dense_params = self.dense_search_params(depth)
         dense = models.Prefetch(
-            query=list(dense_vector), using="dense", limit=depth, filter=allowed
+            query=list(dense_vector),
+            using="dense",
+            limit=depth,
+            filter=allowed,
+            params=dense_params,
         )
         prefetch = [dense]
         sparse: models.Prefetch | None = None
@@ -957,7 +983,7 @@ class QdrantPassageStore:
             )
 
         requests = [
-            request(query=dense.query, using="dense"),
+            request(query=dense.query, using="dense", params=dense_params),
             request(
                 prefetch=prefetch,
                 query=models.FusionQuery(fusion=models.Fusion.RRF),
@@ -990,6 +1016,53 @@ class QdrantPassageStore:
             sparse_list,
             tuple(hit for _, hit in fused_hits),
         )
+
+    @_domain_errors
+    def dense_recall(
+        self,
+        dense_vector: Sequence[float],
+        limit: int,
+        *,
+        source_ids: Collection[str] | None = None,
+    ) -> float | None:
+        """Recall at ``limit`` of the dense channel as search runs it,
+        against exact search: the share of the exact top ``limit`` that the
+        configured search effort returns. None when exact search returns
+        nothing (no published index or no eligible passage)."""
+        if not 0 < limit <= MAX_PROBE_DEPTH:
+            raise ValidationError(
+                f"limit must be between 1 and {MAX_PROBE_DEPTH}",
+                details={"minimum": 1, "maximum": MAX_PROBE_DEPTH},
+            )
+        if self._active_collection() is None:
+            return None
+        if source_ids is not None and not source_ids:
+            return None
+        allowed = _allowed_passages_filter(source_ids)
+
+        def request(params: models.SearchParams | None) -> models.QueryRequest:
+            return models.QueryRequest(
+                query=list(dense_vector),
+                using="dense",
+                filter=allowed,
+                limit=limit,
+                params=params,
+                with_payload=False,
+                with_vector=False,
+            )
+
+        exact, effective = self._client.query_batch_points(
+            self._alias,
+            requests=[
+                request(models.SearchParams(exact=True)),
+                request(self.dense_search_params(limit)),
+            ],
+        )
+        expected = {point.id for point in exact.points}
+        if not expected:
+            return None
+        found = {point.id for point in effective.points}
+        return len(found & expected) / len(expected)
 
     @staticmethod
     def _probe_hits(

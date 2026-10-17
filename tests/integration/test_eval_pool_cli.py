@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from docgrep.api.cli import main
 from docgrep.api.container import create_container
 from docgrep.api.http import create_app
+from docgrep.domain.search_effort import default_rerank_pool
 from mcp_support import environment
 from resume_support import close
 from search_filter_support import TOP_K, filter_settings, write_filter_library
@@ -58,7 +59,8 @@ def test_the_rerank_pool_replaces_the_setting_for_the_run(
 
     pooled = _eval(capsys, str(cases), "--rerank-pool", str(2 * TOP_K))
 
-    assert default["settings"]["rerank_pool"] == TOP_K
+    # The default pool is 150, at most twice top_k (ADR-0026).
+    assert default["settings"]["rerank_pool"] == default_rerank_pool(TOP_K)
     assert pooled["settings"]["rerank_pool"] == 2 * TOP_K
     assert pooled["settings"]["top_k"] == TOP_K
     # More candidates reach the reranker, never fewer.
@@ -85,7 +87,7 @@ def test_the_setting_is_the_default_of_eval(
     status = main(["eval", str(cases)])
     out = capsys.readouterr().out
     assert status == 0
-    assert out.splitlines()[3] == "rerank pool 6; sparse tf-v1"
+    assert out.splitlines()[3] == "rerank pool 6; dense hnsw_ef 1024; sparse tf-v1"
 
 
 @pytest.mark.parametrize("pool", ["0", str(2 * TOP_K + 1)])
@@ -116,7 +118,10 @@ def test_the_settings_carry_the_sparse_weighting_of_the_index(
     status = main(["eval", str(cases)])
     line = capsys.readouterr().out.splitlines()[3]
     assert status == 0
-    assert line.startswith(f"rerank pool {TOP_K}; sparse bm25-v2 (k1 1.2, b 0.75, ")
+    assert line.startswith(
+        f"rerank pool {default_rerank_pool(TOP_K)}; dense hnsw_ef 1024; "
+        "sparse bm25-v2 (k1 1.2, b 0.75, "
+    )
 
 
 def test_info_reports_the_rerank_pool(tmp_path: Path) -> None:
@@ -125,4 +130,4 @@ def test_info_reports_the_rerank_pool(tmp_path: Path) -> None:
         assert client.get("/info").json()["rerank_pool"] == 7
     default = filter_settings(tmp_path)
     with TestClient(create_app(default), base_url="http://127.0.0.1") as client:
-        assert client.get("/info").json()["rerank_pool"] == TOP_K
+        assert client.get("/info").json()["rerank_pool"] == default_rerank_pool(TOP_K)

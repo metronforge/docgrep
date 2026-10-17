@@ -13,6 +13,7 @@ import pytest
 from docgrep.adapters.filelock import FileIndexLock
 from docgrep.api.cli import main
 from docgrep.api.container import create_container
+from docgrep.domain.search_effort import default_rerank_pool
 from mcp_support import environment, snapshot
 from resume_support import close
 from search_filter_support import TOP_K, filter_settings, write_filter_library
@@ -106,7 +107,8 @@ def test_the_json_report_has_fixed_keys_in_file_order(
         "embedding_model": "deterministic-hash-v1",
         "reranker_model": "lexical-overlap-v1",
         "top_k": TOP_K,
-        "rerank_pool": TOP_K,
+        "rerank_pool": default_rerank_pool(TOP_K),
+        "dense_hnsw_ef": 1024,
         "depth": 2000,
         "collapse_duplicates": True,
         "sparse_channel": True,

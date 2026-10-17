@@ -428,6 +428,17 @@ class ChannelProbe(Protocol):
         with_text: bool = False,
     ) -> ChannelLists: ...
 
+    def dense_recall(
+        self,
+        dense_vector: Sequence[float],
+        limit: int,
+        *,
+        source_ids: Collection[str] | None = None,
+    ) -> float | None:
+        """Recall at ``limit`` of the dense channel as search runs it,
+        against exact search; None when nothing is eligible."""
+        ...
+
 
 class StatusStore(PassageRetriever, Protocol):
     """A short-timeout read view of the vector store for status reports."""

@@ -133,11 +133,13 @@ def test_the_largest_pool_is_twice_top_k() -> None:
     assert _search(PoolRetriever(), rerank_pool=2 * TOP_K).rerank_pool == 2 * TOP_K
 
 
-def test_the_setting_defaults_to_top_k() -> None:
+def test_the_setting_defaults_to_150_within_twice_top_k() -> None:
+    # ADR-0026: 150 unless the union of the two channels is smaller.
+    assert Settings(_env_file=None).effective_rerank_pool == 150
     settings = Settings(_env_file=None, top_k=40, top_n=10)
 
     assert settings.rerank_pool is None
-    assert settings.effective_rerank_pool == 40
+    assert settings.effective_rerank_pool == 80
 
 
 def test_the_setting_is_read_from_the_environment(

@@ -63,6 +63,7 @@ from docgrep.domain.protocols import (
 )
 from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.run_state import latest_root_prefixes
+from docgrep.domain.search_effort import DenseSearchEffort, default_rerank_pool
 from docgrep.domain.sources import BrowseRequest, BrowseResult, SourceFilter
 from docgrep.settings import Settings
 from docgrep.usecases.browse_sources import BrowseSources
@@ -601,13 +602,16 @@ def open_evaluation(
     *,
     top_k: int | None = None,
     rerank_pool: int | None = None,
+    dense_hnsw_ef: DenseSearchEffort | None = None,
 ) -> Iterator[EvaluateRetrieval]:
     """Wire the retrieval evaluation (ADR-0024) for a process of its own.
 
     Read-only: no lock is taken, the manifest and the OCR registry are
     opened without migrating them, and the store is only queried. The
-    models are those of search, loaded once; ``top_k`` and ``rerank_pool``
-    replace the configured first-stage size and rerank pool. Raises
+    models are those of search, loaded once; ``top_k``, ``rerank_pool`` and
+    ``dense_hnsw_ef`` replace the configured first-stage size, rerank pool
+    and dense search effort (an unset pool follows ``top_k`` as the
+    configured default does, ADR-0026). Raises
     ``IndexIncomplete`` when no index was ever built, before anything is
     opened, and ``ValidationError`` for a pool above twice the first-stage
     size. The store is closed on exit.
@@ -617,17 +621,26 @@ def open_evaluation(
         raise IndexIncomplete("No index has been built yet")
     first_stage = settings.top_k if top_k is None else top_k
     pool = settings.rerank_pool if rerank_pool is None else rerank_pool
-    if pool is not None and pool > 2 * first_stage:
+    if pool is None:
+        pool = default_rerank_pool(first_stage)
+    effort = settings.dense_hnsw_ef if dense_hnsw_ef is None else dense_hnsw_ef
+    if pool > 2 * first_stage:
         raise ValidationError(
             f"rerank_pool must not exceed 2 * top_k ({2 * first_stage})",
             details={"rerank_pool": pool, "top_k": first_stage},
         )
     manifest = SQLiteManifest(settings.data_dir, read_only=True)
     store = (
-        QdrantPassageStore(url=settings.qdrant_url, alias=settings.qdrant_alias)
+        QdrantPassageStore(
+            url=settings.qdrant_url,
+            alias=settings.qdrant_alias,
+            dense_hnsw_ef=effort,
+        )
         if settings.qdrant_url
         else QdrantPassageStore(
-            settings.data_dir / "qdrant", alias=settings.qdrant_alias
+            settings.data_dir / "qdrant",
+            alias=settings.qdrant_alias,
+            dense_hnsw_ef=effort,
         )
     )
     try:
@@ -641,6 +654,7 @@ def open_evaluation(
                 reranker=reranker,
                 top_k=first_stage,
                 rerank_pool=pool,
+                dense_hnsw_ef=effort,
                 default_top_n=settings.top_n,
                 top_n_max=settings.top_n_max,
                 max_query_len=settings.max_query_len,
@@ -698,10 +712,16 @@ def create_container(
     sparse = TermFrequencyEncoder()
     encoders = SparseEncoderSet()
     store = (
-        QdrantPassageStore(url=settings.qdrant_url, alias=settings.qdrant_alias)
+        QdrantPassageStore(
+            url=settings.qdrant_url,
+            alias=settings.qdrant_alias,
+            dense_hnsw_ef=settings.dense_hnsw_ef,
+        )
         if settings.qdrant_url
         else QdrantPassageStore(
-            settings.data_dir / "qdrant", alias=settings.qdrant_alias
+            settings.data_dir / "qdrant",
+            alias=settings.qdrant_alias,
+            dense_hnsw_ef=settings.dense_hnsw_ef,
         )
     )
     manifest = SQLiteManifest(settings.data_dir)
@@ -730,7 +750,8 @@ def create_container(
             retriever=store,
             reranker=reranker,
             top_k=settings.top_k,
-            rerank_pool=settings.rerank_pool,
+            rerank_pool=settings.effective_rerank_pool,
+            dense_hnsw_ef=settings.dense_hnsw_ef,
             default_top_n=settings.top_n,
             top_n_max=settings.top_n_max,
             max_query_len=settings.max_query_len,

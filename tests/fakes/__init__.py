@@ -48,6 +48,8 @@ class InMemoryPassageStore:
         self.text_fetches: list[tuple[str, ...]] = []
         # The depth of each channel probe; False reads as no sparse channel.
         self.probes: list[int] = []
+        self.recall_probes: list[int] = []
+        self.recall_override: float | None = None
         self.sparse_channel = True
 
     def _target(
@@ -233,6 +235,23 @@ class InMemoryPassageStore:
             hits(sparse_list) if self.sparse_channel else None,
             hits(fused),
         )
+
+    def dense_recall(
+        self,
+        dense_vector: Sequence[float],
+        limit: int,
+        *,
+        source_ids: Collection[str] | None = None,
+    ) -> float | None:
+        """Exact search in memory: recall 1.0 whenever a passage is
+        eligible; ``recall_override`` replaces it for tests."""
+        self.recall_probes.append(limit)
+        if not any(
+            source_ids is None or source.source_id in source_ids
+            for _, source, _, _ in self._items.values()
+        ):
+            return None
+        return self.recall_override if self.recall_override is not None else 1.0
 
     def read_completion_metadata(self) -> Mapping[str, str | int | float] | None:
         return dict(self._completion) if self._completion is not None else None

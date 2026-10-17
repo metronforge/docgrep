@@ -19,6 +19,7 @@ from docgrep.domain.evaluation import (
     EvalCase,
     EvalReport,
     EvalSettings,
+    HnswRecall,
     ListRank,
     ProbeHit,
     aggregate,
@@ -104,8 +105,12 @@ class EvaluateRetrieval:
         *,
         depth: int,
         control: bool = True,
+        hnsw_recall: bool = False,
     ) -> EvalReport:
         """Evaluate every case, in order; models are used for all at once.
+
+        With ``hnsw_recall`` the recall at ``top_k`` of the dense channel
+        against exact search is also measured for every case (ADR-0026).
 
         Raises ``ValidationError`` for a depth outside 1 to
         ``MAX_PROBE_DEPTH`` or a query the search would refuse (naming its
@@ -133,12 +138,22 @@ class EvaluateRetrieval:
         indexed = self._indexed_sources()
         sparse_channel = True
         results: list[CaseResult] = []
+        recalls: list[tuple[str, float | None]] = []
         for case, vector in zip(cases, vectors, strict=True):
-            result, lists = self._case(
+            result, lists, allowed = self._case(
                 case, vector, depth, control, roots, indexed, sparse_query
             )
             sparse_channel = sparse_channel and lists.sparse is not None
             results.append(result)
+            if hnsw_recall:
+                recalls.append(
+                    (
+                        case.case_id,
+                        self.probe.dense_recall(
+                            vector, search.top_k, source_ids=allowed
+                        ),
+                    )
+                )
         report = EvalReport(
             EvalSettings(
                 passages=passages,
@@ -150,6 +165,7 @@ class EvaluateRetrieval:
                 sparse_channel=sparse_channel,
                 control=control,
                 rerank_pool=search.rerank_pool,
+                dense_hnsw_ef=search.dense_hnsw_ef,
                 sparse_encoder=weighting.encoder,
                 bm25_k1=weighting.k1,
                 bm25_b=weighting.b,
@@ -157,6 +173,7 @@ class EvaluateRetrieval:
             ),
             tuple(results),
             aggregate(results),
+            HnswRecall(search.top_k, tuple(recalls)) if hnsw_recall else None,
         )
         # Counts only: neither queries nor source names are logged.
         _LOG.info(
@@ -205,7 +222,7 @@ class EvaluateRetrieval:
         roots: CorpusRoots,
         indexed: Sequence[str] | None,
         sparse_query: SparseEncoder,
-    ) -> tuple[CaseResult, ChannelLists]:
+    ) -> tuple[CaseResult, ChannelLists, frozenset[str] | None]:
         search = self.search
         diagnosis = search.diagnose(
             case.query, dense_vector=vector, source_filter=case.filters
@@ -264,4 +281,5 @@ class EvaluateRetrieval:
                 control_score=control_score,
             ),
             lists,
+            diagnosis.source_ids,
         )
