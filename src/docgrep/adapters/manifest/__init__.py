@@ -17,6 +17,7 @@ from docgrep.domain.models import (
     ManifestSourceRecord,
     OcrDelegation,
     OcrMode,
+    OcrOutput,
     OcrRecord,
     RunStatus,
     Source,
@@ -511,6 +512,23 @@ class SQLiteOcrRegistry:
         if not rows or not self._exists(output_path):
             return None
         return cast(str, rows[0]["input_path"])
+
+    def live_outputs(self) -> dict[str, OcrOutput]:
+        rows = self._read(
+            "SELECT output_path, input_path, created_at FROM ocr_registry "
+            "ORDER BY output_path, input_path",
+            (),
+        )
+        outputs: dict[str, OcrOutput] = {}
+        for row in rows:
+            output = cast(str, row["output_path"])
+            if output not in outputs and self._exists(output):
+                outputs[output] = OcrOutput(
+                    output,
+                    cast(str, row["input_path"]),
+                    cast(str | None, row["created_at"]),
+                )
+        return outputs
 
     def live_delegation(
         self, path: str, content_hash: str | None = None

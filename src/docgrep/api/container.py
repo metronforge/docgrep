@@ -463,6 +463,7 @@ def create_container(
             max_query_len=settings.max_query_len,
             collapse_duplicates=settings.collapse_duplicates,
             manifest=manifest,
+            ocr=delegations,
         ),
         build=BuildIndex(
             lock=lock,
