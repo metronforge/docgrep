@@ -1,0 +1,90 @@
+name: Flake hunt
+
+# Repeats chosen tests on the CI runner image to reproduce intermittent
+# failures (#34). Manual only.
+on:
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: "pytest node ids or paths, separated by spaces"
+        type: string
+        default: tests/integration
+      repeat:
+        description: "how many times to run them (1 to 100)"
+        type: number
+        default: 20
+
+jobs:
+  hunt:
+    runs-on: ubuntu-24.04
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.19.1
+        ports:
+          - 6333:6333
+    env:
+      # Keep the environment of "uv sync --extra cpu"; a plain "uv run" would
+      # re-resolve without extras.
+      UV_NO_SYNC: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v10.0.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked --extra cpu
+      - name: Wait for Qdrant
+        run: |
+          for attempt in $(seq 1 30); do
+            curl -sf http://localhost:6333/ > /dev/null && exit 0
+            sleep 1
+          done
+          echo "Qdrant did not become ready" >&2
+          exit 1
+      - name: Repeat the tests
+        shell: bash
+        env:
+          DOCGREP_TEST_QDRANT_URL: http://localhost:6333
+          TESTS: ${{ inputs.tests }}
+          REPEAT: ${{ inputs.repeat }}
+        run: |
+          if ! [[ "$REPEAT" =~ ^[0-9]+$ ]] || (( REPEAT < 1 || REPEAT > 100 )); then
+            echo "::error title=flake-hunt::repeat must be between 1 and 100, got $REPEAT"
+            exit 1
+          fi
+          # Split the input on spaces without expanding brackets in node ids.
+          set -f
+          read -ra targets <<< "$TESTS"
+          set +f
+          mkdir -p reports
+          failed=0
+          for i in $(seq 1 "$REPEAT"); do
+            if ! uv run pytest -m "not gpu" -q -p no:cacheprovider \
+                --junitxml="reports/run-$i.xml" "${targets[@]}" \
+                > "reports/run-$i.log" 2>&1; then
+              failed=$((failed + 1))
+              echo "run $i failed"
+              tail -n 20 "reports/run-$i.log"
+            fi
+          done
+          echo "$failed of $REPEAT runs failed" | tee reports/result.txt
+          echo "**$failed of $REPEAT runs failed**" >> "$GITHUB_STEP_SUMMARY"
+          if (( failed > 0 )); then
+            echo "::error title=flake-hunt::$failed of $REPEAT runs failed"
+            exit 1
+          fi
+      - name: Annotate failing tests
+        if: always()
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for report in reports/run-*.xml; do
+            python3 scripts/ci_annotate_failures.py "$report" \
+              --log "${report%.xml}.log"
+          done
+      - name: Keep the test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-hunt-reports-${{ github.run_attempt }}
+          path: reports/
+          retention-days: 14
