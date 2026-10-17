@@ -3,10 +3,12 @@
 
 Usage: ci_annotate_failures.py JUNIT_XML [--log CHECK_LOG]
 
-Prints one ``::error`` workflow command per failing or erroring test case, so
-the failing tests can be read through the check-run annotations of the REST
-API without the job log, and appends the same lines as a Markdown table to
-``$GITHUB_STEP_SUMMARY``. Without a report, it names the stage of
+Prints a ``::error`` workflow command with the failure totals, then one per
+failing or erroring test case, so the failing tests can be read through the
+check-run annotations of the REST API without the job log. GitHub shows at
+most 10 error annotations per step, so only the first 9 tests are annotated;
+the Markdown table appended to ``$GITHUB_STEP_SUMMARY`` lists up to 20 and
+says how many more are in the report. Without a report, it names the stage of
 ``scripts/check.sh`` that failed, read from the check log (by default
 ``check.log`` next to the report). Standard library only; always exits 0.
 """
@@ -18,7 +20,9 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
-MAX_LINES = 20
+# GitHub keeps at most 10 error annotations per step: the totals and 9 tests.
+MAX_ANNOTATED = 9
+MAX_SUMMARY = 20
 MAX_MESSAGE = 300
 
 # The stages of scripts/check.sh in order, with the line each prints when it
@@ -96,14 +100,17 @@ def _cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\n", " ")
 
 
-def _summary(rows: list[tuple[str, str]], heading: str) -> str:
+def _summary(rows: list[tuple[str, str]], heading: str, more: int) -> str:
     lines = [f"### {heading}", "", "| Title | Message |", "| --- | --- |"]
     lines += [f"| {_cell(title)} | {_cell(message)} |" for title, message in rows]
+    if more:
+        lines += ["", f"{more} more failing tests are in the reports artifact."]
     return "\n".join(lines) + "\n\n"
 
 
-def annotate(junit: Path, log: Path) -> list[tuple[str, str]]:
-    """The (title, message) pairs to report for one JUnit file."""
+def annotate(junit: Path, log: Path) -> tuple[list[tuple[str, str]], int]:
+    """The (title, message) pairs to report for one JUnit file, totals first
+    and at most ``MAX_SUMMARY`` tests, and how many failing tests they omit."""
     if not junit.is_file():
         stage = failed_stage(log)
         return [
@@ -111,20 +118,20 @@ def annotate(junit: Path, log: Path) -> list[tuple[str, str]]:
                 "check.sh",
                 f"no test report at {junit}; the failing stage is {stage}",
             )
-        ]
+        ], 0
     try:
         report = ET.parse(junit).getroot()
     except ET.ParseError as error:
-        return [("check.sh", f"the test report {junit} is unreadable: {error}")]
+        return [("check.sh", f"the test report {junit} is unreadable: {error}")], 0
     found = findings(report)
-    rows = [
-        (item.classname, f"{item.name}: {item.message}") for item in found[:MAX_LINES]
+    if not found:
+        return [], 0
+    failed = sum(item.kind == "failure" for item in found)
+    rows = [("failures", f"{failed} failed, {len(found) - failed} errors")]
+    rows += [
+        (item.classname, f"{item.name}: {item.message}") for item in found[:MAX_SUMMARY]
     ]
-    if len(found) > MAX_LINES:
-        failed = sum(item.kind == "failure" for item in found)
-        errors = len(found) - failed
-        rows.append(("failures", f"{failed} failed, {errors} errors"))
-    return rows
+    return rows, max(len(found) - MAX_SUMMARY, 0)
 
 
 def main(argv: list[str]) -> int:
@@ -135,16 +142,16 @@ def main(argv: list[str]) -> int:
     junit: Path = arguments.junit
     log: Path = arguments.log or junit.parent / "check.log"
     try:
-        rows = annotate(junit, log)
+        rows, more = annotate(junit, log)
     except Exception as error:  # the annotation step must never fail the job
-        rows = [("annotate", f"could not read {junit}: {error!r}")]
-    for title, message in rows:
+        rows, more = [("annotate", f"could not read {junit}: {error!r}")], 0
+    for title, message in rows[: 1 + MAX_ANNOTATED]:
         print(_command(title, message))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if rows and summary:
         try:
             with open(summary, "a", encoding="utf-8") as handle:
-                handle.write(_summary(rows, f"Failures in {junit.name}"))
+                handle.write(_summary(rows, f"Failures in {junit.name}", more))
         except OSError as error:
             print(_command("annotate", f"could not write the step summary: {error}"))
     return 0

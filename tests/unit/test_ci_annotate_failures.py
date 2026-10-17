@@ -40,7 +40,7 @@ def _run(tmp_path: Path, *args: str) -> tuple[list[str], str]:
     return completed.stdout.splitlines(), written
 
 
-def test_a_failure_and_an_error_give_one_line_each(tmp_path: Path) -> None:
+def test_the_totals_come_first_then_one_line_per_test(tmp_path: Path) -> None:
     report = _junit(
         tmp_path / "junit.xml",
         _case("test_ok"),
@@ -51,11 +51,14 @@ def test_a_failure_and_an_error_give_one_line_each(tmp_path: Path) -> None:
     lines, summary = _run(tmp_path, str(report))
 
     assert lines == [
+        "::error title=failures::1 failed, 1 errors",
         "::error title=tests.unit.test_x::test_bad: assert 1 == 2",
         "::error title=tests.unit.test_x::test_setup: failed on setup with ValueError",
     ]
+    assert "| failures | 1 failed, 1 errors |" in summary
     assert "| tests.unit.test_x | test_bad: assert 1 == 2 |" in summary
     assert "test_setup: failed on setup with ValueError" in summary
+    assert "more failing tests" not in summary
 
 
 def test_a_passing_report_prints_nothing(tmp_path: Path) -> None:
@@ -67,17 +70,42 @@ def test_a_passing_report_prints_nothing(tmp_path: Path) -> None:
     assert summary == ""
 
 
-def test_more_than_twenty_failures_end_with_the_totals(tmp_path: Path) -> None:
+def test_ten_failures_fit_the_annotation_limit_of_ten(tmp_path: Path) -> None:
+    cases = [_case(f"test_f{n:02}", "failure") for n in range(10)]
+    report = _junit(tmp_path / "junit.xml", *cases)
+
+    lines, summary = _run(tmp_path, str(report))
+
+    assert lines == [
+        "::error title=failures::10 failed, 0 errors",
+        *(f"::error title=tests.unit.test_x::test_f{n:02}: boom" for n in range(9)),
+    ]
+    assert "| tests.unit.test_x | test_f09: boom |" in summary
+    assert "more failing tests" not in summary
+
+
+def test_more_than_twenty_failures_list_twenty_in_the_summary(
+    tmp_path: Path,
+) -> None:
     cases = [_case(f"test_f{n:02}", "failure") for n in range(23)]
     cases += [_case(f"test_e{n}", "error") for n in range(2)]
     report = _junit(tmp_path / "junit.xml", *cases)
 
     lines, summary = _run(tmp_path, str(report))
 
-    assert len(lines) == 21
-    assert lines[0] == "::error title=tests.unit.test_x::test_f00: boom"
-    assert lines[-1] == "::error title=failures::23 failed, 2 errors"
-    assert "| failures | 23 failed, 2 errors |" in summary
+    assert len(lines) == 10
+    assert lines[0] == "::error title=failures::23 failed, 2 errors"
+    assert lines[1] == "::error title=tests.unit.test_x::test_f00: boom"
+    assert lines[-1] == "::error title=tests.unit.test_x::test_f08: boom"
+    rows = [line for line in summary.splitlines() if line.startswith("| ")]
+    assert rows[:3] == [
+        "| Title | Message |",
+        "| --- | --- |",
+        "| failures | 23 failed, 2 errors |",
+    ]
+    assert len(rows) == 3 + 20
+    assert rows[-1] == "| tests.unit.test_x | test_f19: boom |"
+    assert "5 more failing tests are in the reports artifact." in summary
 
 
 def test_special_characters_are_escaped_and_long_messages_cut(
@@ -99,11 +127,11 @@ def test_special_characters_are_escaped_and_long_messages_cut(
 
     lines, summary = _run(tmp_path, str(report))
 
-    assert lines[0] == (
+    assert lines[1] == (
         "::error title=tests.unit.test_x%3Aodd%2Ccls::"
         "test_odd[a:b,c]: 100%25 wrong: a, b"
     )
-    assert lines[1] == "::error title=tests.unit.test_x::test_long: " + "x" * 300
+    assert lines[2] == "::error title=tests.unit.test_x::test_long: " + "x" * 300
     assert "second line" not in summary
 
 
@@ -114,7 +142,7 @@ def test_a_multiline_message_keeps_its_first_line_only(tmp_path: Path) -> None:
 
     lines, _ = _run(tmp_path, str(report))
 
-    assert lines == ["::error title=tests.unit.test_x::test_x: first"]
+    assert lines[1:] == ["::error title=tests.unit.test_x::test_x: first"]
 
 
 def test_a_missing_report_names_the_stage_that_failed(tmp_path: Path) -> None:

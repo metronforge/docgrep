@@ -14,3 +14,6 @@ build/
 data/
 # Retrieval evaluation cases name private files (see README).
 *.private.jsonl
+
+# CI test reports (.github/workflows)
+reports/
