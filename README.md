@@ -212,7 +212,7 @@ Omit `DOCGREP_BACKEND=fake` to use the real models. Other settings, such as `DOC
 
 ## Exit codes
 
-`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). `docgrep ocr` differs: 0 when no file failed, 1 when a file failed or the batch was cancelled or aborted, 2 for usage errors (see [OCR](#ocr)). `docgrep sources` exits with 0 also when nothing matches and with 2 for invalid arguments or settings. Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
+`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). `docgrep ocr` differs: 0 when no file failed, 1 when a file failed or the batch was cancelled or aborted, 2 for usage errors (see [OCR](#ocr)). `docgrep sources` exits with 0 also when nothing matches and with 2 for invalid arguments or settings. `docgrep context` exits with 0 also when some or all ids have a failure status (the statuses are printed), with 1 on a runtime failure and with 2 for invalid arguments or settings. Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
 
 ## Logging
 
@@ -529,6 +529,31 @@ The rules are recorded in [ADR-0021](docs/adr/0021-sanitize-source-metadata-on-r
 
 The response holds the page (`sources`), `total_hits`, `page`, `page_size`, `aggregates` (`total_sources` and `by_file_type`, over every match) and the canonical `applied_filters`. Pages start at 1 and hold 1 to 500 sources (default 50); `sort_by` is `path` (default), `indexed_at`, `passage_count`, `year` or `title`, with ties broken by source id and missing values last. Passage counts are counted in the index at query time for the page only; sorting by `passage_count` counts every match and is the slow case. A count that fails gives that source `passage_count: null` and `degraded: true`. Unknown fields are rejected. The design is recorded in [ADR-0020](docs/adr/0020-shared-source-filter-and-browse.md).
 
+## Passage context
+
+Fetch the text around passages from search or browse results, to verify or quote them. The context is taken from the neighbouring indexed passages of the same source, verbatim; the corpus is not read, nothing is reindexed and no lock is taken.
+
+```sh
+uv run docgrep search "phrase to find" --json | jq -r '.results[0].passage.passage_id'
+uv run docgrep context <passage-id> --window 1000
+uv run docgrep context <passage-id> <another-id> --json
+```
+
+```sh
+curl -X POST http://127.0.0.1:8000/passages/context \
+  -H 'Content-Type: application/json' \
+  -d '{"passage_ids":["<passage-id>"],"window_tokens":500}'
+```
+
+The MCP tool `expand_passage_context` takes the same fields, for example `{"passage_ids": ["<passage-id>"], "window_tokens": 200}`.
+
+The window rule:
+
+- `window_tokens` applies to each side of every passage (default `DOCGREP_CONTEXT_WINDOW_TOKENS`, 500; at most `DOCGREP_CONTEXT_MAX_WINDOW_TOKENS`, 5000). Whole neighbouring passages are added outward while their stored token counts fit, and the nearest one on each side always is; `0` returns the passage alone. With the default chunking this is about one passage on each side.
+- The overlap between consecutive passages is removed using their offsets, so no text is repeated. Where two passages do not touch, they are joined with a space inside a page or section and with a blank line across pages or sections; nothing else is added. `context_before + passage.text + context_after` is the whole window.
+
+Each requested id (at most `DOCGREP_CONTEXT_MAX_PASSAGES`, 20; duplicates are answered once) gets an entry with a `status`: `ok`, `not_found` (no such passage in the index, for example after an update), `source_removed` (with the last known `path`) or `source_modified` (with `indexed_content_hash` and `current_content_hash`); for the last three, search again for current ids. An `ok` entry carries the `passage`, its `source` (with the cleaned metadata of search results), `context_before`, `context_after`, the page and heading path of each neighbour used (`before_locations`, `after_locations`), `at_source_start`, `at_source_end` and `window_tokens_used`. The request answers 200 even when every entry failed; an empty list, too many ids, a malformed id or a window out of range is a validation error. The design is recorded in [ADR-0022](docs/adr/0022-passage-context-from-neighbouring-passages.md).
+
 ## HTTP API
 
 ```sh
@@ -545,7 +570,7 @@ curl -X POST http://127.0.0.1:8000/search \
 
 The body of `POST /search` takes `query`, an optional `top_n`, an optional `collapse_duplicates` (see [Duplicate passages](#duplicate-passages)) and the optional filter fields (see [Filtered search](#filtered-search)); unknown fields are rejected.
 
-`POST /sources/browse` lists the indexed sources (see [Browse sources](#browse-sources)). `POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information.
+`POST /sources/browse` lists the indexed sources (see [Browse sources](#browse-sources)). `POST /passages/context` returns passages with the text around them (see [Passage context](#passage-context)). `POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information.
 
 When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
 
@@ -556,8 +581,9 @@ docgrep offers its search to MCP clients, such as Claude Code, as read-only tool
 - `find_passages`: ranked verbatim passages for `query`, with an optional `top_n` (default 10, at most `DOCGREP_MCP_MAX_TOP_N`), `collapse_duplicates` and the filters of [Filtered search](#filtered-search); the structured result is the body of `POST /search`, and DOCX and EPUB passages have a null page number. Filters that match nothing give an empty result, not an error.
 - `get_index_status`: the report of `docgrep status --json`, including the failed sources and their errors.
 - `browse_sources`: one page of indexed sources with their metadata and passage counts, filtered and sorted as described in [Browse sources](#browse-sources) (`page_size` default 50, at most `DOCGREP_MCP_MAX_PAGE_SIZE`); the structured result is the body of `POST /sources/browse`. A page too large for one tool result keeps its first sources and says so in `hint`.
+- `expand_passage_context`: the passages with the given `passage_ids` (at most `DOCGREP_MCP_MAX_CONTEXT_PASSAGES`) and the text around them, as described in [Passage context](#passage-context); the structured result is the body of `POST /passages/context`. A result too large for one tool result keeps its first entries and says so in `hint`.
 
-No tool indexes, runs OCR, changes the configuration or cancels anything. A missing or empty index, an invalid argument and every other failure come back as a tool error with a category, a message and details; only `browse_sources` answers a missing index with an empty listing, as `POST /sources/browse` does.
+No tool indexes, runs OCR, changes the configuration or cancels anything. A missing or empty index, an invalid argument and every other failure come back as a tool error with a category, a message and details; only `browse_sources` answers a missing index with an empty listing and `expand_passage_context` with `not_found` entries, as their HTTP endpoints do.
 
 There are two transports. `docgrep serve` serves the tools over streamable HTTP at `/mcp`, next to the REST API; this is the one to use day to day, because one process holds the models for every client. `docgrep mcp` serves them on standard input and output for a client that starts the server itself; each such process loads its own models on the first search.
 
@@ -568,6 +594,7 @@ Settings:
 - `DOCGREP_MCP_HTTP_ENABLED`: serve `/mcp` from `docgrep serve` (default `true`).
 - `DOCGREP_MCP_MAX_TOP_N`: the largest `top_n` a tool accepts (default 25, never more than `DOCGREP_TOP_N_MAX`); a larger value is an error, not cut down.
 - `DOCGREP_MCP_MAX_PAGE_SIZE`: the largest `page_size` `browse_sources` accepts (default 100, at most 500); a larger value is an error, not cut down.
+- `DOCGREP_MCP_MAX_CONTEXT_PASSAGES`: the most passage ids `expand_passage_context` accepts in one call (default 5, never more than `DOCGREP_CONTEXT_MAX_PASSAGES`); more is an error, not cut down.
 
 The `/mcp` endpoint accepts the same Host and Origin values as the REST API: 127.0.0.1, localhost, ::1, the bind host and `DOCGREP_ALLOWED_HOSTS`.
 
