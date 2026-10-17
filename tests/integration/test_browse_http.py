@@ -58,6 +58,7 @@ def test_an_empty_body_lists_every_indexed_source(library: TestClient) -> None:
         "indexed_at",
         "content_hash",
         "ocr_status",
+        "metadata_dropped",
     }
     assert memo["title"] == "Sea Memo" and memo["ocr_status"] == "not_applicable"
     assert all(item["passage_count"] >= 1 for item in body["sources"])

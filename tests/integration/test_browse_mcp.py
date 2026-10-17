@@ -100,6 +100,7 @@ def test_the_tool_is_read_only_and_describes_its_purpose(tmp_path: Path) -> None
         "page_size",
         "sort_by",
         "sort_order",
+        "metadata_dropped",
     }
     assert "required" not in tool.inputSchema
     assert properties["page_size"]["maximum"] == MCP_MAX_PAGE_SIZE

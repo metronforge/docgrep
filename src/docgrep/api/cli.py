@@ -180,6 +180,12 @@ def _parser() -> argparse.ArgumentParser:
     sources.add_argument(
         "--has-metadata", dest="has_metadata", choices=HAS_METADATA_VALUES
     )
+    sources.add_argument(
+        "--dropped-metadata",
+        action="store_true",
+        help="Only sources whose title, author or year was dropped as junk or "
+        "inherited from an OCR original; --json shows what and why",
+    )
     sources.add_argument("--sort", dest="sort_by", choices=SORT_KEYS)
     sources.add_argument("--desc", action="store_true", help="Sort in descending order")
     sources.add_argument("--page", type=int)
@@ -736,6 +742,8 @@ def _sources(args: argparse.Namespace, browse: BrowseOperation) -> int:
     }
     if args.desc:
         body["sort_order"] = "desc"
+    if args.dropped_metadata:
+        body["metadata_dropped"] = True
     try:
         request = BrowseSourcesRequest.model_validate(body)
     except SettingsValidationError as error:

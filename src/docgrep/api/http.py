@@ -15,6 +15,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -51,6 +52,7 @@ from docgrep.domain.errors import (
     StoreUnavailable,
     ValidationError,
 )
+from docgrep.domain.metadata import DropReason, FieldAudit, MetadataAudit
 from docgrep.domain.models import FileType, RankedPassage, SearchResult
 from docgrep.domain.sources import (
     DEFAULT_PAGE_SIZE,
@@ -278,6 +280,9 @@ class BrowseSourcesRequest(SourceFilterBody):
     page_size: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
     sort_by: SortKey = "path"
     sort_order: SortOrder = "asc"
+    # True: only sources whose metadata was dropped or inherited; false: only
+    # the others; absent: both.
+    metadata_dropped: StrictBool | None = None
 
     def to_domain(self) -> BrowseRequest:
         return BrowseRequest(
@@ -287,11 +292,57 @@ class BrowseSourcesRequest(SourceFilterBody):
             page_size=self.page_size,
             sort_by=self.sort_by,
             sort_order=self.sort_order,
+            metadata_dropped=self.metadata_dropped,
+        )
+
+
+class DroppedFieldResponse(BaseModel):
+    """What sanitizing did to one metadata field (ADR-0021).
+
+    ``raw`` is the stored value that was dropped, absent when none was
+    stored; ``inherited_from`` is the original's path when the shown value
+    comes from the original of an OCR output.
+    """
+
+    raw: str | int | None = Field(default=None, exclude_if=lambda value: value is None)
+    reason: DropReason
+    inherited_from: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @classmethod
+    def from_domain(cls, item: FieldAudit) -> "DroppedFieldResponse":
+        return cls(raw=item.raw, reason=item.reason, inherited_from=item.inherited_from)
+
+
+class MetadataDroppedResponse(BaseModel):
+    """The metadata fields of a source that were dropped or inherited."""
+
+    title: DroppedFieldResponse | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    author: DroppedFieldResponse | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    year: DroppedFieldResponse | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @classmethod
+    def from_domain(cls, audit: MetadataAudit) -> "MetadataDroppedResponse":
+        return cls(
+            **{
+                name: DroppedFieldResponse.from_domain(item)
+                for name, item in audit.fields()
+            }
         )
 
 
 class BrowsedSourceResponse(BaseModel):
-    """One indexed source with its passage count and OCR origin."""
+    """One indexed source with its passage count and OCR origin.
+
+    Title, author and year are the sanitized values (ADR-0021).
+    """
 
     source_id: str
     path: str
@@ -306,6 +357,10 @@ class BrowsedSourceResponse(BaseModel):
     ocr_status: OcrStatus
     # Present, and true, only when the passage count failed.
     degraded: bool = Field(default=False, exclude_if=lambda value: not value)
+    # Present only when sanitizing dropped or inherited a field.
+    metadata_dropped: MetadataDroppedResponse | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @classmethod
     def from_domain(cls, item: BrowsedSource) -> "BrowsedSourceResponse":
@@ -322,6 +377,11 @@ class BrowsedSourceResponse(BaseModel):
             content_hash=source.content_hash,
             ocr_status=item.ocr_status,
             degraded=item.degraded,
+            metadata_dropped=(
+                None
+                if item.metadata_dropped is None
+                else MetadataDroppedResponse.from_domain(item.metadata_dropped)
+            ),
         )
 
 
@@ -340,7 +400,7 @@ class BrowseSourcesResponse(BaseModel):
     page: int
     page_size: int
     aggregates: BrowseAggregatesResponse
-    applied_filters: dict[str, list[str] | int | str]
+    applied_filters: dict[str, list[str] | bool | int | str]
     # Set only when an MCP result left sources out to stay small.
     hint: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
