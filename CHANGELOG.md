@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v1.21.0 (2026-10-17)
+
+### Documentation
+
+- Describe BM25 sparse weights and the rerank pool
+  ([`c8bc97d`](https://github.com/metronforge/docgrep/commit/c8bc97de658114df1604a6edc5fe9d2e485dbc24))
+
+### Features
+
+- **adapters**: Rerank a configurable pool of fused candidates
+  ([`6eadd2b`](https://github.com/metronforge/docgrep/commit/6eadd2b67aa6713914b00be72dafef24fd4792b9))
+
+- **adapters**: Weigh sparse vectors with BM25
+  ([`16c31c9`](https://github.com/metronforge/docgrep/commit/16c31c9082f45f50f3765d38e3d763945c3e795e))
+
+- **api**: Add reencode-sparse and the rerank pool to eval and status
+  ([`dc40c60`](https://github.com/metronforge/docgrep/commit/dc40c603ce3fa30735e88b938857f4f7e049c8b8))
+
+- **usecases**: Re-encode stored sparse vectors
+  ([`10a067c`](https://github.com/metronforge/docgrep/commit/10a067ce03f040312ca58178e6e2df2bf4b32d55))
+
+
 ## v1.20.0 (2026-10-17)
 
 ### Documentation
