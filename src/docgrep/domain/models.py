@@ -174,6 +174,8 @@ class SearchResult:
     collapsed_duplicates: int | None = None
     applied_filters: Mapping[str, list[str] | int] = field(default_factory=dict)
     sources_excluded_for_missing_metadata: int | None = None
+    # The root name of each returned source by source id (ADR-0023).
+    source_roots: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.total_hits < len(self.results):

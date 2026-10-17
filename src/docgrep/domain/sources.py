@@ -50,6 +50,7 @@ FILTER_FIELDS = (
     "file_types",
     "path_prefixes",
     "path_globs",
+    "roots",
 )
 
 
@@ -108,11 +109,14 @@ class SourceFilter:
     file_types: tuple[FileType, ...] = ()
     path_prefixes: tuple[str, ...] = ()
     path_globs: tuple[str, ...] = ()
+    # Root names (ADR-0023); checked against the known roots when resolved.
+    roots: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
         set_(self, "source_ids", distinct_texts("source_ids", self.source_ids))
         set_(self, "authors", distinct_texts("authors", self.authors))
+        set_(self, "roots", distinct_texts("roots", self.roots))
         set_(self, "file_types", parse_file_types(self.file_types))
         for name in ("path_prefixes", "path_globs"):
             values = distinct_texts(name, getattr(self, name))
@@ -153,8 +157,29 @@ def _within_prefix(path: str, prefixes: Sequence[str]) -> bool:
     return any(path.startswith(prefix.removeprefix("/")) for prefix in prefixes)
 
 
-def matches(source_filter: SourceFilter, source: Source) -> bool:
-    """Whether a source passes every field of the filter that is set."""
+def check_roots(source_filter: SourceFilter, known: Iterable[str]) -> None:
+    """Refuse a filter that names a root which is neither configured nor
+    found in the index; the error lists the known roots."""
+    names = sorted(set(known))
+    unknown = [name for name in source_filter.roots if name not in names]
+    if unknown:
+        raise ValidationError(
+            f"unknown root {unknown[0]!r}; known roots: "
+            + (", ".join(names) or "none"),
+            details={"field": "roots", "unknown": unknown, "known": names},
+        )
+
+
+def matches(
+    source_filter: SourceFilter, source: Source, root: str | None = None
+) -> bool:
+    """Whether a source passes every field of the filter that is set.
+
+    ``root`` is the name of the source's root; a filter on roots never
+    matches a source whose root is not given.
+    """
+    if source_filter.roots and root not in source_filter.roots:
+        return False
     if source_filter.source_ids and source.source_id not in source_filter.source_ids:
         return False
     if source_filter.authors:
@@ -257,14 +282,20 @@ class BrowseRequest:
                 details={"field": "page_size", "minimum": 1, "maximum": MAX_PAGE_SIZE},
             )
 
-    def selects(self, source: Source, audit: MetadataAudit | None = None) -> bool:
+    def selects(
+        self,
+        source: Source,
+        audit: MetadataAudit | None = None,
+        root: str | None = None,
+    ) -> bool:
         """Whether a sanitized source passes the filter and the metadata
-        rules; ``audit`` records what sanitizing dropped or inherited."""
+        rules; ``audit`` records what sanitizing dropped or inherited and
+        ``root`` names the source's root."""
         if self.metadata_dropped is not None and self.metadata_dropped is (
             audit is None or audit.empty
         ):
             return False
-        return matches(self.source_filter, source) and has_metadata(
+        return matches(self.source_filter, source, root) and has_metadata(
             self.has_metadata, source
         )
 
@@ -293,6 +324,8 @@ class BrowsedSource:
     ocr_status: OcrStatus = "not_applicable"
     degraded: bool = False
     metadata_dropped: MetadataAudit | None = None
+    # The name of the source's root (ADR-0023).
+    root: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

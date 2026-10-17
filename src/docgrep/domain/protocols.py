@@ -21,6 +21,7 @@ from docgrep.domain.models import (
     Source,
     StagingInfo,
 )
+from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.scans import PageSample
 
 
@@ -96,6 +97,23 @@ class Chunker(Protocol):
     """Split parsed sections into deterministic, location-aware verbatim passages."""
 
     def chunk(self, document: ParsedDocument) -> tuple[Passage, ...]: ...
+
+
+class RootCatalog(Protocol):
+    """The corpus roots of this process (ADR-0023)."""
+
+    def roots(self) -> CorpusRoots:
+        """The configured roots, knowing every prefix the index records."""
+        ...
+
+
+class CorpusAvailability(Protocol):
+    """Check, before any work, that every root of a run can be read."""
+
+    def require_available(self) -> None:
+        """Raise ``ValidationError`` naming the first root that is missing,
+        not a directory or not readable."""
+        ...
 
 
 class CorpusEnumerator(Protocol):
@@ -262,6 +280,10 @@ class LiveIndexWriter(Protocol):
     def refresh_live_source(self, source_id: str, *, size: int, mtime: float) -> None:
         """Set the recorded size and modification time on every passage of a
         source whose content did not change."""
+        ...
+
+    def count_source_passages(self, source_id: str) -> int:
+        """The number of passages of a source in the published collection."""
         ...
 
     def merge_completion_metadata(

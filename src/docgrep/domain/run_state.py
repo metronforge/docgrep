@@ -5,6 +5,7 @@ from typing import Literal
 
 from docgrep.domain.models import ManifestRunRecord
 from docgrep.domain.protocols import ManifestReader
+from docgrep.domain.roots import RUN_ROOTS_KEY, recorded_prefixes
 
 # What a reader sees: the stored status plus the one state that is derived.
 RunState = Literal[
@@ -84,3 +85,43 @@ def latest_build_run(manifest: ManifestReader) -> ManifestRunRecord | None:
     if latest is None or latest.kind == "build":
         return latest
     return manifest.latest_run_of_kind("build")
+
+
+def latest_root_prefixes(manifest: ManifestReader) -> frozenset[str]:
+    """The prefixed root names recorded by the latest build or update.
+
+    Each such run records every prefix the index may hold once it is done,
+    so the latest one speaks for the committed sources. Runs made before
+    roots had names record none: all their sources are legacy ones.
+    """
+    runs = [
+        run
+        for run in (
+            manifest.latest_run_of_kind("build"),
+            manifest.latest_run_of_kind("update"),
+        )
+        if run is not None
+    ]
+    if not runs:
+        return frozenset()
+    # Run ids are increasing integers.
+    latest = max(runs, key=lambda run: (len(run.run_id), run.run_id))
+    return recorded_prefixes(dict(latest.config))
+
+
+def roots_drift(
+    recorded: Mapping[str, str | int | float],
+    runtime_roots: str,
+    *,
+    single_legacy: bool,
+) -> bool:
+    """Whether a run's roots differ from the roots of this process.
+
+    ``runtime_roots`` is ``CorpusRoots.snapshot()``. A run recorded before
+    roots had names visited one unnamed root, which matches only a single
+    legacy root (``single_legacy``).
+    """
+    value = recorded.get(RUN_ROOTS_KEY)
+    if value is None:
+        return not single_legacy
+    return value != runtime_roots
