@@ -269,7 +269,7 @@ If a roots file has no legacy root but the index holds unprefixed sources, they 
 
 ## Exit codes
 
-`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). `docgrep ocr` differs: 0 when no file failed, 1 when a file failed or the batch was cancelled or aborted, 2 for usage errors (see [OCR](#ocr)). `docgrep sources` exits with 0 also when nothing matches and with 2 for invalid arguments or settings. `docgrep context` exits with 0 also when some or all ids have a failure status (the statuses are printed), with 1 on a runtime failure and with 2 for invalid arguments or settings. Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
+`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). `docgrep ocr` differs: 0 when no file failed, 1 when a file failed or the batch was cancelled or aborted, 2 for usage errors (see [OCR](#ocr)). `docgrep sources` exits with 0 also when nothing matches and with 2 for invalid arguments or settings. `docgrep context` exits with 0 also when some or all ids have a failure status (the statuses are printed), with 1 on a runtime failure and with 2 for invalid arguments or settings. `docgrep eval` exits with 0 when the run completed, also when cases are not found, with 1 on a runtime failure (no index, store or model unavailable) and with 2 for invalid arguments or settings and for a malformed cases file. Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
 
 ## Logging
 
@@ -615,6 +615,46 @@ The window rule:
 - The overlap between consecutive passages is removed using their offsets, so no text is repeated. Where two passages do not touch, they are joined with a space inside a page or section and with a blank line across pages or sections; nothing else is added. `context_before + passage.text + context_after` is the whole window.
 
 Each requested id (at most `DOCGREP_CONTEXT_MAX_PASSAGES`, 20; duplicates are answered once) gets an entry with a `status`: `ok`, `not_found` (no such passage in the index, for example after an update), `source_removed` (with the last known `path`) or `source_modified` (with `indexed_content_hash` and `current_content_hash`); for the last three, search again for current ids. An `ok` entry carries the `passage`, its `source` (with the cleaned metadata of search results), `context_before`, `context_after`, the page and heading path of each neighbour used (`before_locations`, `after_locations`), `at_source_start`, `at_source_end` and `window_tokens_used`. The request answers 200 even when every entry failed; an empty list, too many ids, a malformed id or a window out of range is a validation error. The design is recorded in [ADR-0022](docs/adr/0022-passage-context-from-neighbouring-passages.md).
+
+## Retrieval evaluation
+
+Measure where known passages rank, to decide changes to retrieval with numbers. `docgrep eval` runs each case of a cases file through the same search pipeline and reports, for the expected passage, its rank at every stage. It is read-only (no lock, no writes) and changes nothing about search.
+
+```sh
+uv run docgrep eval my-cases.private.jsonl
+uv run docgrep eval my-cases.private.jsonl --json > eval.json
+uv run docgrep eval my-cases.private.jsonl --top-k 300 --depth 5000 --no-control
+```
+
+The cases file is JSON Lines: one JSON object per line; blank lines and lines starting with `#` are skipped. Fields:
+
+- `query` (required);
+- `source`: the stored path of the expected source (the `source_id` of search results; paths of a prefixed root start with its name and `/`);
+- `source_glob`: a path glob matched against the stored path, with the rules of `DOCGREP_INCLUDE_GLOBS`;
+- `fragment`: text of the expected passage; it matches when the passage text contains it after runs of whitespace are collapsed in both, case-sensitively;
+- `filters`: the filter fields of `POST /search` (see [Filtered search](#filtered-search)), applied as in search;
+- `id` (default: the line number) and `note`, which are only reported.
+
+At least one of `source`, `source_glob` and `fragment` is required; a passage is a hit when it satisfies all that are given. Unknown fields, a malformed line or an invalid value stop the command before anything runs, naming the line. For example:
+
+```json
+{"id": "arnold-comet", "query": "comet orbit", "source": "books/arnold.md", "fragment": "mention a comet once", "note": "decoys outrank it"}
+```
+
+[`examples/eval-cases.example.jsonl`](examples/eval-cases.example.jsonl) is a synthetic file for the generated library of the tests. Real cases name private files: keep them in files named `*.private.jsonl`, which git ignores, and never commit them.
+
+Each case reports a rank (1-based; `-` or `null` when not found) in five lists, and a source rank, the position of the first passage of a matching source, when the case names a source:
+
+- `dense` and `sparse`: each first-stage channel alone, read to `--depth` candidates (default 2000, at most 10000). `sparse` has no rank and a reason when the query has no sparse terms (`no_sparse_terms`) or the index has no sparse channel (`sparse_unavailable`); the fusion then has the dense list alone and carries the same reason;
+- `fused_deep`: the fusion of both channels at `--depth`, the first stage as search computes it, only deeper;
+- `stage1`: the position among the `top_k` first-stage candidates of the search (`--top-k` replaces `DOCGREP_TOP_K`);
+- `final`: the position in the search order after rerank and duplicate collapse, over all `top_k` candidates, not only the first `top_n`. A passage collapsed into a duplicate counts at the position of the passage that carries it.
+
+`within_top_k` says whether a hit is among the `top_k` candidates; `rerank_score` is the `score` search returns for the best-placed hit (empty when it is not within `top_k` or rerank was skipped). Unless `--no-control` is given, a case with `source` or `source_glob` also runs a control search restricted to those sources, through filtered search: `control_rank` and `control_score` show whether the passage can be retrieved at all when the other sources are out of the way.
+
+Reading the result: a hit in a channel or in `fused_deep` that is not within `top_k` is lost in the first stage; a hit within `top_k` with a poor `final` rank is demoted by the reranker; a good control rank with no `stage1` rank means the competing sources crowd it out of the first stage. The aggregates give, over all cases, how many are found in each list, recall@1, 3, 5, 10 and 25 and MRR on `final` (a case not found counts 0), recall within `top_k` and within the depth, and the ids of the cases lost in the first stage, lost in rerank (within `top_k`, final rank above 10) and not found in any list.
+
+The text output starts with the index summary (passage count, models, `top_k`, depth) and cuts long queries and notes with `…`. `--json` prints one object with `settings`, `cases` (in file order, never cut) and `aggregates`, in a fixed key order and without timings, so two runs over the same index and settings give identical output. All queries are embedded in one call. The design is recorded in [ADR-0024](docs/adr/0024-retrieval-evaluation-through-a-diagnostic-seam.md).
 
 ## HTTP API
 
