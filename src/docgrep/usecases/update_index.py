@@ -12,6 +12,7 @@ from docgrep.domain.errors import (
     ConfigDrift,
     DocgrepError,
     IndexIncomplete,
+    RemovalGuardTripped,
     ResumeAvailable,
     ValidationError,
 )
@@ -40,6 +41,7 @@ from docgrep.domain.run_state import (
     unfinished_reencode,
 )
 from docgrep.domain.sparse import SparseWeighting
+from docgrep.domain.update_plan import GuardedRoot, RemovalGuard
 from docgrep.usecases.build_index import (
     BuildFailure,
     Cancelled,
@@ -134,9 +136,11 @@ class UpdateIndex(SourceIndexing):
         roots: RootCatalog | None = None,
         availability: CorpusAvailability | None = None,
         sparse_encoders: SparseEncoders | None = None,
+        guard: RemovalGuard | None = None,
     ) -> None:
         """With ``sparse_encoders`` new passages get the sparse weighting the
-        index records (ADR-0025); without them, ``sparse_encoder``."""
+        index records (ADR-0025); without them, ``sparse_encoder``. ``guard``
+        limits the removals per root (default ``RemovalGuard()``)."""
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if upsert_batch_size <= 0:
@@ -145,6 +149,7 @@ class UpdateIndex(SourceIndexing):
             raise ValueError("progress_every_sources must be positive")
         if progress_every_seconds <= 0:
             raise ValueError("progress_every_seconds must be positive")
+        self.guard = guard or RemovalGuard()
         self.delegations = delegations
         self.roots = roots
         self.availability = availability
@@ -183,6 +188,7 @@ class UpdateIndex(SourceIndexing):
         *,
         retry_failed: bool = True,
         on_plan: Callable[[UpdatePlan], None] | None = None,
+        override_guard: bool = False,
     ) -> UpdateSummary:
         """Update the index; raises before writing anything when it is refused.
 
@@ -190,9 +196,10 @@ class UpdateIndex(SourceIndexing):
         is then called with the work plan, before any change is applied.
 
         Refusals: ``IndexLockHeld``, ``ResumeAvailable`` when the latest build
-        is unfinished, ``IndexIncomplete`` without a completed index and
+        is unfinished, ``IndexIncomplete`` without a completed index,
         ``ConfigDrift`` when a setting that decides vectors or chunking differs
-        from the index.
+        from the index and ``RemovalGuardTripped`` when a root would lose more
+        sources than the removal guard allows, unless ``override_guard``.
         """
         started = self.clock()
         with self.lock.hold("update"):
@@ -210,6 +217,8 @@ class UpdateIndex(SourceIndexing):
             plan = detected.plan()
             if on_plan is not None:
                 on_plan(plan)
+            if not override_guard:
+                self._check_guard(detected)
             self._close_dead_update()
             run_id = self.manifest.start_run(
                 {**self.run_config, **self.roots_config(roots)}, kind="update"
@@ -367,6 +376,13 @@ class UpdateIndex(SourceIndexing):
             parsers=self.parsers,
             delegations=self.delegations,
         ).detect(retry_failed, roots)
+
+    def _check_guard(self, detected: DetectedChanges) -> None:
+        guarded = detected.guarded(self.guard)
+        if guarded:
+            raise RemovalGuardTripped(
+                _guard_message(guarded), details=_guard_details(guarded)
+            )
 
     def _refresh(self, pending: PendingRefresh) -> None:
         """Make the recorded size and time follow an unchanged file, in the
@@ -608,3 +624,30 @@ class UpdateIndex(SourceIndexing):
         self.manifest.remove_source(source.path)
         self.manifest.record_source(source, "removed", run_id=run_id)
         return None, None, 0, removed
+
+
+def _guard_message(guarded: Sequence[GuardedRoot]) -> str:
+    roots = "; ".join(
+        f"root {g.root!r} would lose {g.removals} of {g.recorded} sources "
+        f"(at most {g.threshold} allowed)"
+        for g in guarded
+    )
+    return (
+        f"Update stopped before any change: {roots}. Check that the root folder "
+        "is mounted, complete and the right one; run `docgrep update --yes` to "
+        "apply the removals anyway"
+    )
+
+
+def _guard_details(guarded: Sequence[GuardedRoot]) -> dict[str, object]:
+    return {
+        "roots": [
+            {
+                "root": g.root,
+                "removals": g.removals,
+                "recorded": g.recorded,
+                "threshold": g.threshold,
+            }
+            for g in guarded
+        ]
+    }

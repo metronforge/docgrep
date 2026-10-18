@@ -14,6 +14,11 @@ from docgrep.domain.search_effort import (
     default_rerank_pool,
 )
 from docgrep.domain.sources import MAX_PAGE_SIZE
+from docgrep.domain.update_plan import (
+    DEFAULT_GUARD_COUNT,
+    DEFAULT_GUARD_RATIO,
+    RemovalGuard,
+)
 
 # The MCP tools return this many passages by default, and at most
 # DOCGREP_MCP_MAX_TOP_N (default MCP_MAX_TOP_N), within DOCGREP_TOP_N_MAX.
@@ -102,6 +107,12 @@ class Settings(BaseSettings):
     context_window_tokens: int = Field(default=500, ge=0)
     context_max_window_tokens: int = Field(default=5000, gt=0)
 
+    # The removal guard of `docgrep update` (ADR-0027): without --yes a root
+    # may lose at most min(ratio * its recorded sources, count) sources in
+    # one update, or count when it records fewer than 20.
+    update_guard_ratio: float = Field(default=DEFAULT_GUARD_RATIO, ge=0, le=1)
+    update_guard_count: int = Field(default=DEFAULT_GUARD_COUNT, ge=0)
+
     # The roots this process uses, once chosen (the roots file, the
     # deprecated corpus_root or --root parameters); never read from the
     # environment.
@@ -113,6 +124,10 @@ class Settings(BaseSettings):
         if self.rerank_pool is not None:
             return self.rerank_pool
         return default_rerank_pool(self.top_k)
+
+    @property
+    def removal_guard(self) -> RemovalGuard:
+        return RemovalGuard(self.update_guard_ratio, self.update_guard_count)
 
     @property
     def chosen_corpus_roots(self) -> CorpusRoots | None:

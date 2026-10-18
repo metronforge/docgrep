@@ -115,3 +115,10 @@ class OcrFailed(DocgrepError):
     @property
     def reason(self) -> str:
         return str(self.details.get("reason", "ocr_engine_error"))
+
+
+class RemovalGuardTripped(DocgrepError):
+    """An update would remove more of a root than the removal guard allows;
+    ``details["roots"]`` lists each root with its removals and threshold."""
+
+    category = "removal_guard"

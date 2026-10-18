@@ -20,6 +20,7 @@ from docgrep.domain.protocols import (
     parser_version,
 )
 from docgrep.domain.roots import CorpusRoots
+from docgrep.domain.update_plan import GuardedRoot, RemovalGuard, guarded_roots
 
 ChangeKind = Literal["removed", "modified", "retried", "added"]
 # Why a recorded source is processed again (the retried ones aside).
@@ -119,6 +120,17 @@ class DetectedChanges:
     recorded: Mapping[str, int]
     unchanged: Mapping[str, int]
     outside_run: tuple[tuple[str, int], ...] = ()
+
+    def removals(self) -> dict[str, int]:
+        """The planned removals of each root of the run."""
+        counts = dict.fromkeys(self.roots, 0)
+        for change in self.changes:
+            if change.kind == "removed":
+                counts[change.root] = counts.get(change.root, 0) + 1
+        return counts
+
+    def guarded(self, guard: RemovalGuard) -> tuple[GuardedRoot, ...]:
+        return guarded_roots(self.removals(), self.recorded, guard)
 
     def plan(self, root: str | None = None) -> UpdatePlan:
         """The counts of one root, or of the whole run."""
