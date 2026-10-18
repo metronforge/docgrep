@@ -4,6 +4,7 @@ import logging
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from docgrep import __version__
@@ -11,6 +12,7 @@ from docgrep.adapters.chunking import TokenChunker, WhitespaceTokenizer
 from docgrep.adapters.corpus import (
     describe_source,
     enumerate_corpus,
+    file_content_hash,
     require_available,
     root_readable,
     scan_corpus,
@@ -52,6 +54,7 @@ from docgrep.domain.protocols import (
     CommittedSourceReader,
     DocumentParser,
     EmbeddingProvider,
+    FolderReader,
     ManifestReader,
     OcrOutputOwners,
     PassageContextReader,
@@ -69,12 +72,14 @@ from docgrep.settings import Settings
 from docgrep.usecases.browse_sources import BrowseSources
 from docgrep.usecases.build_index import BuildIndex, BuildSummary
 from docgrep.usecases.cancel_index import CancelIndex
+from docgrep.usecases.compare_folder import CompareFolder
 from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DryRun
 from docgrep.usecases.evaluate_retrieval import EvaluateRetrieval
 from docgrep.usecases.expand_context import ExpandContext
 from docgrep.usecases.find_passages import FindPassages
 from docgrep.usecases.inspect_status import InspectStatus
+from docgrep.usecases.plan_update import PlanUpdate
 from docgrep.usecases.process_scans import ProcessScans
 from docgrep.usecases.reencode_sparse import ReencodeSparse
 from docgrep.usecases.update_index import UpdateIndex, UpdatePlan, UpdateSummary
@@ -178,6 +183,26 @@ class _CorpusEnumerator:
 
     def describe(self, path: str) -> Source:
         return describe_source(self._roots, path)
+
+
+class _FolderFiles:
+    """The files of any folder, enumerated as a root would be, with the
+    include and exclude patterns; the data directory is skipped."""
+
+    def __init__(self, settings: Settings, folder: Path) -> None:
+        self._settings = settings
+        self._folder = folder
+
+    def scan(self) -> tuple[ScannedFile, ...]:
+        return scan_corpus(
+            CorpusRoots.single(self._folder),
+            self._settings.include_globs,
+            self._settings.exclude_globs,
+            self._settings.data_dir,
+        )
+
+    def content_hash(self, path: str) -> str:
+        return file_content_hash(self._folder / path)
 
 
 class _RootCatalog:
@@ -388,6 +413,48 @@ def create_status(settings: Settings) -> InspectStatus:
         roots=_RootCatalog(settings),
         root_readable=lambda root: root_readable(root.path),
     )
+
+
+def create_update_plan(settings: Settings) -> PlanUpdate:
+    """Wire the read-only update plan (ADR-0027).
+
+    It takes no lock, loads no model and opens no store, so it works while
+    another operation holds the index; the manifest and the OCR registry
+    are opened read-only. Call it only when ``index_missing`` is false.
+    """
+    configure_logging(settings.log_level)
+    roots = corpus_roots(settings)
+    manifest = SQLiteManifest(settings.data_dir, read_only=True)
+    corpus = _CorpusEnumerator(settings)
+    return PlanUpdate(
+        corpus=corpus,
+        manifest=manifest,
+        parsers=_parsers(settings, roots),
+        delegations=SQLiteOcrRegistry(
+            settings.data_dir,
+            roots.with_recorded(latest_root_prefixes(manifest)),
+            read_only=True,
+        ),
+        roots=_RootCatalog(settings, roots),
+        availability=corpus,
+        guard=settings.removal_guard,
+    )
+
+
+def create_compare_folder(
+    settings: Settings, folder: Path
+) -> tuple[CompareFolder, FolderReader]:
+    """Wire ``docgrep diff`` (ADR-0027): the comparison and the folder.
+
+    Read-only like ``create_update_plan``. Call it only when
+    ``index_missing`` is false.
+    """
+    configure_logging(settings.log_level)
+    compare = CompareFolder(
+        manifest=SQLiteManifest(settings.data_dir, read_only=True),
+        roots=_RootCatalog(settings),
+    )
+    return compare, _FolderFiles(settings, folder)
 
 
 def index_missing(settings: Settings) -> bool:

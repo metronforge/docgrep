@@ -2,7 +2,7 @@
 
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from docgrep.domain.models import (
@@ -12,15 +12,24 @@ from docgrep.domain.models import (
     Source,
 )
 from docgrep.domain.protocols import (
+    CorpusAvailability,
     CorpusReader,
     DocumentParser,
     ManifestReader,
     OcrDelegations,
+    RootCatalog,
     parser_reprocess_reason,
     parser_version,
 )
 from docgrep.domain.roots import CorpusRoots
-from docgrep.domain.update_plan import GuardedRoot, RemovalGuard, guarded_roots
+from docgrep.domain.run_state import latest_root_prefixes
+from docgrep.domain.update_plan import (
+    GuardedRoot,
+    Move,
+    RemovalGuard,
+    guarded_roots,
+    pair_moves,
+)
 
 ChangeKind = Literal["removed", "modified", "retried", "added"]
 # Why a recorded source is processed again (the retried ones aside).
@@ -57,6 +66,10 @@ class UpdatePlan:
     ``delegated_to_ocr`` (an original now delegated to its OCR'd sibling,
     whose passages are removed) and ``delegation_ended`` (a delegated
     original whose output was removed: it is indexed again).
+
+    ``moved`` counts removed sources paired with an added file of the same
+    content; they are counted in ``removed`` and ``added`` as well, and
+    processed as such.
     """
 
     added: int = 0
@@ -73,6 +86,7 @@ class UpdatePlan:
     # Sources kept because their root is not part of the run, by root name
     # (ADR-0023): they are neither checked nor removed.
     outside_run: tuple[tuple[str, int], ...] = ()
+    moved: int = 0
 
     @property
     def changes(self) -> int:
@@ -119,7 +133,10 @@ class DetectedChanges:
     # them stay as they are.
     recorded: Mapping[str, int]
     unchanged: Mapping[str, int]
+    moves: tuple[Move, ...] = ()
     outside_run: tuple[tuple[str, int], ...] = ()
+    # The root of each recorded source of the run, by stored path.
+    source_roots: Mapping[str, str] = field(default_factory=dict)
 
     def removals(self) -> dict[str, int]:
         """The planned removals of each root of the run."""
@@ -137,6 +154,7 @@ class DetectedChanges:
         changes = [c for c in self.changes if root is None or c.root == root]
         kinds = Counter(change.kind for change in changes)
         reasons = Counter(change.reason for change in changes if change.reason)
+        moves = [m for m in self.moves if root is None or self.root_of(m) == root]
         unchanged = (
             sum(self.unchanged.values())
             if root is None
@@ -151,7 +169,77 @@ class DetectedChanges:
             refreshed=sum(1 for r in self.refreshes if root in (None, r.root)),
             **{reason: reasons[reason] for reason in MODIFIED_REASONS},
             outside_run=self.outside_run if root is None else (),
+            moved=len(moves),
         )
+
+    def root_of(self, move: Move) -> str:
+        """A move belongs to the root of its removed source."""
+        return self.source_roots[move.removed]
+
+
+@dataclass(frozen=True, slots=True)
+class RootPreview:
+    """The plan of one root of the run, with the stored paths of each group.
+
+    ``unchanged`` sources are counted only; a move is listed under the root
+    of its removed source.
+    """
+
+    name: str
+    plan: UpdatePlan
+    recorded: int
+    threshold: int
+    added: tuple[str, ...]
+    modified: tuple[tuple[str, ModifiedReason], ...]
+    removed: tuple[str, ...]
+    retried: tuple[str, ...]
+    refreshed: tuple[str, ...]
+    moved: tuple[Move, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class UpdatePreview:
+    """What ``docgrep update`` would do now; nothing was written to get it.
+
+    ``guarded`` lists the roots for which the update would stop at the
+    removal guard.
+    """
+
+    plan: UpdatePlan
+    roots: tuple[RootPreview, ...]
+    guarded: tuple[GuardedRoot, ...]
+
+    @classmethod
+    def of(cls, detected: DetectedChanges, guard: RemovalGuard) -> "UpdatePreview":
+        def paths(kind: ChangeKind, root: str) -> tuple[str, ...]:
+            return tuple(
+                c.source.path
+                for c in detected.changes
+                if c.kind == kind and c.root == root
+            )
+
+        roots = tuple(
+            RootPreview(
+                name=name,
+                plan=detected.plan(name),
+                recorded=detected.recorded.get(name, 0),
+                threshold=guard.threshold(detected.recorded.get(name, 0)),
+                added=paths("added", name),
+                modified=tuple(
+                    (c.source.path, c.reason)
+                    for c in detected.changes
+                    if c.kind == "modified" and c.root == name and c.reason
+                ),
+                removed=paths("removed", name),
+                retried=paths("retried", name),
+                refreshed=tuple(
+                    r.record.source.path for r in detected.refreshes if r.root == name
+                ),
+                moved=tuple(m for m in detected.moves if detected.root_of(m) == name),
+            )
+            for name in detected.roots
+        )
+        return cls(detected.plan(), roots, detected.guarded(guard))
 
 
 def is_delegated(delegations: OcrDelegations | None, source: Source) -> bool:
@@ -167,8 +255,8 @@ class PlanUpdate:
     """Find the changes an update would apply, reading only.
 
     It takes no lock, starts no run and writes nothing: neither the manifest
-    nor the store nor the OCR registry. ``UpdateIndex`` applies what it
-    finds.
+    nor the store nor the OCR registry. Run on its own it shows what
+    ``docgrep update`` would do; ``UpdateIndex`` applies what it finds.
     """
 
     def __init__(
@@ -178,11 +266,32 @@ class PlanUpdate:
         manifest: ManifestReader,
         parsers: Mapping[FileType, DocumentParser],
         delegations: OcrDelegations | None = None,
+        roots: RootCatalog | None = None,
+        availability: CorpusAvailability | None = None,
+        guard: RemovalGuard | None = None,
     ) -> None:
         self.corpus = corpus
         self.manifest = manifest
         self.parsers = parsers
         self.delegations = delegations
+        self.roots = roots
+        self.availability = availability
+        self.guard = guard or RemovalGuard()
+
+    def run(self, *, retry_failed: bool = True) -> UpdatePreview:
+        """The plan of an update with the same roots, per root.
+
+        Raises ``ValidationError`` when a root cannot be read, as an update
+        would. The corpus or the index can change before an update runs.
+        """
+        if self.availability is not None:
+            self.availability.require_available()
+        roots = (
+            None
+            if self.roots is None
+            else self.roots.roots().with_recorded(latest_root_prefixes(self.manifest))
+        )
+        return UpdatePreview.of(self.detect(retry_failed, roots), self.guard)
 
     def detect(
         self, retry_failed: bool, roots: CorpusRoots | None = None
@@ -270,7 +379,12 @@ class PlanUpdate:
             roots=run_roots,
             recorded=Counter(root_of.values()),
             unchanged=unchanged,
+            moves=pair_moves(
+                (c.source for c in found["removed"]),
+                (c.source for c in found["added"]),
+            ),
             outside_run=tuple(sorted(outside.items())),
+            source_roots=root_of,
         )
 
     def _delegation_reason(

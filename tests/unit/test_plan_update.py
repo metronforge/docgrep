@@ -19,7 +19,7 @@ from docgrep.domain.models import (
     ScannedFile,
     Source,
 )
-from docgrep.domain.update_plan import RemovalGuard
+from docgrep.domain.update_plan import Move, RemovalGuard
 from docgrep.usecases.build_index import BuildIndex
 from docgrep.usecases.plan_update import PlanUpdate, UpdatePlan
 from docgrep.usecases.update_index import UpdateIndex
@@ -244,6 +244,7 @@ def _counts(plan: UpdatePlan) -> tuple[int, ...]:
         plan.retried,
         plan.refreshed,
         plan.unchanged,
+        plan.moved,
     )
 
 
@@ -260,16 +261,29 @@ def test_the_plan_reads_only(harness: Harness) -> None:
     _change_every_kind(harness)
     before = harness.state()
 
-    detected = harness.planner().detect(True)
+    preview = harness.planner().run()
 
     # The touched file is refreshed and still counts as unchanged.
-    assert _counts(detected.plan()) == (2, 1, 2, 0, 1, 1)
+    assert _counts(preview.plan) == (2, 1, 2, 0, 1, 1, 1)
     assert harness.state() == before
     assert harness.writes() == []
     assert harness.parser.parsed == [] and harness.embedder.embedded == 0
     assert harness.lock.taken == 0
     # Planning twice gives the same plan.
-    assert harness.planner().detect(True) == detected
+    assert harness.planner().run() == preview
+
+
+def test_the_plan_lists_the_paths_of_each_group(harness: Harness) -> None:
+    _change_every_kind(harness)
+
+    (root,) = harness.planner().run().roots
+
+    assert root.name == "_legacy" and root.recorded == 4
+    assert root.added == ("moved/doc02.txt", "new.md")
+    assert root.modified == (("doc00.txt", "content_changed"),)
+    assert root.removed == ("doc02.txt", "doc03.txt")
+    assert root.refreshed == ("doc01.txt",)
+    assert root.moved == (Move("doc02.txt", "moved/doc02.txt"),)
 
 
 def test_the_plan_predicts_the_update(harness: Harness) -> None:
@@ -279,16 +293,16 @@ def test_the_plan_predicts_the_update(harness: Harness) -> None:
     harness.parser.failing.clear()
     harness.corpus.files["late.txt"] = ("added after the failure", 4.0)
 
-    plan = harness.planner().detect(True).plan()
+    preview = harness.planner().run()
     summary = harness.update().run()
 
-    assert plan == summary.plan
-    assert (plan.retried, plan.added) == (1, 1)
+    assert preview.plan == summary.plan
+    assert (preview.plan.retried, preview.plan.added) == (1, 1)
     assert (summary.added, summary.modified, summary.removed, summary.retried) == (
-        plan.added,
-        plan.modified,
-        plan.removed,
-        plan.retried,
+        preview.plan.added,
+        preview.plan.modified,
+        preview.plan.removed,
+        preview.plan.retried,
     )
 
 
@@ -298,9 +312,9 @@ def test_a_stat_only_change_is_refreshed_without_parsing_or_embedding(
     harness.corpus.files["doc01.txt"] = (harness.corpus.files["doc01.txt"][0], 9.0)
     before = harness.state()
 
-    plan = harness.planner().detect(True).plan()
+    plan = harness.planner().run().plan
 
-    assert _counts(plan) == (0, 0, 0, 0, 1, 4)
+    assert _counts(plan) == (0, 0, 0, 0, 1, 4, 0)
     assert harness.state() == before
 
     summary = harness.update().run()
@@ -316,6 +330,18 @@ def test_a_stat_only_change_is_refreshed_without_parsing_or_embedding(
     assert writes[:3] == ["start_run", "set_total_sources", "refresh_live_source"]
     assert writes[3] == "record_source"
     assert "upsert_live_batch" not in writes
+
+
+def test_identical_new_copies_pair_with_one_removal_only() -> None:
+    harness = Harness({"a.txt": ("same words", 1.0), "b.txt": ("other words", 1.0)})
+    harness.build()
+    files = harness.corpus.files
+    files["copy2.txt"] = files["copy1.txt"] = files.pop("a.txt")
+
+    preview = harness.planner().run()
+
+    assert preview.roots[0].moved == (Move("a.txt", "copy1.txt"),)
+    assert (preview.plan.moved, preview.plan.removed, preview.plan.added) == (1, 1, 2)
 
 
 def _guarded_harness(count: int, remove: int) -> Harness:
@@ -342,8 +368,8 @@ def test_the_guard_refuses_an_emptied_root_and_writes_nothing() -> None:
     ]
     assert seen and seen[0].removed == 40
     assert harness.state() == before and harness.writes() == []
-    guarded = harness.planner().detect(True).guarded(RemovalGuard())
-    assert [g.root for g in guarded] == ["_legacy"]
+    preview = harness.planner().run()
+    assert [g.root for g in preview.guarded] == ["_legacy"]
 
     summary = harness.update().run(override_guard=True)
 
@@ -365,7 +391,7 @@ def test_a_refused_update_does_not_refresh_either() -> None:
 def test_removals_up_to_the_threshold_proceed() -> None:
     harness = _guarded_harness(40, 2)
 
-    assert harness.planner().detect(True).guarded(RemovalGuard()) == ()
+    assert harness.planner().run().guarded == ()
     assert harness.update().run().removed == 2
 
 

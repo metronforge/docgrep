@@ -1,15 +1,65 @@
-"""The removal guard (ADR-0027) and its settings."""
+"""The pure rules of an update plan: move pairs and the removal guard
+(ADR-0027), and the guard settings."""
 
 import pytest
 from pydantic import ValidationError as SettingsValidationError
 
+from docgrep.domain.models import FileType, Source
 from docgrep.domain.update_plan import (
     GUARD_SMALL_ROOT,
     GuardedRoot,
+    Move,
     RemovalGuard,
     guarded_roots,
+    pair_moves,
 )
 from docgrep.settings import Settings
+
+
+def _source(path: str, content: str | None, size: int | None = 10) -> Source:
+    return Source(
+        source_id=path,
+        path=path,
+        file_type=FileType.TXT,
+        content_hash=content,
+        size=size,
+    )
+
+
+def test_a_removed_source_pairs_with_an_added_file_of_the_same_content() -> None:
+    removed = [_source("old/a.txt", "h1"), _source("old/b.txt", "h2")]
+    added = [_source("new/b.txt", "h2"), _source("new/c.txt", "h3")]
+
+    assert pair_moves(removed, added) == (Move("old/b.txt", "new/b.txt"),)
+
+
+def test_pairs_are_one_to_one_in_stored_path_order() -> None:
+    removed = [_source("z.txt", "same"), _source("a.txt", "same")]
+    added = [
+        _source("y.txt", "same"),
+        _source("b.txt", "same"),
+        _source("c.txt", "same"),
+    ]
+
+    assert pair_moves(removed, added) == (
+        Move("a.txt", "b.txt"),
+        Move("z.txt", "c.txt"),
+    )
+    # The input order does not matter.
+    assert pair_moves(reversed(removed), reversed(added)) == pair_moves(removed, added)
+
+
+def test_identical_content_in_two_new_places_pairs_only_once() -> None:
+    removed = [_source("old.txt", "h")]
+    added = [_source("copy2.txt", "h"), _source("copy1.txt", "h")]
+
+    assert pair_moves(removed, added) == (Move("old.txt", "copy1.txt"),)
+
+
+def test_the_size_must_match_and_a_missing_hash_never_pairs() -> None:
+    assert pair_moves([_source("a", "h", 10)], [_source("b", "h", 11)]) == ()
+    assert pair_moves([_source("a", None)], [_source("b", None)]) == ()
+    assert pair_moves([_source("a", "h", None)], [_source("b", "h", None)]) == ()
 
 
 def test_the_threshold_is_the_smaller_of_the_ratio_and_the_count() -> None:

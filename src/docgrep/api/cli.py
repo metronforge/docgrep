@@ -21,11 +21,13 @@ from docgrep.api.container import (
     ContextOperation,
     Services,
     create_cancel,
+    create_compare_folder,
     create_container,
     create_discover_scans,
     create_dry_run,
     create_process_scans,
     create_status,
+    create_update_plan,
     index_missing,
     open_browse,
     open_context,
@@ -68,16 +70,24 @@ from docgrep.domain.evaluation import (
     MAX_PROBE_DEPTH,
     parse_cases,
 )
+from docgrep.domain.protocols import FolderReader
 from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.search_effort import parse_dense_effort
 from docgrep.domain.sources import HAS_METADATA_VALUES, SORT_KEYS, SourceFilter
 from docgrep.domain.sparse import DEFAULT_B, DEFAULT_K1, TF_V1, SparseWeighting
 from docgrep.settings import Settings
 from docgrep.usecases.cancel_index import CancelIndex, CancelResult
+from docgrep.usecases.compare_folder import CompareFolder, FolderDiff
 from docgrep.usecases.discover_scans import DiscoverScans
 from docgrep.usecases.dry_run import DEFAULT_LIMIT, DryRun
 from docgrep.usecases.evaluate_retrieval import EvaluateRetrieval
 from docgrep.usecases.inspect_status import InspectStatus
+from docgrep.usecases.plan_update import (
+    MODIFIED_REASONS,
+    PlanUpdate,
+    RootPreview,
+    UpdatePreview,
+)
 from docgrep.usecases.process_scans import (
     UPDATE_HINT,
     OcrFileResult,
@@ -126,12 +136,49 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep sources that failed before instead of trying them again",
     )
-    update.add_argument(
+    preview = update.add_mutually_exclusive_group()
+    preview.add_argument(
+        "--plan",
+        action="store_true",
+        help="Only show what the update would change, per root; nothing is "
+        "written and no lock is taken",
+    )
+    preview.add_argument(
         "--yes",
         action="store_true",
         help="Apply the update even when the removal guard would stop it",
     )
+    update.add_argument(
+        "--json", action="store_true", help="With --plan: print one JSON object"
+    )
+    update.add_argument(
+        "--paths",
+        action="store_true",
+        help="With --plan: list the stored paths of each group",
+    )
     _add_root_options(update, save=True)
+    diff = commands.add_parser(
+        "diff",
+        help="Compare a folder, such as a backup copy, with the indexed "
+        "sources of a root (read-only)",
+    )
+    diff.add_argument("path", metavar="PATH", type=Path)
+    diff.add_argument(
+        "--root",
+        dest="root_name",
+        metavar="NAME",
+        help="The root to compare with (default: the only root)",
+    )
+    diff.add_argument(
+        "--hash",
+        action="store_true",
+        help="Hash every file; without it equal size and modification time "
+        "count as the same",
+    )
+    diff.add_argument("--json", action="store_true", help="Print one JSON object")
+    diff.add_argument(
+        "--paths", action="store_true", help="List the paths of each group"
+    )
     search = commands.add_parser(
         "search",
         help="Find verbatim passages",
@@ -1228,7 +1275,9 @@ def _format_changes(plan: UpdatePlan) -> str:
     return (
         f"Update plan: {plan.added} added, {plan.modified} modified, "
         f"{plan.removed} removed, {plan.retried} retried, "
-        f"{plan.unchanged} unchanged.\n"
+        f"{plan.unchanged} unchanged"
+        + (f", {plan.moved} moved" if plan.moved else "")
+        + ".\n"
         f"Modified by reason: {plan.newly_supported} newly supported, "
         f"{plan.content_changed} content changed, "
         f"{plan.parser_changed} parser changed, {plan.retried} retried"
@@ -1245,6 +1294,213 @@ def _format_changes(plan: UpdatePlan) -> str:
         )
         + ".\n"
     )
+
+
+_REASON_LABELS = {
+    "content_changed": "content changed",
+    "parser_changed": "parser changed",
+    "newly_supported": "newly supported",
+    "delegated_to_ocr": "delegated to OCR",
+    "delegation_ended": "OCR delegation ended",
+}
+PLAN_NOTE = (
+    "Nothing was changed. The corpus or the index can change before "
+    "`docgrep update` runs."
+)
+
+
+def _plan_counts(plan: UpdatePlan) -> dict[str, Any]:
+    return {
+        "added": plan.added,
+        "modified": plan.modified,
+        "removed": plan.removed,
+        "retried": plan.retried,
+        "refreshed": plan.refreshed,
+        "unchanged": plan.unchanged,
+        "moved": plan.moved,
+        "modified_by_reason": {
+            reason: getattr(plan, reason) for reason in MODIFIED_REASONS
+        },
+    }
+
+
+def _preview_paths(root: RootPreview) -> dict[str, Any]:
+    return {
+        "added": list(root.added),
+        "modified": [{"path": path, "reason": why} for path, why in root.modified],
+        "removed": list(root.removed),
+        "retried": list(root.retried),
+        "refreshed": list(root.refreshed),
+        "moved": [{"removed": m.removed, "added": m.added} for m in root.moved],
+    }
+
+
+def _preview_json(preview: UpdatePreview, *, paths: bool) -> dict[str, Any]:
+    guarded = {g.root for g in preview.guarded}
+    return {
+        "note": PLAN_NOTE,
+        "roots": [
+            {
+                "root": root.name,
+                "recorded": root.recorded,
+                "guard_threshold": root.threshold,
+                "guarded": root.name in guarded,
+                **_plan_counts(root.plan),
+                "paths": _preview_paths(root) if paths else None,
+            }
+            for root in preview.roots
+        ],
+        "total": _plan_counts(preview.plan),
+        "outside_run": [
+            {"root": name, "sources": count} for name, count in preview.plan.outside_run
+        ],
+        "guarded_roots": [
+            {
+                "root": g.root,
+                "removals": g.removals,
+                "recorded": g.recorded,
+                "threshold": g.threshold,
+            }
+            for g in preview.guarded
+        ],
+    }
+
+
+def _plan_line(label: str, plan: UpdatePlan) -> str:
+    line = (
+        f"{label}: {plan.added} added, {plan.modified} modified, "
+        f"{plan.removed} removed, {plan.retried} retried, "
+        f"{plan.refreshed} refreshed, {plan.unchanged} unchanged, "
+        f"{plan.moved} moved.\n"
+    )
+    reasons = [
+        f"{getattr(plan, reason)} {_REASON_LABELS[reason]}"
+        for reason in MODIFIED_REASONS
+        if getattr(plan, reason)
+    ]
+    if reasons:
+        line += f"  Modified by reason: {', '.join(reasons)}.\n"
+    return line
+
+
+def _format_preview(preview: UpdatePreview, *, paths: bool) -> str:
+    lines = [f"Update plan. {PLAN_NOTE}\n"]
+    for root in preview.roots:
+        lines.append(_plan_line(f"Root {root.name}", root.plan))
+        if not paths:
+            continue
+        groups: tuple[tuple[str, Sequence[str]], ...] = (
+            ("added", root.added),
+            (
+                "modified",
+                [f"{path} ({_REASON_LABELS[why]})" for path, why in root.modified],
+            ),
+            ("removed", root.removed),
+            ("retried", root.retried),
+            ("refreshed", root.refreshed),
+            ("moved", [f"{m.removed} -> {m.added}" for m in root.moved]),
+        )
+        for group, items in groups:
+            if items:
+                lines.append(f"  {group}:\n")
+                lines.extend(f"    {item}\n" for item in items)
+    if len(preview.roots) > 1:
+        lines.append(_plan_line("Total", preview.plan))
+    lines.extend(
+        f"Kept {count} sources of root {name}, which is not part of this run.\n"
+        for name, count in preview.plan.outside_run
+    )
+    lines.extend(
+        f"Removal guard: root {g.root} would lose {g.removals} of {g.recorded} "
+        f"sources (at most {g.threshold} allowed); `docgrep update` would stop "
+        "without changing anything unless run with --yes.\n"
+        for g in preview.guarded
+    )
+    return "".join(lines)
+
+
+def _update_plan(
+    args: argparse.Namespace,
+    settings: Settings,
+    plan_factory: Callable[[Settings], PlanUpdate],
+) -> int:
+    """Run ``docgrep update --plan``: read-only, exit status 0."""
+    if index_missing(settings):
+        sys.stderr.write("index_incomplete: no index has been built yet\n")
+        return 1
+    preview = plan_factory(settings).run(retry_failed=not args.no_retry_failed)
+    if args.json:
+        _emit(json.dumps(_preview_json(preview, paths=args.paths), indent=2) + "\n")
+    else:
+        _emit(_format_preview(preview, paths=args.paths))
+    return 0
+
+
+def _diff_json(folder: Path, diff: FolderDiff, *, paths: bool) -> dict[str, Any]:
+    return {
+        "folder": str(folder),
+        "root": diff.root,
+        "compared_by": "hash" if diff.by_hash else "stat",
+        "hashed": diff.hashed,
+        "same": len(diff.same),
+        "different": len(diff.different),
+        "only_in_index": len(diff.only_in_index),
+        "only_in_folder": len(diff.only_in_folder),
+        "paths": {
+            "different": list(diff.different),
+            "only_in_index": list(diff.only_in_index),
+            "only_in_folder": list(diff.only_in_folder),
+        }
+        if paths
+        else None,
+    }
+
+
+def _format_diff(folder: Path, diff: FolderDiff, *, paths: bool) -> str:
+    how = (
+        "by content hash"
+        if diff.by_hash
+        else "by size and modification time, hashing only the files whose stat differs"
+    )
+    lines = [
+        f"Folder {folder} against root {diff.root}, compared {how} "
+        f"({diff.hashed} files hashed):\n"
+    ]
+    groups = (
+        ("same", diff.same, False),
+        ("different", diff.different, True),
+        ("only in the index", diff.only_in_index, True),
+        ("only in the folder", diff.only_in_folder, True),
+    )
+    for label, items, listed in groups:
+        lines.append(f"  {label}: {len(items)}\n")
+        if paths and listed:
+            lines.extend(f"    {item}\n" for item in items)
+    return "".join(lines)
+
+
+def _diff(
+    args: argparse.Namespace,
+    settings: Settings,
+    diff_factory: Callable[[Settings, Path], tuple[CompareFolder, FolderReader]],
+) -> int:
+    """Run ``docgrep diff``: read-only; usage errors exit with 2."""
+    if index_missing(settings):
+        sys.stderr.write("index_incomplete: no index has been built yet\n")
+        return 1
+    compare, folder = diff_factory(settings, args.path)
+    try:
+        diff = compare.run(folder, root=args.root_name, by_hash=args.hash)
+    except ValidationError as error:
+        sys.stderr.write(_describe(error) + "\n")
+        return 2
+    if args.json:
+        _emit(
+            json.dumps(_diff_json(args.path, diff, paths=args.paths), indent=2) + "\n"
+        )
+    else:
+        _emit(_format_diff(args.path, diff, paths=args.paths))
+    return 0
 
 
 def _format_update(summary: UpdateSummary) -> str:
@@ -1812,6 +2068,10 @@ def main(
     reencode_factory: Callable[
         [Settings], AbstractContextManager[ReencodeSparse]
     ] = open_reencode,
+    plan_factory: Callable[[Settings], PlanUpdate] = create_update_plan,
+    diff_factory: Callable[
+        [Settings, Path], tuple[CompareFolder, FolderReader]
+    ] = create_compare_folder,
     register_signal: Register = signal.signal,
 ) -> int:
     """Run one CLI command and return a process exit status.
@@ -1862,6 +2122,16 @@ def main(
             else:
                 _emit(_format_dry_run(report.as_dict(with_files=False)))
             return 0
+
+        if args.command == "update" and (args.json or args.paths) and not args.plan:
+            sys.stderr.write("usage: --json and --paths require --plan\n")
+            return 2
+
+        if args.command == "update" and args.plan:
+            return _update_plan(args, settings, plan_factory)
+
+        if args.command == "diff":
+            return _diff(args, settings, diff_factory)
 
         if args.command == "index" and args.no_retry_failed and not args.resume:
             sys.stderr.write("usage: --no-retry-failed requires --resume\n")
