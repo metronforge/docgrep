@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v1.25.0 (2026-10-18)
+
+### Documentation
+
+- Describe the progress line
+  ([`b4d64ac`](https://github.com/metronforge/docgrep/commit/b4d64ace6500122f863ff9a7680901abeb26a520))
+
+### Features
+
+- **cli**: Draw a progress line in a terminal
+  ([`2297d97`](https://github.com/metronforge/docgrep/commit/2297d974d2abaf5fe692192c660971969a4f32ce))
+
+- **usecases**: Count OCR progress by pages
+  ([`ad8d88f`](https://github.com/metronforge/docgrep/commit/ad8d88fdf65370d3f705b79d41819d091c8dcb17))
+
+- **usecases**: Report progress to an observer
+  ([`3a38c6f`](https://github.com/metronforge/docgrep/commit/3a38c6f82774c12b728524af5a377904f9c236ae))
+
+
 ## v1.24.0 (2026-10-18)
 
 ### Documentation
