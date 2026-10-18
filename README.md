@@ -283,6 +283,25 @@ Diagnostics go to standard error as one line per record: a UTC timestamp, the le
 
 While `docgrep index` runs it logs an `index_progress` record at INFO level every 25 sources or every 60 seconds, whichever comes first, and once more when the loop over the sources ends. The fields are `run_id`, `sources_done`, `sources_total`, `passages_written`, `elapsed_seconds`, `passages_per_second`, `eta_seconds` and `failed`. `eta_seconds` is `null` until at least one source is done; afterwards it extrapolates the pace so far over the remaining sources. The records carry counters and timings only, never paths, titles or text.
 
+### The progress line
+
+In a terminal, `docgrep index`, `docgrep update`, `docgrep ocr` and `docgrep reencode-sparse` draw one status line on standard error and redraw it in place, at most ten times a second:
+
+```text
+Indexing  37%  612/1,650 sources  210,400 passages  95 p/s  ETA 1h 12m  Rust.Atomics.and.Locks.pdf
+```
+
+It shows the percentage, the sources done of the total, the passages written, the rate in passages per second, the estimated time left and the name of the file being worked on (the last component of its path, shortened in the middle to fit the terminal width). `docgrep ocr` counts pages when every file has a known page count, and files otherwise; `docgrep reencode-sparse` shows its scan for the average length (`Scanning`) and its writing (`Re-encoding`) one after the other, and the ETA of the writing does not include the scan. When a phase ends its last line stays on screen. A log record or the message of a cancel request first clears the line.
+
+`--progress=auto|bar|log|off` chooses what is shown (default `auto`):
+
+- `auto` draws the line only when standard error is a terminal, and never with `--json`;
+- `bar` always draws it;
+- `log` never draws it and leaves the `index_progress` log records as they are;
+- `off` never draws it and lowers the `index_progress` records to DEBUG.
+
+Scripts and logs are unchanged: without a terminal (a pipe, `tee`, cron, CI) the output of every command is exactly what it was, and the log records and the JSON output are the same with or without the line. The line goes to standard error only, so a redirected standard output is unaffected; `docgrep update 2>&1 | cat` prints the usual output.
+
 ### Updating the index
 
 After the first full build, `docgrep update` brings the index up to date with the corpus without rebuilding it:
@@ -589,7 +608,7 @@ OCR run 1 completed in 13s: 3 processed, 0 skipped, 0 failed, 0 cancelled, 0 not
 Run `docgrep update` so that the OCR outputs are indexed.
 ```
 
-This is a run on three generated one-page files. The ETA extrapolates the input bytes processed so far, so it is rough while few files are done (above, a small DjVu file was followed by two larger PDFs). OCR takes several seconds per page on one core, so a batch of books can take hours; `DOCGREP_OCR_JOBS` lets ocrmypdf use more cores. The log gets INFO records `ocr_plan`, `ocr_file_started` (path, size, pages, mode) and `ocr_file_finished` (status, elapsed), and the tools' own output at DEBUG.
+This is a run on three generated one-page files. The ETA extrapolates the pages processed so far when every file has a known page count (files otherwise), so it is rough while few files are done. OCR takes several seconds per page on one core, so a batch of books can take hours; `DOCGREP_OCR_JOBS` lets ocrmypdf use more cores. The log gets INFO records `ocr_plan`, `ocr_file_started` (path, size, pages, mode) and `ocr_file_finished` (status, elapsed), and the tools' own output at DEBUG.
 
 ### Cancel and resume
 
