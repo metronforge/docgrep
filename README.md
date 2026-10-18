@@ -163,6 +163,8 @@ Failed sources:
   books/example.djvu: parse_error: DjVu cannot be read (djvu_tools_missing): ...
 ```
 
+A file that was moved, renamed or copied, or a backup folder added as a root, is indexed by copying the passages already stored for its content, without parsing or embedding (see [Moved, renamed and copied files](#moved-renamed-and-copied-files)).
+
 See [Dry run](#dry-run), [Updating the index](#updating-the-index), [Seeing the plan first](#seeing-the-plan-first), [Comparing a folder with the index](#comparing-a-folder-with-the-index), [Status](#status) and [Cancelling a build](#cancelling-a-build) for the details.
 
 ### Finding files that need OCR
@@ -297,7 +299,7 @@ Update plan: 2 added, 4 modified, 2 removed, 0 retried, 5 unchanged.
 Modified by reason: 2 newly supported, 2 content changed, 0 parser changed, 0 retried.
 ```
 
-`modified` is the sum of three reasons: `newly supported` (skipped as unsupported before, a parser exists now), `content changed` (the content hash differs) and `parser changed` (the parser of the type declares another version than the one recorded, or no parser is registered any more). `retried` repeats the count of failed sources tried again, which are not part of `modified`. Two more reasons appear in that line only when they occur: `delegated to OCR` (an original now has a live OCR output; its passages are removed and it is recorded as skipped with `delegated_to_ocr`, while the output is picked up as an added source) and `OCR delegation ended` (the output was deleted or the original changed; the original is indexed again). The log record carries them as `delegated_to_ocr` and `delegation_ended`. Without any change only `No changes detected (N sources unchanged).` is printed. When removed sources pair with added files of the same content, the first line ends with `N moved` (see [Seeing the plan first](#seeing-the-plan-first)). The `index_update_plan` log record carries the same counts as `added`, `modified`, `removed`, `unchanged`, `retried`, `refreshed`, `moved`, `content_changed`, `parser_changed` and `newly_supported`.
+`modified` is the sum of three reasons: `newly supported` (skipped as unsupported before, a parser exists now), `content changed` (the content hash differs) and `parser changed` (the parser of the type declares another version than the one recorded, or no parser is registered any more). `retried` repeats the count of failed sources tried again, which are not part of `modified`. Two more reasons appear in that line only when they occur: `delegated to OCR` (an original now has a live OCR output; its passages are removed and it is recorded as skipped with `delegated_to_ocr`, while the output is picked up as an added source) and `OCR delegation ended` (the output was deleted or the original changed; the original is indexed again). The log record carries them as `delegated_to_ocr` and `delegation_ended`. Without any change only `No changes detected (N sources unchanged).` is printed. Files indexed by copying the stored passages of the same content end the first line with `N moved` and `N copied`, and the summary line names them too; they are not counted in `added`, `removed` or `modified` (see [Moved, renamed and copied files](#moved-renamed-and-copied-files)). The `index_update_plan` log record carries the same counts as `added`, `modified`, `removed`, `unchanged`, `retried`, `refreshed`, `moved`, `copied`, `content_changed`, `parser_changed` and `newly_supported`.
 
 Every built-in parser declares a version (text, Markdown, PDF, EPUB and DOCX all started at `1`; the PDF parser is at `3`), and builds and updates record it with each source. A parser's version is raised whenever what it extracts from the same file changes. When a parser's version changes, `docgrep update` extracts the sources of that type again, insert-first like any other modified source. Sources recorded before versions existed have no recorded version; a missing or empty version counts as `1`, so they are not processed again merely because nothing was recorded.
 
@@ -327,32 +329,51 @@ uv run docgrep update --plan --json --paths   # one JSON object
 
 ```text
 Update plan. Nothing was changed. The corpus or the index can change before `docgrep update` runs.
-Root books: 2 added, 1 modified, 2 removed, 0 retried, 1 refreshed, 29 unchanged, 1 moved.
+Root books: 1 added, 1 modified, 1 removed, 0 retried, 1 refreshed, 29 unchanged, 1 moved, 1 copied.
   Modified by reason: 1 content changed.
   added:
-    archive/vol03.txt
     vol30.txt
   modified:
     vol01.txt (content changed)
   removed:
-    vol03.txt
     vol04.txt
   refreshed:
     vol02.txt
   moved:
     vol03.txt -> archive/vol03.txt
+  copied:
+    vol05.txt -> backup/vol05.txt
 Root notes: 0 added, 0 modified, 2 removed, 0 retried, 0 refreshed, 0 unchanged, 0 moved.
   removed:
     notes/kite.txt
     notes/river.txt
-Total: 2 added, 1 modified, 4 removed, 0 retried, 1 refreshed, 29 unchanged, 1 moved.
+Total: 1 added, 1 modified, 3 removed, 0 retried, 1 refreshed, 29 unchanged, 1 moved, 1 copied.
   Modified by reason: 1 content changed.
 Removal guard: root books would lose 2 of 32 sources (at most 1 allowed); `docgrep update` would stop without changing anything unless run with --yes.
 ```
 
-The groups are those of `update`: `added`, `modified` (with its reasons), `removed`, `retried`, `refreshed` (same content, new size or time: only the recorded values are updated, nothing is parsed or embedded; such a source also counts as `unchanged`), `unchanged` and the roots outside the run. `moved` pairs a removed source with an added file of the same content hash and size; it is information only: the pair still counts in `removed` and `added` and is processed as a removal and an addition. Each removed source pairs with at most one added file, the first in stored path order (removed sources are taken in stored path order too), so two new copies of one file make one pair. A move is listed under the root of its removed source. Without `--paths` only the counts are printed; `unchanged` sources are never listed.
+The groups are those of `update`: `added`, `modified` (with its reasons), `removed`, `retried`, `refreshed` (same content, new size or time: only the recorded values are updated, nothing is parsed or embedded; such a source also counts as `unchanged`), `unchanged` and the roots outside the run, and `moved` and `copied` (see [Moved, renamed and copied files](#moved-renamed-and-copied-files)). A move is listed under the root of its removed source, a copy under the root of the copy, each as `old -> new`; `copied` is printed only when there is one. Without `--paths` only the counts are printed; `unchanged` sources are never listed.
 
-`--json` prints one object with the keys `note`; `roots`, a list with one object per root of the run with `root`, `recorded` (the sources the index records for it), `guard_threshold`, `guarded`, the counts `added`, `modified`, `removed`, `retried`, `refreshed`, `unchanged` and `moved`, `modified_by_reason` (`content_changed`, `parser_changed`, `newly_supported`, `delegated_to_ocr`, `delegation_ended`) and `paths` (`null` without `--paths`; otherwise `added`, `modified` as `path` and `reason`, `removed`, `retried`, `refreshed` and `moved` as `removed` and `added`); `total`, the counts of the whole run; `outside_run`, a list of `root` and `sources`; and `guarded_roots`, a list of `root`, `removals`, `recorded`, `threshold` and `reason` (`empties_root` when every recorded source of the root would be removed, otherwise `threshold`).
+`--json` prints one object with the keys `note`; `roots`, a list with one object per root of the run with `root`, `recorded` (the sources the index records for it), `guard_threshold`, `guarded`, the counts `added`, `modified`, `removed`, `retried`, `refreshed`, `unchanged`, `moved` and `copied`, `modified_by_reason` (`content_changed`, `parser_changed`, `newly_supported`, `delegated_to_ocr`, `delegation_ended`) and `paths` (`null` without `--paths`; otherwise `added`, `modified` as `path` and `reason`, `removed`, `retried`, `refreshed`, `moved` as `removed` and `added`, and `copied` as `original` and `copy`); `total`, the counts of the whole run; `outside_run`, a list of `root` and `sources`; and `guarded_roots`, a list of `root`, `removals`, `recorded`, `threshold` and `reason` (`empties_root` when every recorded source of the root would be removed, otherwise `threshold`).
+
+### Moved, renamed and copied files
+
+A source is identified by its stored path, so a file that is moved, renamed or copied (inside a root, to another root, restored from a backup, or a backup folder added as a root) is a new source. When its content is already indexed, `docgrep update` does not parse or embed it again: it copies the stored passages of that content, their text, location, metadata and both vectors, under the new path. A large book moves in seconds instead of minutes of GPU time.
+
+- **Moved or renamed**: a removed source and an added file with the same content hash and size form a move. The passages are copied to the new path first, then the old source is removed as any removed source is. Each removed source pairs with at most one added file, the first in stored path order (removed sources are taken in stored path order too), so two new copies of one moved file make one move and one copy.
+- **Copied**: an added file, or a file whose content changed, with the content of a source that stays (any root, the first in stored path order) gets a copy of its passages; both are indexed. Search collapses the identical passages into one result that lists the other location (see [Duplicate passages](#duplicate-passages)).
+- **Not reused**: the stored source must be indexed, with the same content hash, size and file type, the parser version the file would be parsed with now and the embedding model of the index. An original delegated to its OCR output, or an OCR output, is never reused (see [OCR](#ocr)). A failed source that is retried goes through the normal pipeline. Any of these is processed as an addition or a modification.
+- **A full build** reuses only within its own run: of two files with the same content, the first is indexed and the next ones are copies of it (the build summary says `N indexed (M copied from a file with the same content)`). It never reuses the index it replaces.
+
+A move counts against the [removal guard](#the-removal-guard) like any removal of its root.
+
+If a copy fails in the store, what was written of the new source is deleted, it is recorded as `failed:store_error` and the old source of a move stays; the next update retries it. A move whose copy is stored but whose old source could not be removed (or whose process stopped in between) leaves both indexed, and the next update removes the old one, whose file is gone.
+
+The run journal of the update or build records the source each copy was made from (`reused_from`); the committed source record is the same as for a source indexed normally. The run totals, the `index_update_finished` log record and the `Latest run:` line of `docgrep status` carry `moved` and `copied` (a build records `copied` when it made a copy), and each copy logs a `source_reused` record.
+
+Passage ids follow the path (ADR-0023), so the passages of a moved or renamed file get new ids: in [Passage context](#passage-context) a passage id saved before the move answers `not_found` once the old source is removed (`source_removed`, with the old path, while a passage of it is still stored but its record is gone), exactly like the ids of any removed source. Search again for the current ids. The ids of the source a copy was made from do not change.
+
+`DOCGREP_REUSE_BY_HASH=false` turns reuse off: every move is a removal and an addition again, and every file is parsed and embedded; the plan then counts no moves or copies. It is meant for comparison and as an escape hatch. The design is recorded in [ADR-0028](docs/adr/0028-reuse-indexed-passages-by-content-hash.md).
 
 ### The removal guard
 
