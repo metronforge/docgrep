@@ -4,13 +4,15 @@ import argparse
 import errno
 import functools
 import json
+import logging
 import os
 import signal
 import sys
 from collections import Counter
-from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +54,7 @@ from docgrep.api.http import (
     validation_problems,
 )
 from docgrep.api.log_config import configure_logging
+from docgrep.api.progress_line import ProgressLine
 from docgrep.api.roots import (
     RootSelection,
     add_command,
@@ -70,6 +73,7 @@ from docgrep.domain.evaluation import (
     MAX_PROBE_DEPTH,
     parse_cases,
 )
+from docgrep.domain.progress import ProgressOptions
 from docgrep.domain.protocols import FolderReader
 from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.search_effort import parse_dense_effort
@@ -103,6 +107,75 @@ from docgrep.usecases.reencode_sparse import (
 )
 from docgrep.usecases.update_index import UpdatePlan, UpdateSummary
 
+PROGRESS_MODES = ("auto", "bar", "log", "off")
+
+
+def _add_progress_option(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--progress",
+        choices=PROGRESS_MODES,
+        default="auto",
+        help="Progress on standard error: auto draws one status line when it is "
+        "a terminal (and not with --json); bar always draws it; log leaves the "
+        "progress log records only; off also lowers them to DEBUG (default auto)",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Display:
+    """What a command needs of the progress display: the options to hand to
+    the run (None leaves the run exactly as without a display), a way to wipe
+    the line before anything else is written, and the cancel notice."""
+
+    options: ProgressOptions | None
+    clear: Callable[[], None]
+    notify: Callable[[str], None]
+
+    @property
+    def run_options(self) -> dict[str, ProgressOptions]:
+        """The keyword argument of a run; empty when there is nothing to pass."""
+        return {} if self.options is None else {"progress": self.options}
+
+
+@contextmanager
+def _progress(
+    args: argparse.Namespace, *, json_output: bool = False
+) -> Iterator[_Display]:
+    """Set up the progress display of a command from ``--progress``.
+
+    ``auto`` draws only on a terminal, and never with ``--json`` or
+    ``--quiet``; without a terminal the output is the one the command always
+    had.
+    """
+    mode: str = args.progress
+    if mode == "off":
+        yield _Display(ProgressOptions(log_level=logging.DEBUG), _no_op, _warn_user)
+        return
+    drawing = mode == "bar" or (
+        mode == "auto"
+        and not json_output
+        and not getattr(args, "quiet", False)
+        and sys.stderr.isatty()
+    )
+    if not drawing:
+        yield _Display(None, _no_op, _warn_user)
+        return
+    line = ProgressLine()
+
+    def notify(message: str) -> None:
+        line.clear()
+        _warn_user(message)
+
+    try:
+        with line.keep_logs_apart():
+            yield _Display(ProgressOptions(line), line.clear, notify)
+    finally:
+        line.close()
+
+
+def _no_op() -> None:
+    return None
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="docgrep")
@@ -126,6 +199,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --resume: keep sources that failed instead of trying them again",
     )
+    _add_progress_option(index)
     _add_root_options(index, save=True)
     update = commands.add_parser(
         "update",
@@ -156,6 +230,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --plan: list the stored paths of each group",
     )
+    _add_progress_option(update)
     _add_root_options(update, save=True)
     diff = commands.add_parser(
         "diff",
@@ -389,6 +464,7 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_B,
         help=f"BM25 length normalization, 0 to 1 (default {DEFAULT_B})",
     )
+    _add_progress_option(reencode)
     commands.add_parser(
         "cancel", help="Ask a running index build to stop after its current batch"
     )
@@ -891,6 +967,11 @@ def _format_reencode(summary: ReencodeSummary) -> str:
     )
 
 
+def _show_reencode_plan(plan: ReencodePlan, display: _Display) -> None:
+    display.clear()
+    _emit(_format_reencode_plan(plan))
+
+
 def _reencode(
     args: argparse.Namespace,
     settings: Settings,
@@ -899,17 +980,18 @@ def _reencode(
 ) -> int:
     """Run ``docgrep reencode-sparse``: 0 when planned, done or nothing to do,
     2 for invalid parameters or when cancelled; refusals raise and exit 1."""
-    with factory(settings) as reencode:
+    with factory(settings) as reencode, _progress(args) as display:
         try:
             if not args.yes:
-                plan = reencode.plan(k1=args.k1, b=args.b)
+                plan = reencode.plan(k1=args.k1, b=args.b, **display.run_options)
+                display.clear()
                 _emit(_format_reencode_plan(plan))
                 if not plan.noop:
                     _emit("Run again with --yes to re-encode.\n")
                 return 0
             with graceful_cancel(
                 reencode.request_cancel,
-                _warn_user,
+                display.notify,
                 register=register_signal,
                 operation="sparse re-encode",
                 notice="Cancel requested: the sparse re-encode stops after the "
@@ -918,7 +1000,8 @@ def _reencode(
                 summary = reencode.run(
                     k1=args.k1,
                     b=args.b,
-                    on_plan=lambda plan: _emit(_format_reencode_plan(plan)),
+                    on_plan=lambda plan: _show_reencode_plan(plan, display),
+                    **display.run_options,
                 )
         except ValidationError as error:
             sys.stderr.write(f"usage: {_describe(error)}\n")
@@ -2226,16 +2309,20 @@ def main(
             if update is None:
                 sys.stderr.write("update is not available in this configuration\n")
                 return 1
-            with graceful_cancel(
-                lambda: update.request_cancel(),
-                _warn_user,
-                register=register_signal,
-                operation="update",
+            with (
+                _progress(args) as display,
+                graceful_cancel(
+                    lambda: update.request_cancel(),
+                    display.notify,
+                    register=register_signal,
+                    operation="update",
+                ),
             ):
                 outcome = update.run(
                     retry_failed=not args.no_retry_failed,
                     on_plan=_plan_printer,
                     override_guard=args.yes,
+                    **display.run_options,
                 )
             _emit(_format_update(outcome))
             if outcome.cancelled:
@@ -2244,17 +2331,23 @@ def main(
             return 1 if outcome.failed else 0
 
         if args.command == "index":
-            with graceful_cancel(
-                lambda: services.build.request_cancel(),
-                _warn_user,
-                register=register_signal,
+            with (
+                _progress(args) as display,
+                graceful_cancel(
+                    lambda: services.build.request_cancel(),
+                    display.notify,
+                    register=register_signal,
+                ),
             ):
                 if args.resume:
                     summary = services.build.resume(
-                        retry_failed=not args.no_retry_failed
+                        retry_failed=not args.no_retry_failed,
+                        **display.run_options,
                     )
                 else:
-                    summary = services.build.run(refuse_resumable=not args.restart)
+                    summary = services.build.run(
+                        refuse_resumable=not args.restart, **display.run_options
+                    )
             if summary.cancelled:
                 _emit(
                     f"Build {summary.run_id} cancelled: {summary.indexed} indexed, "
