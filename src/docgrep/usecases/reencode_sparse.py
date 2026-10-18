@@ -22,6 +22,11 @@ from docgrep.domain.errors import (
     ValidationError,
 )
 from docgrep.domain.models import ManifestRunRecord
+from docgrep.domain.progress import (
+    ProgressEvent,
+    ProgressOptions,
+    estimate_eta_seconds,
+)
 from docgrep.domain.protocols import (
     IndexLock,
     Manifest,
@@ -201,12 +206,19 @@ class ReencodeSparse:
         signal handler."""
         self._cancel_event.set()
 
-    def plan(self, *, k1: float = DEFAULT_K1, b: float = DEFAULT_B) -> ReencodePlan:
+    def plan(
+        self,
+        *,
+        k1: float = DEFAULT_K1,
+        b: float = DEFAULT_B,
+        progress: ProgressOptions | None = None,
+    ) -> ReencodePlan:
         """What ``run`` would do with these parameters; reads, never writes.
 
-        Computing a new average length reads the text of every passage.
+        Computing a new average length reads the text of every passage; an
+        observer in ``progress`` sees that scan.
         """
-        return self._plan(k1, b, lock_held=self.lock.is_held())[0]
+        return self._plan(k1, b, lock_held=self.lock.is_held(), progress=progress)[0]
 
     def run(
         self,
@@ -214,6 +226,7 @@ class ReencodeSparse:
         k1: float = DEFAULT_K1,
         b: float = DEFAULT_B,
         on_plan: Callable[[ReencodePlan], None] | None = None,
+        progress: ProgressOptions | None = None,
     ) -> ReencodeSummary:
         """Re-encode under the index lock; a no-op when the index already
         has ``bm25-v2`` with these parameters.
@@ -225,16 +238,23 @@ class ReencodeSparse:
         """
         started = self.clock()
         with self.lock.hold("sparse re-encode"):
-            plan, metadata, resume = self._plan(k1, b, lock_held=False)
+            plan, metadata, resume = self._plan(
+                k1, b, lock_held=False, progress=progress
+            )
             if on_plan is not None:
                 on_plan(plan)
             if plan.noop:
                 _LOG.info("sparse_reencode_not_needed", extra={"k1": k1, "b": b})
                 return ReencodeSummary(plan)
-            return self._execute(plan, metadata, resume, started)
+            return self._execute(plan, metadata, resume, started, progress)
 
     def _plan(
-        self, k1: float, b: float, *, lock_held: bool
+        self,
+        k1: float,
+        b: float,
+        *,
+        lock_held: bool,
+        progress: ProgressOptions | None = None,
     ) -> tuple[ReencodePlan, Mapping[str, str | int | float], _Resume | None]:
         try:
             check_bm25_parameters(k1, b)
@@ -274,9 +294,44 @@ class ReencodeSparse:
             return plan, metadata, resume
         if unfinished is None and current.same_parameters(k1, b):
             return ReencodePlan(passages, current, current, noop=True), metadata, None
-        avgdl, _ = average_length(self.index, self.encoders, page_size=self.page_size)
+        avgdl = self._scan(passages, progress)
         target = SparseWeighting.bm25(k1, b, avgdl)
         return ReencodePlan(passages, current, target), metadata, None
+
+    def _scan(self, passages: int, progress: ProgressOptions | None) -> float:
+        """The average passage length, reading every passage once; an
+        observer sees the scan as its own phase."""
+        observer = None if progress is None else progress.observer
+        if observer is None:
+            return average_length(self.index, self.encoders, page_size=self.page_size)[
+                0
+            ]
+        started = self.clock()
+
+        def event(done: int, *, finished: bool = False) -> ProgressEvent:
+            elapsed = self.clock() - started
+            return ProgressEvent(
+                operation="reencode",
+                unit="passages",
+                done=done,
+                total=passages,
+                elapsed_seconds=elapsed,
+                eta_seconds=estimate_eta_seconds(
+                    done=done, total=passages, elapsed_seconds=elapsed
+                ),
+                phase="scanning",
+                finished=finished,
+            )
+
+        observer(event(0))
+        avgdl, scanned = average_length(
+            self.index,
+            self.encoders,
+            page_size=self.page_size,
+            after_page=lambda done: observer(event(done)),
+        )
+        observer(event(scanned, finished=True))
+        return avgdl
 
     @staticmethod
     def _resumable(
@@ -329,6 +384,7 @@ class ReencodeSparse:
         metadata: Mapping[str, str | int | float],
         resume: _Resume | None,
         started: float,
+        options: ProgressOptions | None = None,
     ) -> ReencodeSummary:
         self._close_dead_run()
         target = plan.target
@@ -357,7 +413,7 @@ class ReencodeSparse:
             },
         )
         # The rate and ETA cover the writing only, not the planning scan.
-        progress = Progress(
+        counter = Progress(
             run_id=run_id,
             total=plan.passages,
             clock=self.clock,
@@ -366,7 +422,10 @@ class ReencodeSparse:
             every_seconds=self.progress_every_seconds,
             carried=checkpoint.done,
             unit="passages",
+            operation="reencode",
+            options=options,
         )
+        counter.start()
         written = 0
         skipped = 0
         state = checkpoint
@@ -383,7 +442,7 @@ class ReencodeSparse:
                 state.skipped + empty,
             )
             self.manifest.set_checkpoint(run_id, state.dumps())
-            progress.advance(count, 0, done=count + empty)
+            counter.advance(count, 0, done=count + empty)
 
         try:
             if not state.scanned:
@@ -395,7 +454,7 @@ class ReencodeSparse:
                     before_page=lambda: self._check_cancel(run_id),
                     after_page=after_page,
                 )
-            progress.finish(0)
+            counter.finish(0)
             self._check_cancel(run_id)
             self.index.merge_completion_metadata(target.metadata())
             self.manifest.finish_run(run_id, "completed", _totals(state))

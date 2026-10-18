@@ -17,6 +17,7 @@ from docgrep.domain.errors import (
     ValidationError,
 )
 from docgrep.domain.models import FileType, ManifestSourceRecord, Source
+from docgrep.domain.progress import ProgressOptions
 from docgrep.domain.protocols import (
     Chunker,
     CorpusAvailability,
@@ -201,6 +202,7 @@ class UpdateIndex(SourceIndexing):
         retry_failed: bool = True,
         on_plan: Callable[[UpdatePlan], None] | None = None,
         override_guard: bool = False,
+        progress: ProgressOptions | None = None,
     ) -> UpdateSummary:
         """Update the index; raises before writing anything when it is refused.
 
@@ -239,7 +241,12 @@ class UpdateIndex(SourceIndexing):
                 "index_update_started", extra={"run_id": run_id, **self.log_context}
             )
             return self._execute(
-                run_id, started, detected.changes, plan, detected.refreshes
+                run_id,
+                started,
+                detected.changes,
+                plan,
+                detected.refreshes,
+                progress=progress,
             )
 
     def forget_plan(self, name: str) -> tuple[ManifestSourceRecord, ...]:
@@ -421,6 +428,7 @@ class UpdateIndex(SourceIndexing):
         refreshes: Sequence[PendingRefresh] = (),
         *,
         on_plan: Callable[[UpdatePlan], None] | None = None,
+        progress: ProgressOptions | None = None,
     ) -> UpdateSummary:
         """Apply a plan found beforehand: the refreshes first, then the
         changes in order."""
@@ -455,16 +463,21 @@ class UpdateIndex(SourceIndexing):
             )
             if on_plan is not None:
                 on_plan(plan)
-            progress = Progress(
+            counter = Progress(
                 run_id=run_id,
                 total=len(changes),
                 clock=self.clock,
                 started=started,
                 every_sources=self.progress_every_sources,
                 every_seconds=self.progress_every_seconds,
+                operation="update",
+                options=progress,
             )
+            if changes:
+                counter.start()
             for change in changes:
                 self._check_cancel(run_id)
+                counter.begin(change.source.path, totals["failed"])
                 outcome, failure, added_points, pruned = self._apply(change, run_id)
                 counts[change.kind] += 1
                 if outcome is not None:
@@ -473,9 +486,9 @@ class UpdateIndex(SourceIndexing):
                 removed += pruned
                 if failure is not None:
                     failures.append(failure)
-                progress.advance(added_points, totals["failed"])
+                counter.advance(added_points, totals["failed"])
             if changes:
-                progress.finish(totals["failed"])
+                counter.finish(totals["failed"])
             self._check_cancel(run_id)
             self.index.merge_completion_metadata(
                 {"last_updated_at": self.now().isoformat()}

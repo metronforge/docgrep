@@ -28,7 +28,12 @@ from docgrep.domain.models import (
     Passage,
     Source,
 )
-from docgrep.domain.progress import estimate_eta_seconds
+from docgrep.domain.progress import (
+    ProgressEvent,
+    ProgressOptions,
+    estimate_eta_seconds,
+    item_label,
+)
 from docgrep.domain.protocols import (
     Chunker,
     CorpusAvailability,
@@ -161,6 +166,10 @@ class Progress:
     Only counters and timings are logged, never paths, titles or text.
     ``unit`` names the counted units in the record (``sources_done``,
     ``passages_done``); the rate and ETA run from ``started``.
+
+    An observer (``options.observer``) is called on every advance, when an
+    item is begun and when the phase ends, independently of the log cadence;
+    the log records are the same with or without one, except for their level.
     """
 
     def __init__(
@@ -174,9 +183,13 @@ class Progress:
         every_seconds: float,
         carried: int = 0,
         unit: str = "sources",
+        operation: str = "index",
+        options: ProgressOptions | None = None,
     ) -> None:
         self._carried = carried
         self._unit = unit
+        self._operation = operation
+        self._options = options or ProgressOptions()
         self._run_id = run_id
         self._total = total
         self._clock = clock
@@ -185,13 +198,24 @@ class Progress:
         self._every_seconds = every_seconds
         self._last_logged_at = started
         self._logged_done: int | None = None
+        self._label: str | None = None
         self.done = carried
         self.passages = 0
+
+    def start(self, failed: int = 0) -> None:
+        """Tell the observer that the phase begins; nothing is logged."""
+        self._notify(failed, finished=False)
+
+    def begin(self, path: str, failed: int = 0) -> None:
+        """Tell the observer which item is being worked on."""
+        self._label = item_label(path)
+        self._notify(failed, finished=False)
 
     def advance(self, passages: int, failed: int, *, done: int = 1) -> None:
         """Count ``done`` more units (sources; passages for a re-encode)."""
         self.done += done
         self.passages += passages
+        self._notify(failed, finished=False)
         since = self.done - (
             self._carried if self._logged_done is None else self._logged_done
         )
@@ -203,17 +227,44 @@ class Progress:
         """Log once at the end of the loop, unless the last record says the same."""
         if self._logged_done != self.done:
             self._emit(failed)
+        self._label = None
+        self._notify(failed, finished=True)
 
-    def _emit(self, failed: int) -> None:
-        now = self._clock()
-        elapsed = now - self._started
-        eta = estimate_eta_seconds(
+    def _eta(self, elapsed: float) -> float | None:
+        return estimate_eta_seconds(
             done=self.done,
             total=self._total,
             elapsed_seconds=elapsed,
             carried=self._carried,
         )
-        _LOG.info(
+
+    def _notify(self, failed: int, *, finished: bool) -> None:
+        observer = self._options.observer
+        if observer is None:
+            return
+        elapsed = self._clock() - self._started
+        observer(
+            ProgressEvent(
+                operation=self._operation,
+                unit=self._unit,
+                done=self.done,
+                total=self._total,
+                passages=self.passages,
+                failed=failed,
+                elapsed_seconds=elapsed,
+                rate=self.passages / elapsed if elapsed > 0 else 0.0,
+                eta_seconds=self._eta(elapsed),
+                label=self._label,
+                finished=finished,
+            )
+        )
+
+    def _emit(self, failed: int) -> None:
+        now = self._clock()
+        elapsed = now - self._started
+        eta = self._eta(elapsed)
+        _LOG.log(
+            self._options.log_level,
             "index_progress",
             extra={
                 "run_id": self._run_id,
@@ -753,7 +804,12 @@ class BuildIndex(SourceIndexing):
                 details={"run_id": latest.run_id, "state": state},
             )
 
-    def run(self, *, refuse_resumable: bool | None = None) -> BuildSummary:
+    def run(
+        self,
+        *,
+        refuse_resumable: bool | None = None,
+        progress: ProgressOptions | None = None,
+    ) -> BuildSummary:
         """Run a full rebuild, marking completion only after all sources finish.
 
         With ``refuse_resumable`` a latest run that could be resumed is not
@@ -787,7 +843,7 @@ class BuildIndex(SourceIndexing):
                     self.manifest.set_staging_collection(run_id, staging)
                 return _Plan(sources, len(sources))
 
-            return self._execute(run_id, started, prepare)
+            return self._execute(run_id, started, prepare, progress=progress)
 
     def _refuse_dropping_other_roots(self, roots: CorpusRoots | None) -> None:
         """A full build replaces the index with the sources of its roots, so
@@ -825,7 +881,12 @@ class BuildIndex(SourceIndexing):
             totals[record.status.split(":")[0]] += 1
         return totals
 
-    def resume(self, *, retry_failed: bool = True) -> BuildSummary:
+    def resume(
+        self,
+        *,
+        retry_failed: bool = True,
+        progress: ProgressOptions | None = None,
+    ) -> BuildSummary:
         """Continue the latest aborted, cancelled or interrupted run.
 
         The run is validated before anything is written: the vector-affecting
@@ -928,7 +989,13 @@ class BuildIndex(SourceIndexing):
                     donors=tuple(carried),
                 )
 
-            return self._execute(run_id, started, prepare, resumed_from=latest.run_id)
+            return self._execute(
+                run_id,
+                started,
+                prepare,
+                resumed_from=latest.run_id,
+                progress=progress,
+            )
 
     def _check_staging(
         self, latest: ManifestRunRecord, journal: Sequence[ManifestSourceRecord]
@@ -1040,6 +1107,7 @@ class BuildIndex(SourceIndexing):
         prepare: Callable[[str], _Plan],
         *,
         resumed_from: str | None = None,
+        progress: ProgressOptions | None = None,
     ) -> BuildSummary:
         """Index the planned sources, then publish; the lock is already held."""
         totals = {"indexed": 0, "skipped": 0, "failed": 0}
@@ -1053,7 +1121,7 @@ class BuildIndex(SourceIndexing):
             self._start_reuse(plan.donors)
             totals.update(plan.totals or {})
             failures.extend(plan.failures)
-            progress = Progress(
+            counter = Progress(
                 run_id=run_id,
                 total=plan.total,
                 clock=self.clock,
@@ -1061,9 +1129,12 @@ class BuildIndex(SourceIndexing):
                 every_sources=self.progress_every_sources,
                 every_seconds=self.progress_every_seconds,
                 carried=plan.carried,
+                options=progress,
             )
+            counter.start(totals["failed"])
             for source in plan.sources:
                 self._check_cancel(run_id)
+                counter.begin(source.path, totals["failed"])
                 outcome, failure, written = self._index_source(source, run_id)
                 if outcome == "copied":
                     copied += 1
@@ -1071,8 +1142,8 @@ class BuildIndex(SourceIndexing):
                 totals[outcome] += 1
                 if failure is not None:
                     failures.append(failure)
-                progress.advance(written, totals["failed"])
-            progress.finish(totals["failed"])
+                counter.advance(written, totals["failed"])
+            counter.finish(totals["failed"])
             self._check_cancel(run_id)
             weighting = self._final_sparse_weighting(run_id)
             metadata = dict(self.config)
