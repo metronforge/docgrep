@@ -25,6 +25,7 @@ from docgrep.domain.models import (
     Source,
     StagingInfo,
 )
+from docgrep.domain.protocols import StoredPassagePage
 from docgrep.domain.run_state import VECTOR_CONFIG_KEYS
 
 
@@ -51,6 +52,8 @@ class InMemoryPassageStore:
         self.recall_probes: list[int] = []
         self.recall_override: float | None = None
         self.sparse_channel = True
+        # The source id of each page read for a copy (ADR-0028).
+        self.page_reads: list[str] = []
 
     def _target(
         self,
@@ -360,6 +363,45 @@ class InMemoryPassageStore:
             del published[passage_id]
         return len(doomed)
 
+    @staticmethod
+    def _source_page(
+        items: Mapping[
+            str, tuple[Passage, Source, tuple[float, ...], dict[int, float]]
+        ],
+        source_id: str,
+        offset: str | None,
+        limit: int,
+    ) -> StoredPassagePage:
+        """A page of a source's passages in passage id order; the offset is
+        the first passage id of the page."""
+        ids = sorted(
+            pid for pid, item in items.items() if item[1].source_id == source_id
+        )
+        start = 0 if offset is None else ids.index(offset)
+        page = ids[start : start + limit]
+        following = ids[start + limit] if start + limit < len(ids) else None
+        return (
+            tuple(
+                (items[pid][0], items[pid][1], items[pid][2], dict(items[pid][3]))
+                for pid in page
+            ),
+            following,
+        )
+
+    def staged_source_page(
+        self, source_id: str, offset: str | None, limit: int
+    ) -> StoredPassagePage:
+        if not self._building:
+            raise StoreUnavailable("No collection is being built")
+        self.page_reads.append(source_id)
+        return self._source_page(self._staged, source_id, offset, limit)
+
+    def live_source_page(
+        self, source_id: str, offset: str | None, limit: int
+    ) -> StoredPassagePage:
+        self.page_reads.append(source_id)
+        return self._source_page(self._published(), source_id, offset, limit)
+
     def refresh_live_source(self, source_id: str, *, size: int, mtime: float) -> None:
         published = self._published()
         for passage_id, (passage, source, dense, sparse) in list(published.items()):
@@ -501,12 +543,15 @@ class InMemoryManifest:
         *,
         run_id: str | None = None,
         passages: int = 0,
+        reused_from: str | None = None,
     ) -> None:
         if run_id is not None:
             self._journal.setdefault(run_id, {})[source.path] = ManifestSourceRecord(
-                source, status, error, embedding_model, passages
+                source, status, error, embedding_model, passages, reused_from
             )
             return
+        if reused_from is not None:
+            raise ValueError("reused_from is journaled only")
         self._sources[source.path] = ManifestSourceRecord(
             source, status, error, embedding_model
         )
@@ -527,7 +572,7 @@ class InMemoryManifest:
         if not any(run.run_id == run_id for run in self._runs):
             raise ValueError("unknown run_id")
         self._sources = {
-            path: replace(record, passages=None)
+            path: replace(record, passages=None, reused_from=None)
             for path, record in self._journal.get(run_id, {}).items()
         }
 

@@ -248,6 +248,14 @@ class SparseVectorStore(Protocol):
         ...
 
 
+# A stored passage with the source stored with it and its dense and sparse
+# vectors, as written.
+StoredPassage = tuple[Passage, Source, tuple[float, ...], Mapping[int, float]]
+# One page of the stored passages of a source and the offset of the next
+# page, None after the last one.
+StoredPassagePage = tuple[tuple[StoredPassage, ...], str | None]
+
+
 class PassageWriter(Protocol):
     """Replace an index, persist passages, and mark a build complete last."""
 
@@ -311,6 +319,14 @@ class PassageWriter(Protocol):
         from the published collection when none is open; return how many."""
         ...
 
+    def staged_source_page(
+        self, source_id: str, offset: str | None, limit: int
+    ) -> StoredPassagePage:
+        """Up to ``limit`` passages of a source in the collection being built,
+        with their vectors, from ``offset`` (None: the first page) in a stable
+        order. Raises ``StoreUnavailable`` when no build is open."""
+        ...
+
 
 class LiveIndexWriter(Protocol):
     """Change the published collection in place, one source at a time.
@@ -346,6 +362,14 @@ class LiveIndexWriter(Protocol):
 
     def count_source_passages(self, source_id: str) -> int:
         """The number of passages of a source in the published collection."""
+        ...
+
+    def live_source_page(
+        self, source_id: str, offset: str | None, limit: int
+    ) -> StoredPassagePage:
+        """Up to ``limit`` passages of a source in the published collection,
+        with their vectors, from ``offset`` (None: the first page) in a stable
+        order."""
         ...
 
     def merge_completion_metadata(
@@ -575,13 +599,15 @@ class ManifestWriter(Protocol):
         *,
         run_id: str | None = None,
         passages: int = 0,
+        reused_from: str | None = None,
     ) -> None:
         """Record a source outcome.
 
         With a run id the outcome goes to that run's journal only; without one it
         updates the committed sources directly. ``status`` is ``indexed``,
         ``skipped:<reason>``, ``failed:<reason>`` or, in an update's journal,
-        ``removed``.
+        ``removed``. ``reused_from`` (journal only) names the source whose
+        passages were copied for this one (ADR-0028).
         """
         ...
 

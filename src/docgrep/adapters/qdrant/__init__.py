@@ -31,6 +31,7 @@ from docgrep.domain.models import (
     Source,
     StagingInfo,
 )
+from docgrep.domain.protocols import StoredPassagePage
 from docgrep.domain.run_state import VECTOR_CONFIG_KEYS
 from docgrep.domain.search_effort import DenseSearchEffort
 
@@ -206,6 +207,20 @@ def local_passage_count(path: Path, alias: str = DEFAULT_ALIAS) -> int | None:
         return None
     finally:
         store.close()
+
+
+def _stored_sparse(vector: object) -> dict[int, float]:
+    """The ``sparse`` vector of a point read with its vectors; a point
+    without one has an empty sparse vector."""
+    if not isinstance(vector, dict) or vector.get("sparse") is None:
+        return {}
+    sparse = vector["sparse"]
+    if not isinstance(sparse, models.SparseVector):
+        raise TypeError("point carries an invalid sparse vector")
+    return {
+        int(index): float(value)
+        for index, value in zip(sparse.indices, sparse.values, strict=True)
+    }
 
 
 def _stored_dense(vector: object) -> list[float]:
@@ -599,6 +614,50 @@ class QdrantPassageStore:
                 wait=True,
             )
         return found
+
+    def _source_page(
+        self, collection: str, source_id: str, offset: str | None, limit: int
+    ) -> StoredPassagePage:
+        """One scroll page of the passages of a source with their payload and
+        both vectors, in point id order. A point that is not a valid passage
+        raises, so a copy is never silently partial."""
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        points, following = self._client.scroll(
+            collection,
+            scroll_filter=_source_filter(source_id),
+            limit=limit,
+            offset=offset,
+            with_payload=True,
+            with_vectors=True,
+        )
+        page = tuple(
+            (
+                _passage_of(point.payload or {}),
+                _source_of(point.payload or {}),
+                tuple(_stored_dense(point.vector)),
+                _stored_sparse(point.vector),
+            )
+            for point in points
+        )
+        return page, None if following is None else str(following)
+
+    @_domain_errors
+    def staged_source_page(
+        self, source_id: str, offset: str | None, limit: int
+    ) -> StoredPassagePage:
+        """A page of the passages of a source in the collection being built."""
+        if self._staging is None:
+            raise StoreUnavailable("No collection is being built")
+        return self._source_page(self._staging, source_id, offset, limit)
+
+    @_domain_errors
+    def live_source_page(
+        self, source_id: str, offset: str | None, limit: int
+    ) -> StoredPassagePage:
+        """A page of the passages of a source in the published collection."""
+        collection, _ = self._live()
+        return self._source_page(collection, source_id, offset, limit)
 
     def _live(self) -> tuple[str, int]:
         """The published collection and its dense vector dimension."""
