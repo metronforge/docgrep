@@ -147,7 +147,9 @@ A query in another language works too, in any language the embedding model suppo
 
 ```sh
 uv run docgrep dry-run --sample 50   # before a first build: what would be indexed, with estimates
+uv run docgrep update --plan         # what an update would change; writes nothing
 uv run docgrep update                # after adding, changing or removing files
+uv run docgrep diff /backup/library --root books   # a folder against the index
 uv run docgrep status                # index state, latest run and the sources block
 uv run docgrep cancel                # from another shell: stop a running build or update
 ```
@@ -161,7 +163,7 @@ Failed sources:
   books/example.djvu: parse_error: DjVu cannot be read (djvu_tools_missing): ...
 ```
 
-See [Dry run](#dry-run), [Updating the index](#updating-the-index), [Status](#status) and [Cancelling a build](#cancelling-a-build) for the details.
+See [Dry run](#dry-run), [Updating the index](#updating-the-index), [Seeing the plan first](#seeing-the-plan-first), [Comparing a folder with the index](#comparing-a-folder-with-the-index), [Status](#status) and [Cancelling a build](#cancelling-a-build) for the details.
 
 ### Finding files that need OCR
 
@@ -269,7 +271,7 @@ If a roots file has no legacy root but the index holds unprefixed sources, they 
 
 ## Exit codes
 
-`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused; the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). `docgrep ocr` differs: 0 when no file failed, 1 when a file failed or the batch was cancelled or aborted, 2 for usage errors (see [OCR](#ocr)). `docgrep sources` exits with 0 also when nothing matches and with 2 for invalid arguments or settings. `docgrep context` exits with 0 also when some or all ids have a failure status (the statuses are printed), with 1 on a runtime failure and with 2 for invalid arguments or settings. `docgrep eval` exits with 0 when the run completed, also when cases are not found, with 1 on a runtime failure (no index, store or model unavailable) and with 2 for invalid arguments or settings and for a malformed cases file. Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
+`docgrep` exits with 0 on success and 1 on failure. `docgrep index` and `docgrep update` also exit with 1 when the run completed but one or more sources failed, and when an update is refused (the removal guard included); the summary and the failed sources are still printed on standard output. They exit with 2 when the run was cancelled (see [Long builds](#long-builds)). `docgrep ocr` differs: 0 when no file failed, 1 when a file failed or the batch was cancelled or aborted, 2 for usage errors (see [OCR](#ocr)). `docgrep sources` exits with 0 also when nothing matches and with 2 for invalid arguments or settings. `docgrep context` exits with 0 also when some or all ids have a failure status (the statuses are printed), with 1 on a runtime failure and with 2 for invalid arguments or settings. `docgrep update --plan` and `docgrep diff` exit with 0, with 1 without an index and with 2 for usage errors (for `diff` also an unknown or ambiguous root). `docgrep eval` exits with 0 when the run completed, also when cases are not found, with 1 on a runtime failure (no index, store or model unavailable) and with 2 for invalid arguments or settings and for a malformed cases file. Errors are written to standard error as `category: message`, followed by `(reason: ...)` when the underlying cause is known.
 
 ## Logging
 
@@ -295,7 +297,7 @@ Update plan: 2 added, 4 modified, 2 removed, 0 retried, 5 unchanged.
 Modified by reason: 2 newly supported, 2 content changed, 0 parser changed, 0 retried.
 ```
 
-`modified` is the sum of three reasons: `newly supported` (skipped as unsupported before, a parser exists now), `content changed` (the content hash differs) and `parser changed` (the parser of the type declares another version than the one recorded, or no parser is registered any more). `retried` repeats the count of failed sources tried again, which are not part of `modified`. Two more reasons appear in that line only when they occur: `delegated to OCR` (an original now has a live OCR output; its passages are removed and it is recorded as skipped with `delegated_to_ocr`, while the output is picked up as an added source) and `OCR delegation ended` (the output was deleted or the original changed; the original is indexed again). The log record carries them as `delegated_to_ocr` and `delegation_ended`. Without any change only `No changes detected (N sources unchanged).` is printed. The `index_update_plan` log record carries the same counts as `added`, `modified`, `removed`, `unchanged`, `retried`, `refreshed`, `content_changed`, `parser_changed` and `newly_supported`.
+`modified` is the sum of three reasons: `newly supported` (skipped as unsupported before, a parser exists now), `content changed` (the content hash differs) and `parser changed` (the parser of the type declares another version than the one recorded, or no parser is registered any more). `retried` repeats the count of failed sources tried again, which are not part of `modified`. Two more reasons appear in that line only when they occur: `delegated to OCR` (an original now has a live OCR output; its passages are removed and it is recorded as skipped with `delegated_to_ocr`, while the output is picked up as an added source) and `OCR delegation ended` (the output was deleted or the original changed; the original is indexed again). The log record carries them as `delegated_to_ocr` and `delegation_ended`. Without any change only `No changes detected (N sources unchanged).` is printed. When removed sources pair with added files of the same content, the first line ends with `N moved` (see [Seeing the plan first](#seeing-the-plan-first)). The `index_update_plan` log record carries the same counts as `added`, `modified`, `removed`, `unchanged`, `retried`, `refreshed`, `moved`, `content_changed`, `parser_changed` and `newly_supported`.
 
 Every built-in parser declares a version (text, Markdown, PDF, EPUB and DOCX all started at `1`; the PDF parser is at `3`), and builds and updates record it with each source. A parser's version is raised whenever what it extracts from the same file changes. When a parser's version changes, `docgrep update` extracts the sources of that type again, insert-first like any other modified source. Sources recorded before versions existed have no recorded version; a missing or empty version counts as `1`, so they are not processed again merely because nothing was recorded.
 
@@ -309,8 +311,91 @@ An update is refused (exit status 1) before anything is written:
 - `config_drift`: a key that decides vectors or chunking (the same keys as for resume, see below) differs from the index. An update cannot change them; run a full rebuild with `docgrep index`, or restore the settings.
 - `index_incomplete`: no completed index exists yet; build one with `docgrep index`.
 - `index_lock_held`: another build or update is running.
+- `removal_guard`: the update would remove too much of a root (see [The removal guard](#the-removal-guard)).
 
 The HTTP API has no update endpoint yet.
+
+### Seeing the plan first
+
+`docgrep update --plan` finds the changes exactly as `docgrep update` would, prints them per root and exits with 0. It takes no lock, starts no run and writes nothing (manifest, index, run journal and OCR registry stay as they are), so it also works while another build or update runs; the corpus or the index can of course change before the update itself runs. It honours `--root` and `--no-retry-failed` like `update`. Files whose size and modification time are unchanged are not read; the others, and every added file, are hashed.
+
+```sh
+uv run docgrep update --plan                  # counts per root
+uv run docgrep update --plan --paths          # and the stored paths of each group
+uv run docgrep update --plan --json --paths   # one JSON object
+```
+
+```text
+Update plan. Nothing was changed. The corpus or the index can change before `docgrep update` runs.
+Root books: 2 added, 1 modified, 2 removed, 0 retried, 1 refreshed, 29 unchanged, 1 moved.
+  Modified by reason: 1 content changed.
+  added:
+    archive/vol03.txt
+    vol30.txt
+  modified:
+    vol01.txt (content changed)
+  removed:
+    vol03.txt
+    vol04.txt
+  refreshed:
+    vol02.txt
+  moved:
+    vol03.txt -> archive/vol03.txt
+Root notes: 0 added, 0 modified, 2 removed, 0 retried, 0 refreshed, 0 unchanged, 0 moved.
+  removed:
+    notes/kite.txt
+    notes/river.txt
+Total: 2 added, 1 modified, 4 removed, 0 retried, 1 refreshed, 29 unchanged, 1 moved.
+  Modified by reason: 1 content changed.
+Removal guard: root books would lose 2 of 32 sources (at most 1 allowed); `docgrep update` would stop without changing anything unless run with --yes.
+```
+
+The groups are those of `update`: `added`, `modified` (with its reasons), `removed`, `retried`, `refreshed` (same content, new size or time: only the recorded values are updated, nothing is parsed or embedded; such a source also counts as `unchanged`), `unchanged` and the roots outside the run. `moved` pairs a removed source with an added file of the same content hash and size; it is information only: the pair still counts in `removed` and `added` and is processed as a removal and an addition. Each removed source pairs with at most one added file, the first in stored path order (removed sources are taken in stored path order too), so two new copies of one file make one pair. A move is listed under the root of its removed source. Without `--paths` only the counts are printed; `unchanged` sources are never listed.
+
+`--json` prints one object with the keys `note`; `roots`, a list with one object per root of the run with `root`, `recorded` (the sources the index records for it), `guard_threshold`, `guarded`, the counts `added`, `modified`, `removed`, `retried`, `refreshed`, `unchanged` and `moved`, `modified_by_reason` (`content_changed`, `parser_changed`, `newly_supported`, `delegated_to_ocr`, `delegation_ended`) and `paths` (`null` without `--paths`; otherwise `added`, `modified` as `path` and `reason`, `removed`, `retried`, `refreshed` and `moved` as `removed` and `added`); `total`, the counts of the whole run; `outside_run`, a list of `root` and `sources`; and `guarded_roots`, a list of `root`, `removals`, `recorded` and `threshold`.
+
+### The removal guard
+
+Before applying anything, `docgrep update` checks the planned removals of each root of the run, sources that moved or that the include and exclude patterns no longer match included. When they exceed `min(DOCGREP_UPDATE_GUARD_RATIO × the sources the index records for the root, DOCGREP_UPDATE_GUARD_COUNT)` (defaults `0.05` and `50`; a root with fewer than 20 recorded sources is checked against the count alone), the update writes nothing at all, not even refreshed times, prints the plan, names the roots and exits with 1:
+
+```text
+removal_guard: Update stopped before any change: root 'books' would lose 2 of 32 sources (at most 1 allowed). Check that the root folder is mounted, complete and the right one; run `docgrep update --yes` to apply the removals anyway
+```
+
+An unmounted disk, a sync client that briefly emptied a folder or a root saved with the wrong path would otherwise remove a large part of the index, and rebuilding it takes hours. Check the folder, or `docgrep update --plan --paths`, then run:
+
+```sh
+uv run docgrep update --yes   # apply the plan even when the guard would stop it
+```
+
+`DOCGREP_UPDATE_GUARD_RATIO` takes a number from 0 to 1 and `DOCGREP_UPDATE_GUARD_COUNT` a non-negative integer; `0` for the count makes every removal need `--yes`. `docgrep forget-root` is not guarded: it has its own `--yes`.
+
+### Comparing a folder with the index
+
+`docgrep diff PATH` compares the files under a folder, for example a backup copy before restoring it, with the sources the index records for one root, by path relative to the root. It is read-only, takes no lock and exits with 0. The folder is listed as a root would be, with the include and exclude patterns. `--root NAME` picks the root; without it the only configured root is used (or, with no configured root, the legacy root of the index), and several configured roots are a usage error (exit 2) that names them. Without `--hash` a file with the recorded size and modification time counts as the same, as in an update, and only the others are hashed; `--hash` hashes every file present on both sides.
+
+```sh
+uv run docgrep diff /backup/library --root books --paths
+```
+
+```text
+Folder /backup/library against root books, compared by size and modification time, hashing only the files whose stat differs (2 files hashed):
+  same: 28
+  different: 1
+    vol01.txt
+  only in the index: 3
+    archive/vol03.txt
+    vol05.txt
+    vol30.txt
+  only in the folder: 3
+    extra.txt
+    vol03.txt
+    vol04.txt
+```
+
+`--paths` lists the paths of every group but `same`. `--json` prints one object with `folder`, `root`, `compared_by` (`stat` or `hash`), `hashed`, the counts `same`, `different`, `only_in_index` and `only_in_folder`, and `paths` (`null` without `--paths`; otherwise `different`, `only_in_index` and `only_in_folder`). A file whose content changed while its size and time stayed the same is found only with `--hash`.
+
+The design of the plan, the guard and `diff` is recorded in [ADR-0027](docs/adr/0027-update-plan-removal-guard-and-diff.md).
 
 ### Cancelling a build
 
