@@ -274,6 +274,9 @@ class ManifestSourceRecord:
     error: str | None = None
     embedding_model: str | None = None
     passages: int | None = None
+    # In a run's journal only: the stored path of the source whose passages
+    # were copied for this one instead of parsing and embedding (ADR-0028).
+    reused_from: str | None = None
 
 
 RunStatus = Literal["running", "swapped", "completed", "aborted", "cancelled"]

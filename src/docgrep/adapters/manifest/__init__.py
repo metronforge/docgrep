@@ -39,6 +39,9 @@ _RUN_COLUMNS = (
     ("checkpoint", "TEXT"),
 )
 
+# Columns added to the run journal after the first schema; added when missing.
+_JOURNAL_COLUMNS = (("reused_from", "TEXT"),)
+
 _SOURCE_COLUMNS = (
     "path, source_id, hash, mtime, size, file_type, status, error, "
     "parser_version, embedding_model, indexed_at, title, author, year"
@@ -149,6 +152,15 @@ class SQLiteManifest:
             for column, kind in _RUN_COLUMNS:
                 if column not in existing:
                     connection.execute(f"ALTER TABLE runs ADD COLUMN {column} {kind}")
+            journal = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(run_sources)")
+            }
+            for column, kind in _JOURNAL_COLUMNS:
+                if column not in journal:
+                    connection.execute(
+                        f"ALTER TABLE run_sources ADD COLUMN {column} {kind}"
+                    )
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -194,7 +206,10 @@ class SQLiteManifest:
         *,
         run_id: str | None = None,
         passages: int = 0,
+        reused_from: str | None = None,
     ) -> None:
+        if reused_from is not None and run_id is None:
+            raise ValueError("reused_from is journaled only")
         if status not in ("indexed", "removed") and not status.startswith(
             ("skipped:", "failed:")
         ):
@@ -224,8 +239,9 @@ class SQLiteManifest:
             if run_id is not None:
                 connection.execute(
                     f"""
-                    INSERT INTO run_sources (run_id, {_SOURCE_COLUMNS}, passages)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO run_sources
+                        (run_id, {_SOURCE_COLUMNS}, passages, reused_from)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(run_id, path) DO UPDATE SET
                         source_id=excluded.source_id, hash=excluded.hash,
                         mtime=excluded.mtime, size=excluded.size,
@@ -234,9 +250,10 @@ class SQLiteManifest:
                         embedding_model=excluded.embedding_model,
                         indexed_at=excluded.indexed_at, title=excluded.title,
                         author=excluded.author, year=excluded.year,
-                        passages=excluded.passages
+                        passages=excluded.passages,
+                        reused_from=excluded.reused_from
                     """,
-                    (run_id, *values, passages),
+                    (run_id, *values, passages, reused_from),
                 )
                 return
             connection.execute(
@@ -286,8 +303,9 @@ class SQLiteManifest:
                 marks = ", ".join("?" for _ in group)
                 connection.execute(
                     f"INSERT OR REPLACE INTO run_sources "
-                    f"(run_id, {_SOURCE_COLUMNS}, passages) "
-                    f"SELECT ?, {_SOURCE_COLUMNS}, passages FROM run_sources "
+                    f"(run_id, {_SOURCE_COLUMNS}, passages, reused_from) "
+                    f"SELECT ?, {_SOURCE_COLUMNS}, passages, reused_from "
+                    f"FROM run_sources "
                     f"WHERE run_id=? AND path IN ({marks})",
                     (to_run_id, from_run_id, *group),
                 )
@@ -369,8 +387,10 @@ class SQLiteManifest:
     def _optional(row: sqlite3.Row, name: str) -> object:
         return row[name] if name in row.keys() else None
 
-    @staticmethod
-    def _record(row: sqlite3.Row, passages: int | None = None) -> ManifestSourceRecord:
+    @classmethod
+    def _record(
+        cls, row: sqlite3.Row, passages: int | None = None
+    ) -> ManifestSourceRecord:
         source = Source(
             source_id=cast(str, row["source_id"]),
             path=cast(str, row["path"]),
@@ -390,6 +410,8 @@ class SQLiteManifest:
             cast(str | None, row["error"]),
             cast(str | None, row["embedding_model"]),
             passages,
+            # Journal rows only; absent from a journal older than the column.
+            cast(str | None, cls._optional(row, "reused_from")),
         )
 
     def get_source(self, path: str) -> ManifestSourceRecord | None:
