@@ -2,6 +2,100 @@
 
 docgrep searches a local document corpus and returns ranked, verbatim passages with source locations. The current slice indexes TXT, Markdown, EPUB, DOCX, and text-bearing PDF and DjVu files. Image-only PDFs and DjVu files, and EPUB and DOCX files without text, are recorded as needing OCR; other file types are skipped.
 
+## Quick start
+
+docgrep indexes your documents once, then finds the exact passages you need, with the file and page they come from. It runs entirely on your machine: no cloud, no telemetry, no generated answers.
+
+**You need:** Python 3.12, [uv](https://docs.astral.sh/uv/) and git. A GPU is optional; it makes indexing much faster.
+
+### 1. Install
+
+```sh
+git clone https://github.com/metronforge/docgrep.git
+cd docgrep
+uv sync --extra cpu       # no NVIDIA GPU
+# uv sync --extra cu130   # NVIDIA GPU (driver R580 or newer) instead of the line above
+```
+
+Run every command below from this folder.
+
+### 2. Save your settings (once)
+
+```sh
+mkdir -p ~/.config/docgrep
+cat > ~/.config/docgrep/env <<'EOF'
+export UV_NO_SYNC=1
+export DOCGREP_DATA_DIR="$HOME/docgrep-data"
+export DOCGREP_DEVICE=auto
+EOF
+source ~/.config/docgrep/env   # repeat in every new terminal
+```
+
+### 3. Index your documents and search
+
+```sh
+uv run docgrep roots add library "$HOME/Documents"   # a folder with your documents
+uv run docgrep index                                 # first build; shows a progress line
+uv run docgrep status                                # should report Index: ready
+uv run docgrep search "a sentence you remember"
+```
+
+The first run downloads the models (several gigabytes) and a large library can take hours on a CPU. Add `--json` to `search` for scores and metadata, and `--top-n 5` for fewer results.
+
+To check the commands first without downloading models, use the built-in test backend in a throwaway data directory (the results are not meaningful):
+
+```sh
+export DOCGREP_BACKEND=fake DOCGREP_DATA_DIR=/tmp/docgrep-try
+uv run docgrep roots add try "$HOME/Documents" && uv run docgrep index && uv run docgrep search "anything"
+unset DOCGREP_BACKEND && source ~/.config/docgrep/env   # back to the real settings
+```
+
+### 4. Keep the index current
+
+```sh
+uv run docgrep update --plan   # what would change; writes nothing
+uv run docgrep update          # after adding, changing, moving or removing files
+```
+
+### 5. Use it from other tools
+
+```sh
+uv run docgrep serve                                              # HTTP API and MCP on 127.0.0.1:8000
+curl -s -X POST http://127.0.0.1:8000/search -H 'Content-Type: application/json' \
+  -d '{"query": "phrase to find", "top_n": 5}'
+```
+
+To connect Claude Code to the running server:
+
+```shell
+claude mcp add --transport http docgrep http://127.0.0.1:8000/mcp
+```
+
+The first request after the server starts loads the models and is slower. See [HTTP API](#http-api) and [MCP server](#mcp-server).
+
+### 6. A large library
+
+The built-in local mode suits small collections (up to about 20,000 passages). For more, run a Qdrant server and point docgrep at it before indexing:
+
+```sh
+docker run -d --name docgrep-qdrant -p 127.0.0.1:6333:6333 \
+  -v docgrep-qdrant:/qdrant/storage qdrant/qdrant:v1.19.1
+echo 'export DOCGREP_QDRANT_URL=http://localhost:6333' >> ~/.config/docgrep/env
+source ~/.config/docgrep/env
+```
+
+See [Running with a Qdrant server](#running-with-a-qdrant-server).
+
+### Something not working?
+
+See [Troubleshooting](#troubleshooting). The most common causes: the settings were not loaded in this terminal (`source ~/.config/docgrep/env`), or `docgrep serve` is running while you use the command line in local mode.
+
+### Where to read more
+
+[Supported formats](#supported-formats) · [Corpus roots](#corpus-roots) (several folders) · [Updating the index](#updating-the-index) · [Seeing the plan first](#seeing-the-plan-first) · [Filtered search](#filtered-search) · [OCR](#ocr) for scans · [Browse sources](#browse-sources) · [Passage context](#passage-context) · [Retrieval evaluation](#retrieval-evaluation)
+
+The sections below are the full reference.
+
 ## Supported formats
 
 | Format | Extensions | Location in results | Metadata | Notes |
