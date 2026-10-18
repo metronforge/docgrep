@@ -19,12 +19,14 @@ def average_length(
     *,
     page_size: int = DEFAULT_PAGE_SIZE,
     between_pages: Callable[[], None] | None = None,
+    after_page: Callable[[int], None] | None = None,
 ) -> tuple[float, int]:
     """The average passage length in sparse tokens, over one scan of the
     store's target collection, and the number of passages scanned.
 
     A collection without passages, or whose passages have no token at all,
     has the average length 1.0, so that a weighting can still be recorded.
+    ``after_page`` gets the passages scanned so far, after each page.
     """
     offset: str | None = None
     tokens = 0
@@ -34,6 +36,8 @@ def average_length(
         for _, text in page:
             tokens += encoders.document_length(text)
         passages += len(page)
+        if after_page is not None:
+            after_page(passages)
         if offset is None:
             break
         if between_pages is not None:
