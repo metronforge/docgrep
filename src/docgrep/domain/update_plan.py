@@ -3,6 +3,7 @@
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 from docgrep.domain.models import Source
 
@@ -72,14 +73,20 @@ class RemovalGuard:
         return min(math.floor(round(self.ratio * recorded, 9)), self.count)
 
 
+# Why a root is guarded: its removals exceed the threshold, or they would
+# remove every source it records, whatever its size and the thresholds.
+GuardReason = Literal["threshold", "empties_root"]
+
+
 @dataclass(frozen=True, slots=True)
 class GuardedRoot:
-    """A root whose planned removals exceed the guard's threshold."""
+    """A root whose planned removals the guard refuses, and why."""
 
     root: str
     removals: int
     recorded: int
     threshold: int
+    reason: GuardReason = "threshold"
 
 
 def guarded_roots(
@@ -87,7 +94,12 @@ def guarded_roots(
     recorded: Mapping[str, int],
     guard: RemovalGuard,
 ) -> tuple[GuardedRoot, ...]:
-    """The roots, by name, whose planned removals exceed the threshold.
+    """The roots, by name, whose planned removals the guard refuses.
+
+    A root is refused when its removals would remove every source it
+    records (``empties_root``: an existing but empty folder, such as a mount
+    point without its disk, passes the check that a root can be read), or
+    else when they exceed the threshold (``threshold``).
 
     ``removals`` counts the planned removals of each root of the run (moved
     sources and sources no longer matched by the patterns included) and
@@ -99,6 +111,8 @@ def guarded_roots(
         count = removals[root]
         total = recorded.get(root, 0)
         limit = guard.threshold(total)
-        if count > limit:
+        if count > 0 and count == total:
+            found.append(GuardedRoot(root, count, total, limit, "empties_root"))
+        elif count > limit:
             found.append(GuardedRoot(root, count, total, limit))
     return tuple(found)

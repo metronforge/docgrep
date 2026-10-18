@@ -79,7 +79,7 @@ def test_only_roots_above_the_threshold_are_guarded() -> None:
     guard = RemovalGuard(ratio=0.05, count=50)
 
     found = guarded_roots(
-        {"books": 6, "notes": 5, "small": 19, "empty": 0},
+        {"books": 6, "notes": 5, "small": 18, "empty": 0},
         {"books": 100, "notes": 100, "small": 19},
         guard,
     )
@@ -87,13 +87,37 @@ def test_only_roots_above_the_threshold_are_guarded() -> None:
     assert found == (GuardedRoot("books", 6, 100, 5),)
 
 
-def test_a_small_root_emptied_beyond_the_count_is_guarded() -> None:
+def test_a_small_root_beyond_the_count_is_guarded() -> None:
     guard = RemovalGuard(ratio=0.05, count=3)
 
-    assert guarded_roots({"small": 4}, {"small": 4}, guard) == (
-        GuardedRoot("small", 4, 4, 3),
+    assert guarded_roots({"small": 4}, {"small": 5}, guard) == (
+        GuardedRoot("small", 4, 5, 3, "threshold"),
     )
-    assert guarded_roots({"small": 3}, {"small": 4}, guard) == ()
+    assert guarded_roots({"small": 3}, {"small": 5}, guard) == ()
+
+
+@pytest.mark.parametrize("recorded", [1, 2, 19, 20, 5000])
+def test_a_root_that_would_be_emptied_is_always_guarded(recorded: int) -> None:
+    # Even when the thresholds would allow every removal.
+    guard = RemovalGuard(ratio=1, count=10_000)
+
+    assert guarded_roots({"r": recorded}, {"r": recorded}, guard) == (
+        GuardedRoot("r", recorded, recorded, guard.threshold(recorded), "empties_root"),
+    )
+    assert guarded_roots({"r": recorded - 1}, {"r": recorded}, guard) == ()
+
+
+def test_emptying_a_root_is_the_reason_even_above_the_threshold() -> None:
+    found = guarded_roots({"a": 40, "b": 3}, {"a": 40, "b": 40}, RemovalGuard())
+
+    assert [(g.root, g.reason) for g in found] == [
+        ("a", "empties_root"),
+        ("b", "threshold"),
+    ]
+
+
+def test_a_root_without_removals_or_sources_is_not_guarded() -> None:
+    assert guarded_roots({"new": 0}, {}, RemovalGuard(ratio=0, count=0)) == ()
 
 
 def test_the_count_caps_the_ratio_for_a_large_root() -> None:

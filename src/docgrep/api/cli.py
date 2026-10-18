@@ -1360,6 +1360,7 @@ def _preview_json(preview: UpdatePreview, *, paths: bool) -> dict[str, Any]:
                 "removals": g.removals,
                 "recorded": g.recorded,
                 "threshold": g.threshold,
+                "reason": g.reason,
             }
             for g in preview.guarded
         ],
@@ -1411,9 +1412,14 @@ def _format_preview(preview: UpdatePreview, *, paths: bool) -> str:
         for name, count in preview.plan.outside_run
     )
     lines.extend(
-        f"Removal guard: root {g.root} would lose {g.removals} of {g.recorded} "
-        f"sources (at most {g.threshold} allowed); `docgrep update` would stop "
-        "without changing anything unless run with --yes.\n"
+        f"Removal guard: root {g.root} would lose "
+        + (
+            f"all its {g.recorded} sources"
+            if g.reason == "empties_root"
+            else f"{g.removals} of {g.recorded} sources (at most {g.threshold} allowed)"
+        )
+        + "; `docgrep update` would stop without changing anything unless run "
+        "with --yes.\n"
         for g in preview.guarded
     )
     return "".join(lines)
