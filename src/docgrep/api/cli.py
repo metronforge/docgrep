@@ -126,6 +126,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep sources that failed before instead of trying them again",
     )
+    update.add_argument(
+        "--yes",
+        action="store_true",
+        help="Apply the update even when the removal guard would stop it",
+    )
     _add_root_options(update, save=True)
     search = commands.add_parser(
         "search",
@@ -1939,7 +1944,9 @@ def main(
                 operation="update",
             ):
                 outcome = update.run(
-                    retry_failed=not args.no_retry_failed, on_plan=_plan_printer
+                    retry_failed=not args.no_retry_failed,
+                    on_plan=_plan_printer,
+                    override_guard=args.yes,
                 )
             _emit(_format_update(outcome))
             if outcome.cancelled:

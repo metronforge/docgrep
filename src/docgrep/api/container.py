@@ -113,6 +113,7 @@ class UpdateOperation(Protocol):
         *,
         retry_failed: bool = True,
         on_plan: Callable[[UpdatePlan], None] | None = None,
+        override_guard: bool = False,
     ) -> UpdateSummary: ...
 
     def request_cancel(self) -> None: ...
@@ -796,6 +797,7 @@ def create_container(
             roots=catalog,
             availability=corpus,
             sparse_encoders=encoders,
+            guard=settings.removal_guard,
         ),
         # The search store is shared, so a local store is never opened twice.
         browse=BrowseSources(

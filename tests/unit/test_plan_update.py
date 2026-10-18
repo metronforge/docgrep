@@ -1,7 +1,7 @@
-"""Planning an update without writing and stat-only refreshes, through
-domain ports and in-memory fakes."""
+"""Planning an update without writing, the removal guard and stat-only
+refreshes, through domain ports and in-memory fakes (ADR-0027)."""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -11,6 +11,7 @@ import pytest
 
 from docgrep.adapters.chunking import TokenChunker, WhitespaceTokenizer
 from docgrep.adapters.models.deterministic import DeterministicEmbedder
+from docgrep.domain.errors import RemovalGuardTripped
 from docgrep.domain.models import (
     FileType,
     ParsedDocument,
@@ -18,6 +19,7 @@ from docgrep.domain.models import (
     ScannedFile,
     Source,
 )
+from docgrep.domain.update_plan import RemovalGuard
 from docgrep.usecases.build_index import BuildIndex
 from docgrep.usecases.plan_update import PlanUpdate, UpdatePlan
 from docgrep.usecases.update_index import UpdateIndex
@@ -249,7 +251,7 @@ def _change_every_kind(harness: Harness) -> None:
     files = harness.corpus.files
     files["doc00.txt"] = ("changed words of document zero", 2.0)  # modified
     files["doc01.txt"] = (files["doc01.txt"][0], 3.0)  # touched only
-    files["moved/doc02.txt"] = files.pop("doc02.txt")  # removed and added
+    files["moved/doc02.txt"] = files.pop("doc02.txt")  # moved
     del files["doc03.txt"]  # removed
     files["new.md"] = ("a new note", 2.0)  # added
 
@@ -314,3 +316,67 @@ def test_a_stat_only_change_is_refreshed_without_parsing_or_embedding(
     assert writes[:3] == ["start_run", "set_total_sources", "refresh_live_source"]
     assert writes[3] == "record_source"
     assert "upsert_live_batch" not in writes
+
+
+def _guarded_harness(count: int, remove: int) -> Harness:
+    harness = Harness(_files(count))
+    harness.build()
+    for index in range(remove):
+        del harness.corpus.files[f"doc{index:02d}.txt"]
+    harness.corpus.files["doc_touched.txt"] = ("touched later", 1.0)
+    return harness
+
+
+def test_the_guard_refuses_an_emptied_root_and_writes_nothing() -> None:
+    harness = _guarded_harness(40, 40)
+    before = harness.state()
+    seen: list[UpdatePlan] = []
+
+    with pytest.raises(RemovalGuardTripped) as refused:
+        harness.update().run(on_plan=seen.append)
+
+    assert refused.value.category == "removal_guard"
+    assert "--yes" in str(refused.value)
+    assert refused.value.details["roots"] == [
+        {"root": "_legacy", "removals": 40, "recorded": 40, "threshold": 2}
+    ]
+    assert seen and seen[0].removed == 40
+    assert harness.state() == before and harness.writes() == []
+    guarded = harness.planner().detect(True).guarded(RemovalGuard())
+    assert [g.root for g in guarded] == ["_legacy"]
+
+    summary = harness.update().run(override_guard=True)
+
+    assert summary.removed == 40 and summary.added == 1
+    assert len(harness.manifest.committed_sources()) == 1
+
+
+def test_a_refused_update_does_not_refresh_either() -> None:
+    harness = _guarded_harness(40, 3)
+    harness.corpus.files["doc10.txt"] = (harness.corpus.files["doc10.txt"][0], 5.0)
+    before = harness.state()
+
+    with pytest.raises(RemovalGuardTripped):
+        harness.update().run()
+
+    assert harness.state() == before
+
+
+def test_removals_up_to_the_threshold_proceed() -> None:
+    harness = _guarded_harness(40, 2)
+
+    assert harness.planner().detect(True).guarded(RemovalGuard()) == ()
+    assert harness.update().run().removed == 2
+
+
+@pytest.mark.parametrize(("count", "refused"), [(3, False), (2, True)])
+def test_a_small_root_is_guarded_by_the_count(count: int, refused: bool) -> None:
+    harness = _guarded_harness(4, 3)
+    update = harness.update(guard=RemovalGuard(ratio=0.05, count=count))
+    run: Callable[[], Any] = update.run
+
+    if refused:
+        with pytest.raises(RemovalGuardTripped):
+            run()
+    else:
+        assert run().removed == 3
