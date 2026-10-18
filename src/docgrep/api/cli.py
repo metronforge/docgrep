@@ -995,6 +995,11 @@ def _format_status(report: dict[str, Any]) -> str:
                 f"{totals.get(key, 0)} {key}"
                 for key in ("added", "modified", "removed", "retried", "failed")
             )
+            + "".join(
+                f", {totals[key]} {key}"
+                for key in ("moved", "copied")
+                if totals.get(key)
+            )
             + f", {totals.get('unchanged', 0)} unchanged"
         )
     else:
@@ -1277,6 +1282,7 @@ def _format_changes(plan: UpdatePlan) -> str:
         f"{plan.removed} removed, {plan.retried} retried, "
         f"{plan.unchanged} unchanged"
         + (f", {plan.moved} moved" if plan.moved else "")
+        + (f", {plan.copied} copied" if plan.copied else "")
         + ".\n"
         f"Modified by reason: {plan.newly_supported} newly supported, "
         f"{plan.content_changed} content changed, "
@@ -1318,6 +1324,7 @@ def _plan_counts(plan: UpdatePlan) -> dict[str, Any]:
         "refreshed": plan.refreshed,
         "unchanged": plan.unchanged,
         "moved": plan.moved,
+        "copied": plan.copied,
         "modified_by_reason": {
             reason: getattr(plan, reason) for reason in MODIFIED_REASONS
         },
@@ -1332,6 +1339,7 @@ def _preview_paths(root: RootPreview) -> dict[str, Any]:
         "retried": list(root.retried),
         "refreshed": list(root.refreshed),
         "moved": [{"removed": m.removed, "added": m.added} for m in root.moved],
+        "copied": [{"original": c.original, "copy": c.copy} for c in root.copied],
     }
 
 
@@ -1372,7 +1380,9 @@ def _plan_line(label: str, plan: UpdatePlan) -> str:
         f"{label}: {plan.added} added, {plan.modified} modified, "
         f"{plan.removed} removed, {plan.retried} retried, "
         f"{plan.refreshed} refreshed, {plan.unchanged} unchanged, "
-        f"{plan.moved} moved.\n"
+        f"{plan.moved} moved"
+        + (f", {plan.copied} copied" if plan.copied else "")
+        + ".\n"
     )
     reasons = [
         f"{getattr(plan, reason)} {_REASON_LABELS[reason]}"
@@ -1400,6 +1410,7 @@ def _format_preview(preview: UpdatePreview, *, paths: bool) -> str:
             ("retried", root.retried),
             ("refreshed", root.refreshed),
             ("moved", [f"{m.removed} -> {m.added}" for m in root.moved]),
+            ("copied", [f"{c.original} -> {c.copy}" for c in root.copied]),
         )
         for group, items in groups:
             if items:
@@ -1513,7 +1524,9 @@ def _format_update(summary: UpdateSummary) -> str:
     counts = (
         f"{summary.added} added, {summary.modified} modified, "
         f"{summary.removed} removed, {summary.retried} retried, "
-        f"{summary.unchanged} unchanged, {summary.skipped} skipped, "
+        + (f"{summary.moved} moved, " if summary.moved else "")
+        + (f"{summary.copied} copied, " if summary.copied else "")
+        + f"{summary.unchanged} unchanged, {summary.skipped} skipped, "
         f"{summary.failed} failed; {summary.passages_written} passages written, "
         f"{summary.passages_removed} removed in {summary.elapsed_seconds:.2f}s"
     )
@@ -2266,8 +2279,13 @@ def main(
                     f"{summary.removed} removed.\n"
                 )
             _emit(
-                f"Build {summary.run_id}: {summary.indexed} indexed, "
-                f"{summary.skipped} skipped, {summary.failed} failed "
+                f"Build {summary.run_id}: {summary.indexed} indexed"
+                + (
+                    f" ({summary.copied} copied from a file with the same content)"
+                    if summary.copied
+                    else ""
+                )
+                + f", {summary.skipped} skipped, {summary.failed} failed "
                 f"in {summary.elapsed_seconds:.2f}s\n"
             )
             for failure in summary.failures:

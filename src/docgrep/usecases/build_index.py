@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import TypeVar
 
 from docgrep.domain.errors import (
@@ -37,11 +38,13 @@ from docgrep.domain.protocols import (
     IndexLock,
     Manifest,
     OcrDelegations,
+    OcrOutputOwners,
     PassageWriter,
     RootCatalog,
     SparseEncoder,
     SparseEncoders,
     SparseVectorStore,
+    StoredPassagePage,
     parser_version,
 )
 from docgrep.domain.roots import (
@@ -67,7 +70,8 @@ from docgrep.domain.sparse import (
     SparseWeighting,
     check_bm25_parameters,
 )
-from docgrep.usecases.plan_update import is_delegated
+from docgrep.domain.update_plan import reused_passage, reused_source
+from docgrep.usecases.plan_update import ReuseCheck, is_delegated
 from docgrep.usecases.sparse_vectors import average_length, encode_pages
 
 _LOG = logging.getLogger(__name__)
@@ -104,6 +108,9 @@ class BuildSummary:
     removed: int = 0
     # Set when the run only finished the commit of an interrupted swap.
     recovered: bool = False
+    # Sources indexed by copying the passages of a source of the same run
+    # with the same content (ADR-0028); counted in ``indexed`` too.
+    copied: int = 0
 
 
 # Share of the sources indexed so far that may change or vanish before a
@@ -120,6 +127,9 @@ class _Plan:
     failures: tuple[BuildFailure, ...] = ()
     retried: int = 0
     removed: int = 0
+    # Journal rows taken over from the run resumed; indexed ones can be
+    # reused for a file with the same content.
+    donors: tuple[ManifestSourceRecord, ...] = ()
 
 
 class Cancelled(Exception):
@@ -235,11 +245,14 @@ class SourceIndexing:
     sparse_encoder: SparseEncoder
     manifest: Manifest
     batch_size: int
+    upsert_batch_size: int
     sleep: Callable[[float], None]
     _cancel_event: threading.Event
     _cancel_persisted: bool
     # Originals indexed through their OCR'd sibling; None: no OCR registry.
     delegations: OcrDelegations | None = None
+    # The live OCR outputs, never reused (ADR-0028); None: none known.
+    ocr_outputs: OcrOutputOwners | None = None
     # The roots of the run (ADR-0023); None: one unnamed root, as before.
     roots: RootCatalog | None = None
     availability: CorpusAvailability | None = None
@@ -313,6 +326,42 @@ class SourceIndexing:
                     raise
                 self.sleep(float(2**attempt))
         raise AssertionError("retry loop exhausted")
+
+    def reuse_check(self) -> ReuseCheck:
+        """The reuse rule (ADR-0028) with this run's parsers and model."""
+        return ReuseCheck(
+            parsers=self.parsers,
+            embedding_model=self.embedder.model_name,
+            delegations=self.delegations,
+            ocr_outputs=self.ocr_outputs,
+        )
+
+    def _copy_passages(
+        self,
+        read_page: Callable[[str, str | None, int], StoredPassagePage],
+        write: Callable[[Sequence[PassageItem]], None],
+        original: Source,
+        target: Source,
+    ) -> tuple[str, ...]:
+        """Copy the stored passages of ``original`` under the identity of
+        ``target``, a page at a time, with their dense and sparse vectors
+        unchanged; returns the new passage ids. Nothing is parsed or
+        embedded."""
+        written: list[str] = []
+        offset: str | None = None
+        while True:
+            page, offset = self._retry(
+                partial(read_page, original.source_id, offset, self.upsert_batch_size)
+            )
+            items = tuple(
+                (reused_passage(passage, target.source_id), target, dense, sparse)
+                for passage, _, dense, sparse in page
+            )
+            if items:
+                self._retry(partial(write, items))
+                written.extend(item[0].passage_id for item in items)
+            if offset is None:
+                return tuple(written)
 
     def _record_failure(
         self, source: Source, reason: str, error: Exception, run_id: str
@@ -449,10 +498,15 @@ class BuildIndex(SourceIndexing):
         sparse_store: SparseVectorStore | None = None,
         bm25_k1: float = DEFAULT_K1,
         bm25_b: float = DEFAULT_B,
+        ocr_outputs: OcrOutputOwners | None = None,
+        reuse_by_hash: bool = False,
     ) -> None:
         """With ``sparse_encoders`` and ``sparse_store`` the index gets
         ``bm25-v2`` sparse vectors (ADR-0025); without them every passage
-        is written with ``sparse_encoder`` and no weighting is recorded."""
+        is written with ``sparse_encoder`` and no weighting is recorded.
+        With ``reuse_by_hash`` (``DOCGREP_REUSE_BY_HASH``, on by default
+        in the application) a file with the content of a source indexed
+        earlier in the same run is a copy of it (ADR-0028)."""
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if upsert_batch_size <= 0:
@@ -462,6 +516,10 @@ class BuildIndex(SourceIndexing):
         if progress_every_seconds <= 0:
             raise ValueError("progress_every_seconds must be positive")
         check_bm25_parameters(bm25_k1, bm25_b)
+        self.ocr_outputs = ocr_outputs
+        self.reuse_by_hash = reuse_by_hash
+        self._donors: dict[tuple[str, int], list[ManifestSourceRecord]] = {}
+        self._reusable: ReuseCheck | None = None
         self.sparse_encoders = sparse_encoders
         self.sparse_store = sparse_store
         self.bm25_k1 = bm25_k1
@@ -544,9 +602,85 @@ class BuildIndex(SourceIndexing):
             self.passage_writer.drop_collection(name)
             _LOG.info("orphaned_staging_collection_dropped", extra={"collection": name})
 
+    def _start_reuse(self, donors: Sequence[ManifestSourceRecord]) -> None:
+        """Forget the sources of an earlier run; those taken over stay."""
+        self._donors = {}
+        self._reusable = self.reuse_check() if self.reuse_by_hash else None
+        for record in donors:
+            self._remember(record)
+
+    def _remember(self, record: ManifestSourceRecord) -> None:
+        source = record.source
+        if self._reusable is None or record.status != "indexed":
+            return
+        if source.content_hash is not None and source.size is not None:
+            key = (source.content_hash, source.size)
+            self._donors.setdefault(key, []).append(record)
+
+    def _donor_of(self, source: Source) -> ManifestSourceRecord | None:
+        """The first source of this run that a file can be a copy of."""
+        reusable = self._reusable
+        if reusable is None or source.content_hash is None or source.size is None:
+            return None
+        candidates = self._donors.get((source.content_hash, source.size), ())
+        return next((record for record in candidates if reusable(record, source)), None)
+
+    def _copy_source(
+        self, original: ManifestSourceRecord, source: Source, run_id: str
+    ) -> int:
+        """Index a file as a copy of a source of this run; returns how many
+        passages were copied. A store error removes what was written of the
+        file and aborts the run, as a failed upsert does."""
+        target = reused_source(original.source, source)
+        try:
+            written = self._copy_passages(
+                self.passage_writer.staged_source_page,
+                self.passage_writer.upsert_batch,
+                original.source,
+                target,
+            )
+        except Exception as error:
+            try:
+                self.passage_writer.delete_source_points(target.source_id)
+            except Exception:
+                _LOG.warning(
+                    "build_partial_copy_kept", extra={"source_id": target.source_id}
+                )
+            raise StoreUnavailable(
+                "Passage copy failed",
+                details={"path": source.path, "reason": str(error)},
+            ) from error
+        if written:
+            self.manifest.record_source(
+                target,
+                "indexed",
+                embedding_model=self.embedder.model_name,
+                run_id=run_id,
+                passages=len(written),
+                reused_from=original.source.path,
+            )
+            _LOG.info(
+                "source_reused",
+                extra={
+                    "run_id": run_id,
+                    "source_id": target.source_id,
+                    "reused_from": original.source.source_id,
+                    "passages": len(written),
+                },
+            )
+        return len(written)
+
     def _index_source(
         self, source: Source, run_id: str
     ) -> tuple[str, BuildFailure | None, int]:
+        """Index one source; the outcome is ``copied`` for a source indexed
+        as a copy (ADR-0028). A source of the same run whose passages could
+        not be found is indexed normally instead."""
+        original = self._donor_of(source)
+        if original is not None:
+            copied = self._copy_source(original, source, run_id)
+            if copied:
+                return "copied", None, copied
         prepared = self._prepare(source, run_id)
         if prepared.status.startswith("skipped:"):
             self.manifest.record_source(
@@ -576,6 +710,11 @@ class BuildIndex(SourceIndexing):
             embedding_model=self.embedder.model_name,
             run_id=run_id,
             passages=len(items),
+        )
+        self._remember(
+            ManifestSourceRecord(
+                prepared.source, "indexed", embedding_model=self.embedder.model_name
+            )
         )
         return "indexed", None, len(items)
 
@@ -672,6 +811,12 @@ class BuildIndex(SourceIndexing):
             "first with `docgrep forget-root NAME`",
             details={"roots": dict(sorted(others.items()))},
         )
+
+    @staticmethod
+    def _with_copied(totals: Mapping[str, int], copied: int) -> dict[str, int]:
+        """The totals of a run, with the copies among the indexed sources
+        when there are any."""
+        return {**totals, "copied": copied} if copied else dict(totals)
 
     @staticmethod
     def _totals(records: Sequence[ManifestSourceRecord]) -> dict[str, int]:
@@ -780,6 +925,7 @@ class BuildIndex(SourceIndexing):
                     ),
                     retried=retried,
                     removed=removed,
+                    donors=tuple(carried),
                 )
 
             return self._execute(run_id, started, prepare, resumed_from=latest.run_id)
@@ -901,8 +1047,10 @@ class BuildIndex(SourceIndexing):
         plan = _Plan((), 0)
         swapped = False
         cancelled = False
+        copied = 0
         try:
             plan = prepare(run_id)
+            self._start_reuse(plan.donors)
             totals.update(plan.totals or {})
             failures.extend(plan.failures)
             progress = Progress(
@@ -917,6 +1065,9 @@ class BuildIndex(SourceIndexing):
             for source in plan.sources:
                 self._check_cancel(run_id)
                 outcome, failure, written = self._index_source(source, run_id)
+                if outcome == "copied":
+                    copied += 1
+                    outcome = "indexed"
                 totals[outcome] += 1
                 if failure is not None:
                     failures.append(failure)
@@ -944,9 +1095,13 @@ class BuildIndex(SourceIndexing):
             self.manifest.mark_swapped(run_id)
             swapped = True
             self.manifest.commit_run(run_id)
-            self.manifest.finish_run(run_id, "completed", totals)
+            self.manifest.finish_run(
+                run_id, "completed", self._with_copied(totals, copied)
+            )
         except Cancelled:
-            self.manifest.finish_run(run_id, "cancelled", totals)
+            self.manifest.finish_run(
+                run_id, "cancelled", self._with_copied(totals, copied)
+            )
             cancelled = True
         except Exception as error:
             # Before the swap the staging collection and the journal stay,
@@ -954,7 +1109,9 @@ class BuildIndex(SourceIndexing):
             # sources are untouched. After the swap the live index is
             # complete and valid, and the run stays swapped for recovery.
             if not swapped:
-                self.manifest.finish_run(run_id, "aborted", totals)
+                self.manifest.finish_run(
+                    run_id, "aborted", self._with_copied(totals, copied)
+                )
             if isinstance(error, DocgrepError):
                 raise
             raise BuildFailed(
@@ -963,14 +1120,13 @@ class BuildIndex(SourceIndexing):
         finally:
             self._cancel_event.clear()
             self._cancel_persisted = False
+            self._donors = {}
         elapsed = self.clock() - started
         _LOG.info(
             "index_build_cancelled" if cancelled else "index_build_finished",
             extra={
                 "run_id": run_id,
-                "indexed": totals["indexed"],
-                "skipped": totals["skipped"],
-                "failed": totals["failed"],
+                **self._with_copied(totals, copied),
                 "duration_ms": round(elapsed * 1000, 1),
             },
         )
@@ -987,4 +1143,5 @@ class BuildIndex(SourceIndexing):
             processed=len(plan.sources),
             retried=plan.retried,
             removed=plan.removed,
+            copied=copied,
         )

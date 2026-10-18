@@ -1,4 +1,5 @@
-"""Detect what an update would change, without writing anything (ADR-0027)."""
+"""Detect what an update would change, without writing anything (ADR-0027),
+and which files it can index by reusing stored passages (ADR-0028)."""
 
 from collections import Counter
 from collections.abc import Mapping
@@ -17,6 +18,7 @@ from docgrep.domain.protocols import (
     DocumentParser,
     ManifestReader,
     OcrDelegations,
+    OcrOutputOwners,
     RootCatalog,
     parser_reprocess_reason,
     parser_version,
@@ -24,14 +26,16 @@ from docgrep.domain.protocols import (
 from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.run_state import latest_root_prefixes
 from docgrep.domain.update_plan import (
+    Copy,
     GuardedRoot,
     Move,
     RemovalGuard,
+    can_reuse,
     guarded_roots,
     pair_moves,
 )
 
-ChangeKind = Literal["removed", "modified", "retried", "added"]
+ChangeKind = Literal["removed", "modified", "retried", "moved", "copied", "added"]
 # Why a recorded source is processed again (the retried ones aside).
 ModifiedReason = Literal[
     "content_changed",
@@ -40,7 +44,14 @@ ModifiedReason = Literal[
     "delegated_to_ocr",
     "delegation_ended",
 ]
-CHANGE_ORDER: tuple[ChangeKind, ...] = ("removed", "modified", "retried", "added")
+CHANGE_ORDER: tuple[ChangeKind, ...] = (
+    "removed",
+    "modified",
+    "retried",
+    "moved",
+    "copied",
+    "added",
+)
 MODIFIED_REASONS: tuple[ModifiedReason, ...] = (
     "content_changed",
     "parser_changed",
@@ -67,9 +78,11 @@ class UpdatePlan:
     whose passages are removed) and ``delegation_ended`` (a delegated
     original whose output was removed: it is indexed again).
 
-    ``moved`` counts removed sources paired with an added file of the same
-    content; they are counted in ``removed`` and ``added`` as well, and
-    processed as such.
+    ``moved`` counts removed sources whose passages are copied to an added
+    file with the same content before they are removed, and ``copied`` the
+    added files, and files whose content changed, indexed by copying the
+    passages of a source that stays (ADR-0028). Neither is counted in
+    ``added``, ``removed`` or ``modified``.
     """
 
     added: int = 0
@@ -87,22 +100,38 @@ class UpdatePlan:
     # (ADR-0023): they are neither checked nor removed.
     outside_run: tuple[tuple[str, int], ...] = ()
     moved: int = 0
+    copied: int = 0
 
     @property
     def changes(self) -> int:
-        return self.added + self.modified + self.removed + self.retried
+        return (
+            self.added
+            + self.modified
+            + self.removed
+            + self.retried
+            + self.moved
+            + self.copied
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class PlannedChange:
-    """One change of an update, in the root it belongs to."""
+    """One change of an update, in the root it belongs to.
+
+    A move belongs to the root of its removed source.
+    """
 
     kind: ChangeKind
-    # The current file for added, modified and retried; the record for removed.
+    # The current file for added, modified, retried, moved and copied; the
+    # record for removed.
     source: Source
+    # The record of the file's path, None when it is not recorded.
     record: ManifestSourceRecord | None
     root: str
     reason: ModifiedReason | None = None
+    # Moved and copied: the source whose stored passages are copied; a moved
+    # one is removed afterwards.
+    reuse: ManifestSourceRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,16 +162,24 @@ class DetectedChanges:
     # them stay as they are.
     recorded: Mapping[str, int]
     unchanged: Mapping[str, int]
-    moves: tuple[Move, ...] = ()
     outside_run: tuple[tuple[str, int], ...] = ()
     # The root of each recorded source of the run, by stored path.
     source_roots: Mapping[str, str] = field(default_factory=dict)
 
+    @property
+    def moves(self) -> tuple[Move, ...]:
+        """The moves the update applies, in order."""
+        return tuple(
+            Move(change.reuse.source.path, change.source.path)
+            for change in self.changes
+            if change.kind == "moved" and change.reuse is not None
+        )
+
     def removals(self) -> dict[str, int]:
-        """The planned removals of each root of the run."""
+        """The planned removals of each root of the run, moves included."""
         counts = dict.fromkeys(self.roots, 0)
         for change in self.changes:
-            if change.kind == "removed":
+            if change.kind in ("removed", "moved"):
                 counts[change.root] = counts.get(change.root, 0) + 1
         return counts
 
@@ -154,7 +191,6 @@ class DetectedChanges:
         changes = [c for c in self.changes if root is None or c.root == root]
         kinds = Counter(change.kind for change in changes)
         reasons = Counter(change.reason for change in changes if change.reason)
-        moves = [m for m in self.moves if root is None or self.root_of(m) == root]
         unchanged = (
             sum(self.unchanged.values())
             if root is None
@@ -169,12 +205,9 @@ class DetectedChanges:
             refreshed=sum(1 for r in self.refreshes if root in (None, r.root)),
             **{reason: reasons[reason] for reason in MODIFIED_REASONS},
             outside_run=self.outside_run if root is None else (),
-            moved=len(moves),
+            moved=kinds["moved"],
+            copied=kinds["copied"],
         )
-
-    def root_of(self, move: Move) -> str:
-        """A move belongs to the root of its removed source."""
-        return self.source_roots[move.removed]
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +215,7 @@ class RootPreview:
     """The plan of one root of the run, with the stored paths of each group.
 
     ``unchanged`` sources are counted only; a move is listed under the root
-    of its removed source.
+    of its removed source, a copy under the root of the copy.
     """
 
     name: str
@@ -195,6 +228,7 @@ class RootPreview:
     retried: tuple[str, ...]
     refreshed: tuple[str, ...]
     moved: tuple[Move, ...]
+    copied: tuple[Copy, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +252,13 @@ class UpdatePreview:
                 if c.kind == kind and c.root == root
             )
 
+        def reused(kind: ChangeKind, root: str) -> tuple[tuple[str, str], ...]:
+            return tuple(
+                (c.reuse.source.path, c.source.path)
+                for c in detected.changes
+                if c.kind == kind and c.root == root and c.reuse is not None
+            )
+
         roots = tuple(
             RootPreview(
                 name=name,
@@ -235,7 +276,8 @@ class UpdatePreview:
                 refreshed=tuple(
                     r.record.source.path for r in detected.refreshes if r.root == name
                 ),
-                moved=tuple(m for m in detected.moves if detected.root_of(m) == name),
+                moved=tuple(Move(*pair) for pair in reused("moved", name)),
+                copied=tuple(Copy(*pair) for pair in reused("copied", name)),
             )
             for name in detected.roots
         )
@@ -249,6 +291,53 @@ def is_delegated(delegations: OcrDelegations | None, source: Source) -> bool:
         return False
     found = delegations.live_delegation(source.path, source.content_hash)
     return found is not None
+
+
+class ReuseCheck:
+    """Whether the stored passages of a recorded source can be copied for a
+    file (ADR-0028): ``can_reuse`` with the registered parsers and the model
+    of the index, and neither of them is an original delegated to its OCR'd
+    sibling or a live OCR output (ADR-0017), which are processed normally.
+
+    The live OCR outputs are read once, when first needed.
+    """
+
+    def __init__(
+        self,
+        *,
+        parsers: Mapping[FileType, DocumentParser],
+        embedding_model: str,
+        delegations: OcrDelegations | None = None,
+        ocr_outputs: OcrOutputOwners | None = None,
+    ) -> None:
+        self.parsers = parsers
+        self.embedding_model = embedding_model
+        self.delegations = delegations
+        self.ocr_outputs = ocr_outputs
+        self._outputs: frozenset[str] | None = None
+
+    def __call__(self, record: ManifestSourceRecord, file: Source) -> bool:
+        return (
+            can_reuse(
+                record,
+                file,
+                parser_version=parser_version(self.parsers.get(file.file_type)),
+                embedding_model=self.embedding_model,
+            )
+            and not self._involved_in_ocr(record.source.path)
+            and not self._involved_in_ocr(file.path)
+        )
+
+    def _involved_in_ocr(self, path: str) -> bool:
+        if self._outputs is None:
+            live = {} if self.ocr_outputs is None else self.ocr_outputs.live_outputs()
+            self._outputs = frozenset(live)
+        if path in self._outputs:
+            return True
+        return (
+            self.delegations is not None
+            and self.delegations.live_delegation(path) is not None
+        )
 
 
 class PlanUpdate:
@@ -269,7 +358,19 @@ class PlanUpdate:
         roots: RootCatalog | None = None,
         availability: CorpusAvailability | None = None,
         guard: RemovalGuard | None = None,
+        ocr_outputs: OcrOutputOwners | None = None,
+        reuse_by_hash: bool = False,
+        embedding_model: str | None = None,
     ) -> None:
+        """With ``reuse_by_hash`` (``DOCGREP_REUSE_BY_HASH``, on by default
+        in the application) an added file, or a file whose content changed,
+        is planned as a move or a copy when an indexed source has its
+        content (ADR-0028). ``embedding_model`` is the model of the
+        index; None: the model of the latest build. ``ocr_outputs`` tells
+        OCR outputs apart, which are never reused."""
+        self.ocr_outputs = ocr_outputs
+        self.reuse_by_hash = reuse_by_hash
+        self.embedding_model = embedding_model
         self.corpus = corpus
         self.manifest = manifest
         self.parsers = parsers
@@ -306,7 +407,8 @@ class PlanUpdate:
         recorded: dict[str, ManifestSourceRecord] = {}
         root_of: dict[str, str] = {}
         outside: dict[str, int] = {}
-        for entry in self.manifest.committed_sources():
+        committed = self.manifest.committed_sources()
+        for entry in committed:
             # Only the roots of the run are compared with the disk; the
             # sources of any other root stay as they are.
             name = default if roots is None else roots.root_of(entry.source.path)
@@ -368,6 +470,8 @@ class PlanUpdate:
                 unchanged[name] += 1
         for path in sorted(set(recorded) - seen):
             change("removed", recorded[path].source, recorded[path], root_of[path])
+        if self.reuse_by_hash:
+            self._plan_reuse(found, committed)
         changes = tuple(
             planned
             for kind in CHANGE_ORDER
@@ -379,13 +483,92 @@ class PlanUpdate:
             roots=run_roots,
             recorded=Counter(root_of.values()),
             unchanged=unchanged,
-            moves=pair_moves(
-                (c.source for c in found["removed"]),
-                (c.source for c in found["added"]),
-            ),
             outside_run=tuple(sorted(outside.items())),
             source_roots=root_of,
         )
+
+    def _index_model(self) -> str | None:
+        if self.embedding_model is not None:
+            return self.embedding_model
+        build = self.manifest.latest_run_of_kind("build")
+        model = None if build is None else dict(build.config).get("embedding_model")
+        return model if isinstance(model, str) else None
+
+    def _plan_reuse(
+        self,
+        found: dict[ChangeKind, list[PlannedChange]],
+        committed: tuple[ManifestSourceRecord, ...],
+    ) -> None:
+        """Turn the additions and content changes that can reuse stored
+        passages into moves and copies, in place (ADR-0028).
+
+        A removed source paired with an added file (``pair_moves``) is a
+        move when it can be reused. Any other addition or content change is
+        a copy of the first source by stored path that can be reused and
+        that the update leaves as it is, whatever its root: the passages of
+        a source that is changed or removed in the same run are rewritten
+        or deleted before a copy would be made.
+        """
+        model = self._index_model()
+        if model is None:
+            return
+        reusable = ReuseCheck(
+            parsers=self.parsers,
+            embedding_model=model,
+            delegations=self.delegations,
+            ocr_outputs=self.ocr_outputs,
+        )
+
+        removed = {c.source.path: c for c in found["removed"]}
+        added = {c.source.path: c for c in found["added"]}
+        for move in pair_moves(
+            (c.source for c in removed.values()), (c.source for c in added.values())
+        ):
+            old, new = removed[move.removed], added[move.added]
+            if old.record is not None and reusable(old.record, new.source):
+                found["moved"].append(
+                    PlannedChange("moved", new.source, None, old.root, reuse=old.record)
+                )
+                del removed[move.removed], added[move.added]
+
+        changed = {c.source.path for kind in CHANGE_ORDER for c in found[kind]}
+        donors: dict[tuple[str, int], list[ManifestSourceRecord]] = {}
+        for record in committed:
+            kept = record.source
+            if kept.path in changed or kept.content_hash is None or kept.size is None:
+                continue
+            donors.setdefault((kept.content_hash, kept.size), []).append(record)
+
+        def donor(file: Source) -> ManifestSourceRecord | None:
+            if file.content_hash is None or file.size is None:
+                return None
+            candidates = donors.get((file.content_hash, file.size), ())
+            return next((r for r in candidates if reusable(r, file)), None)
+
+        copies = [
+            c
+            for c in (*added.values(), *found["modified"])
+            if c.kind == "added" or c.reason == "content_changed"
+        ]
+        copied: set[str] = set()
+        for planned in copies:
+            original = donor(planned.source)
+            if original is not None:
+                found["copied"].append(
+                    PlannedChange(
+                        "copied",
+                        planned.source,
+                        planned.record,
+                        planned.root,
+                        reuse=original,
+                    )
+                )
+                copied.add(planned.source.path)
+        found["removed"] = list(removed.values())
+        found["added"] = [c for c in added.values() if c.source.path not in copied]
+        found["modified"] = [
+            c for c in found["modified"] if c.source.path not in copied
+        ]
 
     def _delegation_reason(
         self, record: ManifestSourceRecord, source: Source

@@ -261,27 +261,28 @@ def test_the_plan_reads_only(harness: Harness) -> None:
     _change_every_kind(harness)
     before = harness.state()
 
-    preview = harness.planner().run()
+    preview = harness.planner(reuse_by_hash=True).run()
 
-    # The touched file is refreshed and still counts as unchanged.
-    assert _counts(preview.plan) == (2, 1, 2, 0, 1, 1, 1)
+    # The touched file is refreshed and still counts as unchanged; the moved
+    # file is one move (ADR-0028), neither an addition nor a removal.
+    assert _counts(preview.plan) == (1, 1, 1, 0, 1, 1, 1)
     assert harness.state() == before
     assert harness.writes() == []
     assert harness.parser.parsed == [] and harness.embedder.embedded == 0
     assert harness.lock.taken == 0
     # Planning twice gives the same plan.
-    assert harness.planner().run() == preview
+    assert harness.planner(reuse_by_hash=True).run() == preview
 
 
 def test_the_plan_lists_the_paths_of_each_group(harness: Harness) -> None:
     _change_every_kind(harness)
 
-    (root,) = harness.planner().run().roots
+    (root,) = harness.planner(reuse_by_hash=True).run().roots
 
     assert root.name == "_legacy" and root.recorded == 4
-    assert root.added == ("moved/doc02.txt", "new.md")
+    assert root.added == ("new.md",)
     assert root.modified == (("doc00.txt", "content_changed"),)
-    assert root.removed == ("doc02.txt", "doc03.txt")
+    assert root.removed == ("doc03.txt",)
     assert root.refreshed == ("doc01.txt",)
     assert root.moved == (Move("doc02.txt", "moved/doc02.txt"),)
 
@@ -338,10 +339,10 @@ def test_identical_new_copies_pair_with_one_removal_only() -> None:
     files = harness.corpus.files
     files["copy2.txt"] = files["copy1.txt"] = files.pop("a.txt")
 
-    preview = harness.planner().run()
+    preview = harness.planner(reuse_by_hash=True).run()
 
     assert preview.roots[0].moved == (Move("a.txt", "copy1.txt"),)
-    assert (preview.plan.moved, preview.plan.removed, preview.plan.added) == (1, 1, 2)
+    assert (preview.plan.moved, preview.plan.removed, preview.plan.added) == (1, 0, 1)
 
 
 def _guarded_harness(count: int, remove: int) -> Harness:

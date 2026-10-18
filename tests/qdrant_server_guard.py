@@ -29,6 +29,7 @@ SUITE_ALIASES = frozenset(
         "rsint",
         "bm25shape",
         "reempty",
+        "reuse",
     }
 )
 

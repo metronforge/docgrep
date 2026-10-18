@@ -148,14 +148,17 @@ def test_the_plan_writes_nothing_and_predicts_the_update(
     (root,) = body["roots"]
     assert root["root"] == "books" and root["recorded"] == 8
     total = body["total"]
+    # The moved file reuses its passages (ADR-0028): one move, neither an
+    # addition nor a removal.
     assert {k: v for k, v in total.items() if k != "modified_by_reason"} == {
-        "added": 2,
+        "added": 1,
         "modified": 3,
-        "removed": 2,
+        "removed": 1,
         "retried": 1,
         "refreshed": 1,
         "unchanged": 2,
         "moved": 1,
+        "copied": 0,
     }
     assert total["modified_by_reason"]["content_changed"] == 1
     assert total["modified_by_reason"]["parser_changed"] == 2
@@ -169,7 +172,7 @@ def test_the_plan_writes_nothing_and_predicts_the_update(
 
     assert code == 0, err
     assert out.splitlines()[0] == (
-        "Update plan: 2 added, 3 modified, 2 removed, 1 retried, 2 unchanged, 1 moved."
+        "Update plan: 1 added, 3 modified, 1 removed, 1 retried, 2 unchanged, 1 moved."
     )
     run = SQLiteManifest(data, read_only=True).latest_run()
     assert run is not None
@@ -194,7 +197,7 @@ def test_the_plan_text_counts_first_and_paths_on_request(
     assert out.splitlines() == [
         "Update plan. Nothing was changed. The corpus or the index can change "
         "before `docgrep update` runs.",
-        "Root books: 2 added, 1 modified, 2 removed, 1 retried, 1 refreshed, "
+        "Root books: 1 added, 1 modified, 1 removed, 1 retried, 1 refreshed, "
         "4 unchanged, 1 moved.",
         "  Modified by reason: 1 content changed.",
         "Kept 2 sources of root notes, which is not part of this run.",
@@ -204,7 +207,7 @@ def test_the_plan_text_counts_first_and_paths_on_request(
 
     assert code == 0
     assert "  moved:\n    f.txt -> moved/f.txt\n" in out
-    assert "  removed:\n    d.txt\n    f.txt\n" in out
+    assert "  removed:\n    d.txt\n" in out
     assert "  modified:\n    c.txt (content changed)\n" in out
     assert "retried:" not in out and ", 0 retried, " in out
 
