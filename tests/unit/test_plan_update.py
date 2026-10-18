@@ -364,7 +364,13 @@ def test_the_guard_refuses_an_emptied_root_and_writes_nothing() -> None:
     assert refused.value.category == "removal_guard"
     assert "--yes" in str(refused.value)
     assert refused.value.details["roots"] == [
-        {"root": "_legacy", "removals": 40, "recorded": 40, "threshold": 2}
+        {
+            "root": "_legacy",
+            "removals": 40,
+            "recorded": 40,
+            "threshold": 2,
+            "reason": "empties_root",
+        }
     ]
     assert seen and seen[0].removed == 40
     assert harness.state() == before and harness.writes() == []
@@ -406,3 +412,28 @@ def test_a_small_root_is_guarded_by_the_count(count: int, refused: bool) -> None
             run()
     else:
         assert run().removed == 3
+
+
+def test_a_two_source_root_emptied_is_refused_and_yes_applies_it() -> None:
+    harness = Harness(_files(2))
+    harness.build()
+    harness.corpus.files.clear()
+    before = harness.state()
+
+    with pytest.raises(RemovalGuardTripped) as refused:
+        harness.update().run()
+
+    assert refused.value.details["roots"][0]["reason"] == "empties_root"
+    assert "would lose all its 2 sources" in str(refused.value)
+    assert harness.state() == before and harness.writes() == []
+    assert harness.update().run(override_guard=True).removed == 2
+    assert harness.manifest.committed_sources() == ()
+
+
+def test_removing_one_of_two_sources_is_allowed() -> None:
+    harness = Harness(_files(2))
+    harness.build()
+    del harness.corpus.files["doc00.txt"]
+
+    assert harness.planner().run().guarded == ()
+    assert harness.update().run().removed == 1

@@ -267,12 +267,10 @@ def test_the_plan_without_an_index(
 
 
 def test_the_guard_stops_an_update_that_empties_a_root(
-    indexed: tuple[Path, Path, Path],
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
+    indexed: tuple[Path, Path, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # Default thresholds: a root of 2 sources is far below them.
     books, notes, data = indexed
-    monkeypatch.setenv("DOCGREP_UPDATE_GUARD_COUNT", "1")
     for path in notes.iterdir():
         path.unlink()  # an emptied (or unmounted) folder
     os.utime(books / "e.txt", (NEW, NEW))  # a pending refresh
@@ -283,40 +281,72 @@ def test_the_guard_stops_an_update_that_empties_a_root(
     assert code == 1
     assert out.startswith("Update plan: 0 added, 0 modified, 2 removed, 1 retried")
     assert err.startswith("removal_guard: Update stopped before any change: ")
-    assert "root 'notes' would lose 2 of 2 sources (at most 1 allowed)" in err
+    assert "root 'notes' would lose all its 2 sources." in err
     assert "docgrep update --yes" in err
     assert _snapshot(data) == before
 
     code, out, _ = _cli(capsys, "update", "--plan")
     assert code == 0
     assert out.splitlines()[-1] == (
-        "Removal guard: root notes would lose 2 of 2 sources (at most 1 allowed); "
-        "`docgrep update` would stop without changing anything unless run with "
-        "--yes."
+        "Removal guard: root notes would lose all its 2 sources; `docgrep update` "
+        "would stop without changing anything unless run with --yes."
     )
+    code, out, _ = _cli(capsys, "update", "--plan", "--json")
+    assert json.loads(out)["guarded_roots"] == [
+        {
+            "root": "notes",
+            "removals": 2,
+            "recorded": 2,
+            "threshold": 50,
+            "reason": "empties_root",
+        }
+    ]
+    assert _snapshot(data) == before
 
     code, out, err = _cli(capsys, "update", "--yes")
 
     assert code == 0, err
     manifest = SQLiteManifest(data, read_only=True)
     assert manifest.get_source("notes/x.txt") is None
+    assert manifest.get_source("notes/y.txt") is None
     record = manifest.get_source("e.txt")
     assert record is not None and record.source.mtime == NEW
 
 
-def test_removals_below_the_guard_are_applied(
+def test_the_guard_stops_removals_above_the_threshold(
     indexed: tuple[Path, Path, Path],
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, notes, data = indexed
+    books, _, data = indexed
     monkeypatch.setenv("DOCGREP_UPDATE_GUARD_COUNT", "1")
+    (books / "c.txt").unlink()
+    (books / "d.txt").unlink()
+    before = _snapshot(data)
+
+    code, _, err = _cli(capsys, "update")
+
+    assert code == 1
+    assert "root 'books' would lose 2 of 8 sources (at most 1 allowed)" in err
+    assert _snapshot(data) == before
+    code, out, _ = _cli(capsys, "update", "--plan", "--json")
+    assert [(g["root"], g["reason"]) for g in json.loads(out)["guarded_roots"]] == [
+        ("books", "threshold")
+    ]
+
+
+def test_removing_one_of_two_sources_is_applied(
+    indexed: tuple[Path, Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, notes, data = indexed
     (notes / "x.txt").unlink()
 
     code, _, err = _cli(capsys, "update")
 
     assert code == 0, err
-    assert SQLiteManifest(data, read_only=True).get_source("notes/x.txt") is None
+    manifest = SQLiteManifest(data, read_only=True)
+    assert manifest.get_source("notes/x.txt") is None
+    assert manifest.get_source("notes/y.txt") is not None
 
 
 def test_forget_root_is_not_guarded(

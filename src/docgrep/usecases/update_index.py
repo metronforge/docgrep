@@ -630,7 +630,9 @@ class UpdateIndex(SourceIndexing):
 
 def _guard_message(guarded: Sequence[GuardedRoot]) -> str:
     roots = "; ".join(
-        f"root {g.root!r} would lose {g.removals} of {g.recorded} sources "
+        f"root {g.root!r} would lose all its {g.recorded} sources"
+        if g.reason == "empties_root"
+        else f"root {g.root!r} would lose {g.removals} of {g.recorded} sources "
         f"(at most {g.threshold} allowed)"
         for g in guarded
     )
@@ -649,6 +651,7 @@ def _guard_details(guarded: Sequence[GuardedRoot]) -> dict[str, object]:
                 "removals": g.removals,
                 "recorded": g.recorded,
                 "threshold": g.threshold,
+                "reason": g.reason,
             }
             for g in guarded
         ]
