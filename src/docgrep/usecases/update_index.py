@@ -375,6 +375,7 @@ class UpdateIndex(SourceIndexing):
             manifest=self.manifest,
             parsers=self.parsers,
             delegations=self.delegations,
+            guard=self.guard,
         ).detect(retry_failed, roots)
 
     def _check_guard(self, detected: DetectedChanges) -> None:
@@ -428,6 +429,7 @@ class UpdateIndex(SourceIndexing):
                     "unchanged": plan.unchanged,
                     "retried": plan.retried,
                     "refreshed": plan.refreshed,
+                    "moved": plan.moved,
                     "content_changed": plan.content_changed,
                     "parser_changed": plan.parser_changed,
                     "newly_supported": plan.newly_supported,

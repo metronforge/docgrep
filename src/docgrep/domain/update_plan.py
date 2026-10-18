@@ -1,8 +1,10 @@
-"""The removal guard of an update (ADR-0027): a pure rule."""
+"""Pure rules of an update plan: move pairs and the removal guard (ADR-0027)."""
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+
+from docgrep.domain.models import Source
 
 # Defaults of DOCGREP_UPDATE_GUARD_RATIO and DOCGREP_UPDATE_GUARD_COUNT.
 DEFAULT_GUARD_RATIO = 0.05
@@ -10,6 +12,41 @@ DEFAULT_GUARD_COUNT = 50
 # Below this many recorded sources a root is guarded by the count alone: a
 # ratio of a handful of sources would refuse almost every removal.
 GUARD_SMALL_ROOT = 20
+
+
+@dataclass(frozen=True, slots=True)
+class Move:
+    """A removed source and an added file with the same content and size.
+
+    Information only: both are still processed as a removal and an addition.
+    """
+
+    removed: str
+    added: str
+
+
+def pair_moves(removed: Iterable[Source], added: Iterable[Source]) -> tuple[Move, ...]:
+    """Pair each removed source with at most one added file of the same
+    content hash and size.
+
+    The removed sources are taken in stored path order, and each gets the
+    first unpaired added file in stored path order, so the pairs are one to
+    one and deterministic. A source without a content hash or size never
+    pairs.
+    """
+    candidates: dict[tuple[str, int], list[str]] = {}
+    for source in sorted(added, key=lambda source: source.path):
+        if source.content_hash is not None and source.size is not None:
+            key = (source.content_hash, source.size)
+            candidates.setdefault(key, []).append(source.path)
+    moves = []
+    for source in sorted(removed, key=lambda source: source.path):
+        if source.content_hash is None or source.size is None:
+            continue
+        waiting = candidates.get((source.content_hash, source.size))
+        if waiting:
+            moves.append(Move(source.path, waiting.pop(0)))
+    return tuple(moves)
 
 
 @dataclass(frozen=True, slots=True)

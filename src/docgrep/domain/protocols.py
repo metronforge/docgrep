@@ -147,6 +147,22 @@ class CorpusReader(Protocol):
         ...
 
 
+class FolderReader(Protocol):
+    """The files of a folder compared with a root, such as a backup copy.
+
+    Paths are relative to the folder, POSIX style, as a root's would be.
+    """
+
+    def scan(self) -> tuple[ScannedFile, ...]:
+        """Every file from directory entries alone, as ``CorpusScanner``;
+        files the include and exclude patterns keep out carry the pattern."""
+        ...
+
+    def content_hash(self, path: str) -> str:
+        """The content hash of one file, as recorded for a source."""
+        ...
+
+
 class ScanProbe(Protocol):
     """Look at the text layer of a PDF or DjVu file without reading its text
     into any result: page count and per-page character counts only.
