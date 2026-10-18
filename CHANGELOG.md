@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.24.0 (2026-10-18)
+
+### Documentation
+
+- Describe reuse by content hash
+  ([`1417dfc`](https://github.com/metronforge/docgrep/commit/1417dfc3fa5840fb8eaa06da5150361d92a84f7e))
+
+### Features
+
+- **adapters**: Copy the passages of a source under a new identity
+  ([`840f28e`](https://github.com/metronforge/docgrep/commit/840f28ec31a126e5eaabb52fdc544e7e8e385979))
+
+- **usecases**: Reuse indexed passages for files with the same content
+  ([`5e24c21`](https://github.com/metronforge/docgrep/commit/5e24c21ee35e8b2c1c318e90f70d56d7d2345107))
+
+
 ## v1.23.0 (2026-10-18)
 
 ### Documentation
