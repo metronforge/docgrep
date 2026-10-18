@@ -4,9 +4,8 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
 
 from docgrep.domain.errors import (
     BuildFailed,
@@ -16,12 +15,7 @@ from docgrep.domain.errors import (
     ResumeAvailable,
     ValidationError,
 )
-from docgrep.domain.models import (
-    DELEGATED_TO_OCR,
-    FileType,
-    ManifestSourceRecord,
-    Source,
-)
+from docgrep.domain.models import FileType, ManifestSourceRecord, Source
 from docgrep.domain.protocols import (
     Chunker,
     CorpusAvailability,
@@ -35,8 +29,6 @@ from docgrep.domain.protocols import (
     RootCatalog,
     SparseEncoder,
     SparseEncoders,
-    parser_reprocess_reason,
-    parser_version,
 )
 from docgrep.domain.roots import CorpusRoots, known_root_names
 from docgrep.domain.run_state import (
@@ -55,57 +47,28 @@ from docgrep.usecases.build_index import (
     Progress,
     SourceIndexing,
 )
+from docgrep.usecases.plan_update import (
+    CHANGE_ORDER,
+    ChangeKind,
+    DetectedChanges,
+    ModifiedReason,
+    PendingRefresh,
+    PlannedChange,
+    PlanUpdate,
+    UpdatePlan,
+)
+
+__all__ = [
+    "ChangeKind",
+    "ModifiedReason",
+    "UpdateIndex",
+    "UpdatePlan",
+    "UpdateSummary",
+]
 
 _LOG = logging.getLogger(__name__)
 
-ChangeKind = Literal["removed", "modified", "retried", "added"]
-# Why a recorded source is processed again (the retried ones aside).
-ModifiedReason = Literal[
-    "content_changed",
-    "parser_changed",
-    "newly_supported",
-    "delegated_to_ocr",
-    "delegation_ended",
-]
-_ORDER: tuple[ChangeKind, ...] = ("removed", "modified", "retried", "added")
-
-
-@dataclass(frozen=True, slots=True)
-class UpdatePlan:
-    """What an update found to do, before doing any of it.
-
-    ``retried`` counts sources recorded as failed whose content did not change;
-    a failed source whose content changed counts as modified. ``refreshed``
-    counts unchanged sources whose size or modification time changed while
-    their content hash did not; only their recorded size and time are updated.
-
-    ``modified`` is the sum of the reasons: ``content_changed`` (the content
-    hash differs), ``parser_changed`` (the registered parser's version differs
-    from the recorded one, or the parser is gone) and ``newly_supported``
-    (skipped as unsupported before, a parser exists now), and for OCR
-    ``delegated_to_ocr`` (an original now delegated to its OCR'd sibling,
-    whose passages are removed) and ``delegation_ended`` (a delegated
-    original whose output was removed: it is indexed again).
-    """
-
-    added: int = 0
-    modified: int = 0
-    removed: int = 0
-    unchanged: int = 0
-    retried: int = 0
-    refreshed: int = 0
-    content_changed: int = 0
-    parser_changed: int = 0
-    newly_supported: int = 0
-    delegated_to_ocr: int = 0
-    delegation_ended: int = 0
-    # Sources kept because their root is not part of the run, by root name
-    # (ADR-0023): they are neither checked nor removed.
-    outside_run: tuple[tuple[str, int], ...] = ()
-
-    @property
-    def changes(self) -> int:
-        return self.added + self.modified + self.removed + self.retried
+_ORDER = CHANGE_ORDER
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,14 +99,6 @@ class UpdateSummary:
     @property
     def no_changes(self) -> bool:
         return self.plan.changes == 0
-
-
-@dataclass(frozen=True, slots=True)
-class _Change:
-    kind: ChangeKind
-    # The current file for added, modified and retried; the record for removed.
-    source: Source
-    record: ManifestSourceRecord | None
 
 
 class UpdateIndex(SourceIndexing):
@@ -231,7 +186,8 @@ class UpdateIndex(SourceIndexing):
     ) -> UpdateSummary:
         """Update the index; raises before writing anything when it is refused.
 
-        ``on_plan`` is called with the work plan before any change is applied.
+        The changes are found first, without writing anything; ``on_plan``
+        is then called with the work plan, before any change is applied.
 
         Refusals: ``IndexLockHeld``, ``ResumeAvailable`` when the latest build
         is unfinished, ``IndexIncomplete`` without a completed index and
@@ -243,6 +199,17 @@ class UpdateIndex(SourceIndexing):
             metadata = self._check_preconditions()
             self._choose_sparse_encoder(metadata)
             roots = self.run_roots()
+            try:
+                detected = self.detect(retry_failed, roots)
+            except DocgrepError:
+                raise
+            except Exception as error:
+                raise BuildFailed(
+                    "Index update aborted", details={"reason": str(error)}
+                ) from error
+            plan = detected.plan()
+            if on_plan is not None:
+                on_plan(plan)
             self._close_dead_update()
             run_id = self.manifest.start_run(
                 {**self.run_config, **self.roots_config(roots)}, kind="update"
@@ -251,7 +218,7 @@ class UpdateIndex(SourceIndexing):
                 "index_update_started", extra={"run_id": run_id, **self.log_context}
             )
             return self._execute(
-                run_id, started, lambda: self._plan(retry_failed, roots), on_plan
+                run_id, started, detected.changes, plan, detected.refreshes
             )
 
     def forget_plan(self, name: str) -> tuple[ManifestSourceRecord, ...]:
@@ -302,11 +269,11 @@ class UpdateIndex(SourceIndexing):
                 extra={"run_id": run_id, "sources": len(removed)},
             )
 
-            def plan() -> tuple[list[_Change], UpdatePlan]:
-                changes = [_Change("removed", r.source, r) for r in removed]
-                return changes, UpdatePlan(removed=len(changes))
-
-            return self._execute(run_id, started, plan, on_plan)
+            changes = tuple(
+                PlannedChange("removed", r.source, r, name) for r in removed
+            )
+            plan = UpdatePlan(removed=len(changes))
+            return self._execute(run_id, started, changes, plan, on_plan=on_plan)
 
     def _catalog(self) -> CorpusRoots:
         """The roots known to this process and to the index; none is read."""
@@ -390,148 +357,51 @@ class UpdateIndex(SourceIndexing):
                 self.manifest.finish_run(latest.run_id, "aborted", dict(latest.totals))
                 _LOG.info("update_run_closed", extra={"run_id": latest.run_id})
 
-    def _plan(
-        self, retry_failed: bool, roots: CorpusRoots | None = None
-    ) -> tuple[list[_Change], UpdatePlan]:
-        recorded: dict[str, ManifestSourceRecord] = {}
-        outside: dict[str, int] = {}
-        for entry in self.manifest.committed_sources():
-            # Only the roots of the run are compared with the disk; the
-            # sources of any other root stay as they are.
-            name = None if roots is None else roots.root_of(entry.source.path)
-            if name is None or roots is None or roots.get(name) is not None:
-                recorded[entry.source.path] = entry
-            else:
-                outside[name] = outside.get(name, 0) + 1
-        found: dict[ChangeKind, list[_Change]] = {kind: [] for kind in _ORDER}
-        reasons: dict[ModifiedReason, int] = {
-            "content_changed": 0,
-            "parser_changed": 0,
-            "newly_supported": 0,
-            "delegated_to_ocr": 0,
-            "delegation_ended": 0,
-        }
-        seen: set[str] = set()
-        unchanged = 0
-        refreshed = 0
-        for item in self.corpus.scan():
-            if item.excluded_by is not None:
-                continue
-            seen.add(item.path)
-            record = recorded.get(item.path)
-            if record is None:
-                found["added"].append(
-                    _Change("added", self.corpus.describe(item.path), None)
-                )
-                continue
-            current: Source | None = None
-            old = record.source
-            if item.size != old.size or item.mtime != old.mtime:
-                current = self.corpus.describe(item.path)
-                if current.content_hash != old.content_hash:
-                    found["modified"].append(_Change("modified", current, record))
-                    reasons["content_changed"] += 1
-                    continue
-                # Same content: only the recorded size and time follow the
-                # file, in the passages first and then in the record.
-                fresh = replace(old, size=current.size, mtime=current.mtime)
-                if current.size is not None and current.mtime is not None:
-                    self.index.refresh_live_source(
-                        old.source_id, size=current.size, mtime=current.mtime
-                    )
-                self.manifest.record_source(
-                    fresh, record.status, record.error, record.embedding_model
-                )
-                refreshed += 1
-            delegation = self._delegation_reason(record, current or old)
-            if delegation is not None:
-                current = current or self.corpus.describe(item.path)
-                found["modified"].append(_Change("modified", current, record))
-                reasons[delegation] += 1
-                continue
-            if record.status == f"skipped:{DELEGATED_TO_OCR}":
-                unchanged += 1
-                continue
-            reason = self._parser_reason(record)
-            if reason is not None:
-                current = current or self.corpus.describe(item.path)
-                found["modified"].append(_Change("modified", current, record))
-                reasons[reason] += 1
-            elif record.status.startswith("failed:") and retry_failed:
-                current = current or self.corpus.describe(item.path)
-                found["retried"].append(_Change("retried", current, record))
-            else:
-                unchanged += 1
-        for path in sorted(set(recorded) - seen):
-            found["removed"].append(
-                _Change("removed", recorded[path].source, recorded[path])
+    def detect(
+        self, retry_failed: bool = True, roots: CorpusRoots | None = None
+    ) -> DetectedChanges:
+        """What an update with these roots would change; nothing is written."""
+        return PlanUpdate(
+            corpus=self.corpus,
+            manifest=self.manifest,
+            parsers=self.parsers,
+            delegations=self.delegations,
+        ).detect(retry_failed, roots)
+
+    def _refresh(self, pending: PendingRefresh) -> None:
+        """Make the recorded size and time follow an unchanged file, in the
+        passages first and then in the record."""
+        record, current = pending.record, pending.current
+        if current.size is not None and current.mtime is not None:
+            self.index.refresh_live_source(
+                record.source.source_id, size=current.size, mtime=current.mtime
             )
-        changes = [
-            change
-            for kind in _ORDER
-            for change in sorted(found[kind], key=lambda c: c.source.path)
-        ]
-        plan = UpdatePlan(
-            added=len(found["added"]),
-            modified=len(found["modified"]),
-            removed=len(found["removed"]),
-            unchanged=unchanged,
-            retried=len(found["retried"]),
-            refreshed=refreshed,
-            **reasons,
-            outside_run=tuple(sorted(outside.items())),
-        )
-        return changes, plan
-
-    def _delegation_reason(
-        self, record: ManifestSourceRecord, source: Source
-    ) -> ModifiedReason | None:
-        """Whether a recorded source with unchanged content became delegated
-        to its OCR'd sibling, or stopped being so."""
-        delegated = record.status == f"skipped:{DELEGATED_TO_OCR}"
-        live = self.is_delegated(source)
-        if live and not delegated:
-            return "delegated_to_ocr"
-        if delegated and not live:
-            return "delegation_ended"
-        return None
-
-    def _parser_reason(self, record: ManifestSourceRecord) -> ModifiedReason | None:
-        """Why the registered parser would treat the source differently, if so.
-
-        A source skipped as unsupported is newly supported once a parser is
-        registered; an indexed or OCR-pending source has a changed parser when
-        the parser's version differs from the recorded one or the parser is
-        gone. A missing or empty version, recorded or declared, counts as
-        version "1" (``effective_parser_version``), so sources recorded before
-        versions existed are not reprocessed for that alone. Failed sources are
-        left to the retry rule.
-        """
-        parser = self.parsers.get(record.source.file_type)
-        return parser_reprocess_reason(
-            record.status,
-            record.source.parser_version,
-            registered=parser is not None,
-            declared_version=parser_version(parser),
+        self.manifest.record_source(
+            pending.refreshed, record.status, record.error, record.embedding_model
         )
 
     def _execute(
         self,
         run_id: str,
         started: float,
-        planner: Callable[[], tuple[list[_Change], UpdatePlan]],
-        on_plan: Callable[[UpdatePlan], None] | None,
+        changes: Sequence[PlannedChange],
+        plan: UpdatePlan,
+        refreshes: Sequence[PendingRefresh] = (),
+        *,
+        on_plan: Callable[[UpdatePlan], None] | None = None,
     ) -> UpdateSummary:
+        """Apply a plan found beforehand: the refreshes first, then the
+        changes in order."""
         counts: dict[str, int] = dict.fromkeys(_ORDER, 0)
         totals = {"indexed": 0, "skipped": 0, "failed": 0}
         written = 0
         removed = 0
         failures: list[BuildFailure] = []
-        plan = UpdatePlan()
         cancelled = False
         try:
-            changes, plan = planner()
             self.manifest.set_total_sources(run_id, len(changes))
+            for pending in refreshes:
+                self._refresh(pending)
             _LOG.info(
                 "index_update_plan",
                 extra={
@@ -651,7 +521,7 @@ class UpdateIndex(SourceIndexing):
         }
 
     def _apply(
-        self, change: _Change, run_id: str
+        self, change: PlannedChange, run_id: str
     ) -> tuple[str | None, BuildFailure | None, int, int]:
         """Process one change.
 
@@ -724,7 +594,7 @@ class UpdateIndex(SourceIndexing):
             )
 
     def _remove(
-        self, change: _Change, run_id: str
+        self, change: PlannedChange, run_id: str
     ) -> tuple[str | None, BuildFailure | None, int, int]:
         source = change.source
         try:

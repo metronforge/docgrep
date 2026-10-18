@@ -67,6 +67,7 @@ from docgrep.domain.sparse import (
     SparseWeighting,
     check_bm25_parameters,
 )
+from docgrep.usecases.plan_update import is_delegated
 from docgrep.usecases.sparse_vectors import average_length, encode_pages
 
 _LOG = logging.getLogger(__name__)
@@ -284,13 +285,7 @@ class SourceIndexing:
     def is_delegated(self, source: Source) -> bool:
         """Whether a PDF or DjVu source has a live delegation to its OCR'd
         sibling, for its current content."""
-        if self.delegations is None or source.file_type not in (
-            FileType.PDF,
-            FileType.DJVU,
-        ):
-            return False
-        found = self.delegations.live_delegation(source.path, source.content_hash)
-        return found is not None
+        return is_delegated(self.delegations, source)
 
     def request_cancel(self) -> None:
         """Ask the running build to stop after its current batch.
