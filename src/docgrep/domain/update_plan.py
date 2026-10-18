@@ -1,11 +1,18 @@
-"""Pure rules of an update plan: move pairs and the removal guard (ADR-0027)."""
+"""Pure rules of an update plan: move pairs, reuse by content hash and the
+removal guard (ADR-0027, ADR-0028)."""
 
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
-from docgrep.domain.models import Source
+from docgrep.domain.models import (
+    ManifestSourceRecord,
+    Passage,
+    Source,
+    make_passage_id,
+)
+from docgrep.domain.protocols import effective_parser_version
 
 # Defaults of DOCGREP_UPDATE_GUARD_RATIO and DOCGREP_UPDATE_GUARD_COUNT.
 DEFAULT_GUARD_RATIO = 0.05
@@ -19,11 +26,49 @@ GUARD_SMALL_ROOT = 20
 class Move:
     """A removed source and an added file with the same content and size.
 
-    Information only: both are still processed as a removal and an addition.
+    An update whose removed source can be reused (``can_reuse``) copies its
+    passages to the added file, then removes it (ADR-0028).
     """
 
     removed: str
     added: str
+
+
+@dataclass(frozen=True, slots=True)
+class Copy:
+    """A file indexed by copying the passages of a source that stays."""
+
+    original: str
+    copy: str
+
+
+def can_reuse(
+    record: ManifestSourceRecord,
+    file: Source,
+    *,
+    parser_version: str | None,
+    embedding_model: str,
+) -> bool:
+    """Whether the stored passages of a recorded source can be copied for a
+    file instead of parsing and embedding it (ADR-0028).
+
+    The source is indexed, with the content hash, size and file type of the
+    file, its recorded parser version is the version the file would be
+    parsed with now (``parser_version``, the registered parser's) and its
+    embedding model is the index's. OCR delegation is checked by the caller.
+    """
+    old = record.source
+    return (
+        record.status == "indexed"
+        and old.content_hash is not None
+        and old.size is not None
+        and old.content_hash == file.content_hash
+        and old.size == file.size
+        and old.file_type == file.file_type
+        and effective_parser_version(old.parser_version)
+        == effective_parser_version(parser_version)
+        and record.embedding_model == embedding_model
+    )
 
 
 def pair_moves(removed: Iterable[Source], added: Iterable[Source]) -> tuple[Move, ...]:
@@ -48,6 +93,30 @@ def pair_moves(removed: Iterable[Source], added: Iterable[Source]) -> tuple[Move
         if waiting:
             moves.append(Move(source.path, waiting.pop(0)))
     return tuple(moves)
+
+
+def reused_source(original: Source, file: Source) -> Source:
+    """The source recorded and stored for a file whose passages are copied
+    from ``original``: the identity, size, time and indexing time of the
+    file, and what the parser extracted from the content they share."""
+    return replace(
+        original,
+        source_id=file.source_id,
+        path=file.path,
+        mtime=file.mtime,
+        size=file.size,
+        indexed_at=file.indexed_at,
+    )
+
+
+def reused_passage(passage: Passage, source_id: str) -> Passage:
+    """A stored passage under a new source identity: its id follows from the
+    new source id and the same chunk offset; the text and location stay."""
+    return replace(
+        passage,
+        passage_id=make_passage_id(source_id, passage.chunk_offset),
+        source_id=source_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)

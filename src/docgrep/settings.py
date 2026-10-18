@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     # one update, or count when it records fewer than 20.
     update_guard_ratio: float = Field(default=DEFAULT_GUARD_RATIO, ge=0, le=1)
     update_guard_count: int = Field(default=DEFAULT_GUARD_COUNT, ge=0)
+    # A file whose content is already indexed under another path is indexed
+    # by copying the stored passages and vectors (ADR-0028).
+    reuse_by_hash: bool = True
 
     # The roots this process uses, once chosen (the roots file, the
     # deprecated corpus_root or --root parameters); never read from the

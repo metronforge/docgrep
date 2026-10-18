@@ -27,6 +27,7 @@ from docgrep.domain.protocols import (
     LiveIndexWriter,
     Manifest,
     OcrDelegations,
+    OcrOutputOwners,
     RootCatalog,
     SparseEncoder,
     SparseEncoders,
@@ -41,7 +42,7 @@ from docgrep.domain.run_state import (
     unfinished_reencode,
 )
 from docgrep.domain.sparse import SparseWeighting
-from docgrep.domain.update_plan import GuardedRoot, RemovalGuard
+from docgrep.domain.update_plan import GuardedRoot, RemovalGuard, reused_source
 from docgrep.usecases.build_index import (
     BuildFailure,
     Cancelled,
@@ -77,9 +78,11 @@ _ORDER = CHANGE_ORDER
 class UpdateSummary:
     """Final counts of one update.
 
-    ``added``, ``modified``, ``removed`` and ``retried`` count the changes that
-    were processed (fewer than planned when cancelled); ``indexed``, ``skipped``
-    and ``failed`` are their outcomes, a failed removal included.
+    ``added``, ``modified``, ``removed``, ``retried``, ``moved`` and ``copied``
+    count the changes that were processed (fewer than planned when
+    cancelled); ``indexed``, ``skipped`` and ``failed`` are their outcomes, a
+    failed removal included. A move or a copy is indexed once its passages
+    are copied; a move whose old source could not be removed is failed.
     """
 
     run_id: str
@@ -97,6 +100,8 @@ class UpdateSummary:
     elapsed_seconds: float
     failures: tuple[BuildFailure, ...]
     cancelled: bool = False
+    moved: int = 0
+    copied: int = 0
 
     @property
     def no_changes(self) -> bool:
@@ -137,10 +142,15 @@ class UpdateIndex(SourceIndexing):
         availability: CorpusAvailability | None = None,
         sparse_encoders: SparseEncoders | None = None,
         guard: RemovalGuard | None = None,
+        ocr_outputs: OcrOutputOwners | None = None,
+        reuse_by_hash: bool = False,
     ) -> None:
         """With ``sparse_encoders`` new passages get the sparse weighting the
         index records (ADR-0025); without them, ``sparse_encoder``. ``guard``
-        limits the removals per root (default ``RemovalGuard()``)."""
+        limits the removals per root (default ``RemovalGuard()``). With
+        ``reuse_by_hash`` (``DOCGREP_REUSE_BY_HASH``, on by default in the
+        application) a file whose content an indexed source has is indexed
+        by copying its passages (ADR-0028)."""
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if upsert_batch_size <= 0:
@@ -150,6 +160,8 @@ class UpdateIndex(SourceIndexing):
         if progress_every_seconds <= 0:
             raise ValueError("progress_every_seconds must be positive")
         self.guard = guard or RemovalGuard()
+        self.ocr_outputs = ocr_outputs
+        self.reuse_by_hash = reuse_by_hash
         self.delegations = delegations
         self.roots = roots
         self.availability = availability
@@ -376,6 +388,9 @@ class UpdateIndex(SourceIndexing):
             parsers=self.parsers,
             delegations=self.delegations,
             guard=self.guard,
+            ocr_outputs=self.ocr_outputs,
+            reuse_by_hash=self.reuse_by_hash,
+            embedding_model=self.embedder.model_name,
         ).detect(retry_failed, roots)
 
     def _check_guard(self, detected: DetectedChanges) -> None:
@@ -430,6 +445,7 @@ class UpdateIndex(SourceIndexing):
                     "retried": plan.retried,
                     "refreshed": plan.refreshed,
                     "moved": plan.moved,
+                    "copied": plan.copied,
                     "content_changed": plan.content_changed,
                     "parser_changed": plan.parser_changed,
                     "newly_supported": plan.newly_supported,
@@ -520,6 +536,8 @@ class UpdateIndex(SourceIndexing):
             elapsed_seconds=elapsed,
             failures=tuple(failures),
             cancelled=cancelled,
+            moved=counts["moved"],
+            copied=counts["copied"],
         )
 
     @staticmethod
@@ -548,6 +566,14 @@ class UpdateIndex(SourceIndexing):
         """
         if change.kind == "removed":
             return self._remove(change, run_id)
+        if change.kind in ("moved", "copied"):
+            return self._reuse(change, run_id)
+        return self._process(change, run_id)
+
+    def _process(
+        self, change: PlannedChange, run_id: str
+    ) -> tuple[str | None, BuildFailure | None, int, int]:
+        """Parse, chunk, embed and write one file."""
         prepared = self._prepare(change.source, run_id)
         if prepared.error is not None:
             reason = prepared.status.split(":", 1)[1]
@@ -590,6 +616,85 @@ class UpdateIndex(SourceIndexing):
             passages=len(prepared.items),
         )
         return ("indexed" if indexed else "skipped"), None, len(prepared.items), pruned
+
+    def _reuse(
+        self, change: PlannedChange, run_id: str
+    ) -> tuple[str | None, BuildFailure | None, int, int]:
+        """Index a file by copying the stored passages of a source with the
+        same content, then, for a move, remove that source (ADR-0028).
+
+        The copy is written first and pruned of the file's other passages,
+        as a modification is. A store error deletes what was written of a
+        file that was not recorded and fails it, and a moved source is then
+        kept. When the stored passages cannot be found the file is processed
+        normally.
+        """
+        original = change.reuse
+        assert original is not None
+        target = reused_source(original.source, change.source)
+        try:
+            written = self._copy_passages(
+                self.index.live_source_page,
+                self.index.upsert_live_batch,
+                original.source,
+                target,
+            )
+            keep = frozenset(written)
+            pruned = (
+                self._retry(
+                    lambda: self.index.delete_live_source_points_except(
+                        target.source_id, keep
+                    )
+                )
+                if written
+                else 0
+            )
+        except Exception as error:
+            failure = self._record_failure(target, "store_error", error, run_id)
+            if change.record is None:
+                self._discard_partial(target)
+                self.manifest.record_source(target, "failed:store_error", str(error))
+            return "failed", failure, 0, 0
+        if not written:
+            _LOG.warning(
+                "reused_source_has_no_passages",
+                extra={"run_id": run_id, "source_id": original.source.source_id},
+            )
+            outcome = self._process(change, run_id)
+        else:
+            model = self.embedder.model_name
+            self.manifest.record_source(target, "indexed", None, model)
+            self.manifest.record_source(
+                target,
+                "indexed",
+                None,
+                model,
+                run_id=run_id,
+                passages=len(written),
+                reused_from=original.source.path,
+            )
+            _LOG.info(
+                "source_reused",
+                extra={
+                    "run_id": run_id,
+                    "source_id": target.source_id,
+                    "reused_from": original.source.source_id,
+                    "kind": change.kind,
+                    "passages": len(written),
+                },
+            )
+            outcome = ("indexed", None, len(written), pruned)
+        if change.kind != "moved" or outcome[0] == "failed":
+            return outcome
+        # The copy is stored: only now does the old source go. A process
+        # that stops in between leaves both indexed, and the next update
+        # removes the old one, whose file is gone.
+        removal = self._remove(
+            PlannedChange("removed", original.source, original, change.root), run_id
+        )
+        if removal[0] == "failed":
+            return "failed", removal[1], outcome[2], outcome[3]
+        return outcome[0], None, outcome[2], outcome[3] + removal[3]
 
     def _write(self, prepared: Prepared) -> int:
         """Insert the new passages, then prune the source's others."""

@@ -426,18 +426,27 @@ def create_update_plan(settings: Settings) -> PlanUpdate:
     roots = corpus_roots(settings)
     manifest = SQLiteManifest(settings.data_dir, read_only=True)
     corpus = _CorpusEnumerator(settings)
+    registry = SQLiteOcrRegistry(
+        settings.data_dir,
+        roots.with_recorded(latest_root_prefixes(manifest)),
+        read_only=True,
+    )
     return PlanUpdate(
         corpus=corpus,
         manifest=manifest,
         parsers=_parsers(settings, roots),
-        delegations=SQLiteOcrRegistry(
-            settings.data_dir,
-            roots.with_recorded(latest_root_prefixes(manifest)),
-            read_only=True,
-        ),
+        delegations=registry,
         roots=_RootCatalog(settings, roots),
         availability=corpus,
         guard=settings.removal_guard,
+        ocr_outputs=registry,
+        reuse_by_hash=settings.reuse_by_hash,
+        # The model an update would check the index against; loads nothing.
+        embedding_model=(
+            DeterministicEmbedder.model_name
+            if settings.backend == "fake"
+            else settings.embedding_model
+        ),
     )
 
 
@@ -847,6 +856,8 @@ def create_container(
             availability=corpus,
             sparse_encoders=encoders,
             sparse_store=store,
+            ocr_outputs=delegations,
+            reuse_by_hash=settings.reuse_by_hash,
         ),
         update=UpdateIndex(
             lock=lock,
@@ -865,6 +876,8 @@ def create_container(
             availability=corpus,
             sparse_encoders=encoders,
             guard=settings.removal_guard,
+            ocr_outputs=delegations,
+            reuse_by_hash=settings.reuse_by_hash,
         ),
         # The search store is shared, so a local store is never opened twice.
         browse=BrowseSources(
