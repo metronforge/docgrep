@@ -45,11 +45,16 @@ from docgrep.domain.ocr import (
     REGISTRY_WRITE,
     UNREADABLE,
     eligible_type,
-    eta_seconds,
     missing_languages,
     ocr_mode,
     output_path,
     parse_languages,
+)
+from docgrep.domain.progress import (
+    ProgressEvent,
+    ProgressObserver,
+    estimate_eta_seconds,
+    item_label,
 )
 from docgrep.domain.protocols import (
     CorpusAvailability,
@@ -270,7 +275,7 @@ class _Run:
     run_id: str
     started: float
     results: list[OcrFileResult] = field(default_factory=list)
-    done_bytes: int = 0
+    done_units: int = 0
     last_poll: float = float("-inf")
     cancel_seen: bool = False
 
@@ -501,6 +506,7 @@ class ProcessScans:
         *,
         on_plan: Callable[[OcrPlan], None] | None = None,
         on_file: Callable[[OcrFileResult], None] | None = None,
+        on_progress: ProgressObserver | None = None,
     ) -> OcrSummary:
         """Process the batch; raises before any OCR when it is refused.
 
@@ -528,7 +534,7 @@ class ProcessScans:
             state = _Run(run_id, started)
             try:
                 return self._execute(
-                    state, request, languages, version, on_plan, on_file
+                    state, request, languages, version, on_plan, on_file, on_progress
                 )
             finally:
                 self._cancel_event.clear()
@@ -548,6 +554,7 @@ class ProcessScans:
         version: str,
         on_plan: Callable[[OcrPlan], None] | None,
         on_file: Callable[[OcrFileResult], None] | None,
+        on_progress: ProgressObserver | None = None,
     ) -> OcrSummary:
         plan = OcrPlan(languages, request.force, ())
         status = "completed"
@@ -559,17 +566,52 @@ class ProcessScans:
             self._log_plan(state.run_id, plan)
             if on_plan is not None:
                 on_plan(plan)
-            total_bytes = sum(t.size for t in work)
+            # Pages when every file of the batch has a page count, so that a
+            # long file weighs more than a short one; files otherwise.
+            by_pages = all(t.page_count for t in work)
+            unit = "pages" if by_pages else "files"
+
+            def weight(target: OcrTarget) -> int:
+                return (target.page_count or 1) if by_pages else 1
+
+            total_units = sum(weight(t) for t in work)
             loop_started = self.clock()
+
+            def report(label: str | None, *, finished: bool = False) -> None:
+                if on_progress is None or not work:
+                    return
+                elapsed = self.clock() - loop_started
+                on_progress(
+                    ProgressEvent(
+                        operation="ocr",
+                        unit=unit,
+                        done=state.done_units,
+                        total=total_units,
+                        failed=sum(
+                            r.status.startswith("failed:") for r in state.results
+                        ),
+                        elapsed_seconds=elapsed,
+                        eta_seconds=estimate_eta_seconds(
+                            done=state.done_units,
+                            total=total_units,
+                            elapsed_seconds=elapsed,
+                        ),
+                        label=label,
+                        finished=finished,
+                    )
+                )
+
+            report(None)
             for index, target in enumerate(work, start=1):
                 self._check_cancel(state)
+                report(item_label(target.path))
                 result = self._process(
                     state, target, index, len(work), languages, version
                 )
-                state.done_bytes += target.size
-                eta = eta_seconds(
-                    done_bytes=state.done_bytes,
-                    total_bytes=total_bytes,
+                state.done_units += weight(target)
+                eta = estimate_eta_seconds(
+                    done=state.done_units,
+                    total=total_units,
                     elapsed_seconds=self.clock() - loop_started,
                 )
                 result = replace(result, eta_seconds=eta)
@@ -582,7 +624,9 @@ class ProcessScans:
                     raise _Cancelled
                 if result.status == f"failed:{DISK_FULL}":
                     raise _Abort
+                report(item_label(target.path))
             self._check_cancel(state)
+            report(None, finished=True)
         except _Cancelled:
             status = "cancelled"
         except _Abort:
