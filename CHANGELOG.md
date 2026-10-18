@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v1.23.0 (2026-10-18)
+
+### Documentation
+
+- Describe the update plan, the removal guard and diff
+  ([`395d88e`](https://github.com/metronforge/docgrep/commit/395d88e2bda3a0f0e9b919e5e963c2cf9cf6bba4))
+
+### Features
+
+- **api**: Add update --plan and docgrep diff
+  ([`9e5fee0`](https://github.com/metronforge/docgrep/commit/9e5fee00ea83eb3797410f95a1d992b259952a81))
+
+- **usecases**: Guard updates against mass removal
+  ([`f7d6794`](https://github.com/metronforge/docgrep/commit/f7d679436759bd8f62f138d762841843f90ed9b1))
+
+- **usecases**: Refuse an update that would empty a root
+  ([`92bb373`](https://github.com/metronforge/docgrep/commit/92bb37370c294540834a3d91066ee65308d4474a))
+
+### Refactoring
+
+- **usecases**: Plan an update without writing
+  ([`3182de3`](https://github.com/metronforge/docgrep/commit/3182de3bd5dc1291542b8cda85a86f754970297e))
+
+
 ## v1.22.0 (2026-10-17)
 
 ### Continuous Integration
