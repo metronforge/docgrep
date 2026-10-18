@@ -341,6 +341,7 @@ def _parser() -> argparse.ArgumentParser:
         "rebuilding their text layer",
     )
     ocr.add_argument("--json", action="store_true")
+    _add_progress_option(ocr)
     _add_root_options(ocr)
     sources = commands.add_parser(
         "sources",
@@ -1930,30 +1931,43 @@ def _ocr(
                 _emit(_format_ocr_plan(plan))
             return 0
 
-        def show_plan(plan: OcrPlan) -> None:
-            if not args.json:
-                _emit(_format_ocr_plan(plan))
-                _flush_stdout()
-
-        def show_file(result: OcrFileResult) -> None:
-            if not args.json:
-                _emit(_format_ocr_file(result))
-                _flush_stdout()
-
         terminate = ocr.cancel_mode == "terminate"
-        with graceful_cancel(
-            ocr.request_cancel,
-            _warn_user,
-            register=register,
-            notice="Cancel requested: "
-            + (
-                "the running OCR is stopped and the batch ends."
-                if terminate
-                else "the batch ends when the current file is done."
-            )
-            + " Press Ctrl-C again to stop immediately.",
-        ):
-            summary = ocr.run(request, on_plan=show_plan, on_file=show_file)
+        with _progress(args, json_output=args.json) as display:
+
+            def show_plan(plan: OcrPlan) -> None:
+                if not args.json:
+                    display.clear()
+                    _emit(_format_ocr_plan(plan))
+                    _flush_stdout()
+
+            def show_file(result: OcrFileResult) -> None:
+                if not args.json:
+                    display.clear()
+                    _emit(_format_ocr_file(result))
+                    _flush_stdout()
+
+            with graceful_cancel(
+                ocr.request_cancel,
+                display.notify,
+                register=register,
+                notice="Cancel requested: "
+                + (
+                    "the running OCR is stopped and the batch ends."
+                    if terminate
+                    else "the batch ends when the current file is done."
+                )
+                + " Press Ctrl-C again to stop immediately.",
+            ):
+                summary = ocr.run(
+                    request,
+                    on_plan=show_plan,
+                    on_file=show_file,
+                    **(
+                        {}
+                        if display.options is None
+                        else {"on_progress": display.options.observer}
+                    ),
+                )
     except ValidationError as error:
         sys.stderr.write(_describe(error) + "\n")
         return 2
