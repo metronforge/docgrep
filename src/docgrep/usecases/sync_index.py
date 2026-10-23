@@ -249,10 +249,11 @@ class SyncIndex:
     def _is_held(self, path: str) -> bool:
         return any(path in paths for paths in self._state.held.values())
 
-    def _publish(self) -> None:
+    def publish(self, *, running: bool = True) -> None:
+        """Hand the current status to ``on_change``."""
         if self.on_change is not None:
             try:
-                self.on_change(self.status())
+                self.on_change(self.status(running=running))
             except Exception:
                 _LOG.warning("sync_status_not_published", exc_info=True)
 
@@ -279,7 +280,7 @@ class SyncIndex:
                 "duration_ms": round((self.clock() - started) * 1000, 1),
             },
         )
-        self._publish()
+        self.publish()
         return result
 
     def _cycle(self) -> CycleResult:
@@ -583,7 +584,7 @@ class SyncIndex:
         if event.phase == "writing" and self.yield_seconds > 0:
             self.sleep(self.yield_seconds)
         if event.done == 0 and not event.finished and event.label is None:
-            self._publish()
+            self.publish()
 
 
 def _counts(summary: UpdateSummary | None) -> dict[str, int]:

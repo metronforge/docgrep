@@ -43,6 +43,7 @@ from docgrep.api.log_config import (
     warn_if_not_loopback,
 )
 from docgrep.api.roots import corpus_roots
+from docgrep.api.sync_task import SyncTask
 from docgrep.domain.context import ContextResult, PassageContext, PassageLocation
 from docgrep.domain.errors import (
     ConfigDrift,
@@ -898,6 +899,9 @@ def create_app(
             if count is not None:
                 warn_if_local_mode_is_large(count)
         async with AsyncExitStack() as stack:
+            if effective.sync:
+                stack.push_async_callback(sync_task.stop)
+                sync_task.start()
             if mcp_endpoint is not None:
                 await stack.enter_async_context(_serve_mcp(mcp_endpoint))
             elif effective.mcp_http_enabled:
@@ -913,6 +917,7 @@ def create_app(
 
     app = FastAPI(title="docgrep", version=__version__, lifespan=lifespan)
     initialization_lock = Lock()
+    sync_task = SyncTask(lambda: operations(), effective.sync_interval_seconds)
 
     def operations() -> Services:
         nonlocal initialized
