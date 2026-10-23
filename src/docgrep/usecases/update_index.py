@@ -4,8 +4,9 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import Literal
 
 from docgrep.domain.errors import (
     BuildFailed,
@@ -43,7 +44,12 @@ from docgrep.domain.run_state import (
     unfinished_reencode,
 )
 from docgrep.domain.sparse import SparseWeighting
-from docgrep.domain.update_plan import GuardedRoot, RemovalGuard, reused_source
+from docgrep.domain.update_plan import (
+    GuardedRoot,
+    RemovalGuard,
+    UpdateScope,
+    reused_source,
+)
 from docgrep.usecases.build_index import (
     BuildFailure,
     Cancelled,
@@ -103,6 +109,10 @@ class UpdateSummary:
     cancelled: bool = False
     moved: int = 0
     copied: int = 0
+    # A scoped update (sync): the roots whose removals the guard held back,
+    # and the stored paths of those removals, which were not applied.
+    held: tuple[GuardedRoot, ...] = ()
+    held_removals: tuple[str, ...] = ()
 
     @property
     def no_changes(self) -> bool:
@@ -203,8 +213,18 @@ class UpdateIndex(SourceIndexing):
         on_plan: Callable[[UpdatePlan], None] | None = None,
         override_guard: bool = False,
         progress: ProgressOptions | None = None,
+        scope: UpdateScope | None = None,
+        run_kind: Literal["update", "sync"] = "update",
     ) -> UpdateSummary:
         """Update the index; raises before writing anything when it is refused.
+
+        With a ``scope`` (ADR-0029) only its paths are compared and changed.
+        The roots are not required to be readable as a whole, and the
+        removals of a root that trips the guard are held back, not refused:
+        they are left out and named in the summary, while the rest of the
+        scope is applied. ``run_kind`` is the kind recorded in the journal;
+        with ``wait_for_lock`` false a held index lock raises
+        ``IndexLockHeld`` at once.
 
         The changes are found first, without writing anything; ``on_plan``
         is then called with the work plan, before any change is applied.
@@ -219,28 +239,32 @@ class UpdateIndex(SourceIndexing):
         with self.lock.hold("update"):
             metadata = self._check_preconditions()
             self._choose_sparse_encoder(metadata)
-            roots = self.run_roots()
+            roots = self.known_roots() if scope else self.run_roots()
             try:
-                detected = self.detect(retry_failed, roots)
+                detected = self.detect(retry_failed, roots, scope)
             except DocgrepError:
                 raise
             except Exception as error:
                 raise BuildFailed(
                     "Index update aborted", details={"reason": str(error)}
                 ) from error
+            held: tuple[GuardedRoot, ...] = ()
+            held_paths: tuple[str, ...] = ()
+            if scope is not None:
+                detected, held, held_paths = self._hold_guarded(detected)
             plan = detected.plan()
             if on_plan is not None:
                 on_plan(plan)
-            if not override_guard:
+            if scope is None and not override_guard:
                 self._check_guard(detected)
             self._close_dead_update()
             run_id = self.manifest.start_run(
-                {**self.run_config, **self.roots_config(roots)}, kind="update"
+                {**self.run_config, **self.roots_config(roots)}, kind=run_kind
             )
             _LOG.info(
                 "index_update_started", extra={"run_id": run_id, **self.log_context}
             )
-            return self._execute(
+            summary = self._execute(
                 run_id,
                 started,
                 detected.changes,
@@ -248,6 +272,33 @@ class UpdateIndex(SourceIndexing):
                 detected.refreshes,
                 progress=progress,
             )
+            return replace(summary, held=held, held_removals=held_paths)
+
+    def _hold_guarded(
+        self, detected: DetectedChanges
+    ) -> tuple[DetectedChanges, tuple[GuardedRoot, ...], tuple[str, ...]]:
+        """Leave out the unpaired removals of the roots the guard refuses.
+
+        Paired removals (moves) lose no content and stay, as do all the
+        additions and modifications.
+        """
+        guarded = detected.guarded(self.guard)
+        if not guarded:
+            return detected, (), ()
+        roots = {g.root for g in guarded}
+        held = tuple(
+            c.source.path
+            for c in detected.changes
+            if c.kind == "removed"
+            and c.root in roots
+            and c.source.path not in detected.paired
+        )
+        kept = tuple(c for c in detected.changes if c.source.path not in held)
+        _LOG.warning(
+            "sync_removals_held",
+            extra={"roots": len(guarded), "removals": len(held)},
+        )
+        return replace(detected, changes=kept), guarded, held
 
     def forget_plan(self, name: str) -> tuple[ManifestSourceRecord, ...]:
         """The committed sources of a root, which ``forget_root`` removes.
@@ -380,13 +431,16 @@ class UpdateIndex(SourceIndexing):
     def _close_dead_update(self) -> None:
         """Mark an update that lost its process as aborted; its work stays."""
         latest = self.manifest.latest_run()
-        if latest is not None and latest.kind == "update":
+        if latest is not None and latest.kind in ("update", "sync"):
             if latest.status == "running":
                 self.manifest.finish_run(latest.run_id, "aborted", dict(latest.totals))
                 _LOG.info("update_run_closed", extra={"run_id": latest.run_id})
 
     def detect(
-        self, retry_failed: bool = True, roots: CorpusRoots | None = None
+        self,
+        retry_failed: bool = True,
+        roots: CorpusRoots | None = None,
+        scope: UpdateScope | None = None,
     ) -> DetectedChanges:
         """What an update with these roots would change; nothing is written."""
         return PlanUpdate(
@@ -398,7 +452,7 @@ class UpdateIndex(SourceIndexing):
             ocr_outputs=self.ocr_outputs,
             reuse_by_hash=self.reuse_by_hash,
             embedding_model=self.embedder.model_name,
-        ).detect(retry_failed, roots)
+        ).detect(retry_failed, roots, scope)
 
     def _check_guard(self, detected: DetectedChanges) -> None:
         guarded = detected.guarded(self.guard)

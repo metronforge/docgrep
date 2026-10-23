@@ -2,7 +2,7 @@
 and which files it can index by reusing stored passages (ADR-0028)."""
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -10,6 +10,7 @@ from docgrep.domain.models import (
     DELEGATED_TO_OCR,
     FileType,
     ManifestSourceRecord,
+    ScannedFile,
     Source,
 )
 from docgrep.domain.protocols import (
@@ -19,6 +20,7 @@ from docgrep.domain.protocols import (
     ManifestReader,
     OcrDelegations,
     OcrOutputOwners,
+    PathScanner,
     RootCatalog,
     parser_reprocess_reason,
     parser_version,
@@ -30,6 +32,7 @@ from docgrep.domain.update_plan import (
     GuardedRoot,
     Move,
     RemovalGuard,
+    UpdateScope,
     can_reuse,
     guarded_roots,
     pair_moves,
@@ -422,12 +425,18 @@ class PlanUpdate:
         return UpdatePreview.of(self.detect(retry_failed, roots), self.guard)
 
     def detect(
-        self, retry_failed: bool, roots: CorpusRoots | None = None
+        self,
+        retry_failed: bool,
+        roots: CorpusRoots | None = None,
+        scope: UpdateScope | None = None,
     ) -> DetectedChanges:
         """Compare the roots of the run with the committed sources.
 
         Only files whose size or modification time differ from the record,
-        and added files, are read and hashed.
+        and added files, are read and hashed. With a ``scope`` only its paths
+        are compared and can be added, changed or removed; the other
+        recorded sources count as unchanged, and a corpus that can stat
+        single files (``PathScanner``) does not walk its roots.
         """
         default = CorpusRoots().legacy_name
         run_roots = (default,) if roots is None else roots.names
@@ -458,7 +467,7 @@ class PlanUpdate:
         ) -> None:
             found[kind].append(PlannedChange(kind, source, record, name, reason))
 
-        for item in self.corpus.scan():
+        for item in self._items(scope):
             if item.excluded_by is not None:
                 continue
             seen.add(item.path)
@@ -495,7 +504,12 @@ class PlanUpdate:
                 change("retried", current, record, name)
             else:
                 unchanged[name] += 1
-        for path in sorted(set(recorded) - seen):
+        gone = set(recorded) - seen
+        if scope is not None:
+            for path in set(recorded) - scope.paths:
+                unchanged[root_of[path]] += 1
+            gone &= scope.paths
+        for path in sorted(gone):
             change("removed", recorded[path].source, recorded[path], root_of[path])
         paired = frozenset(
             move.removed
@@ -521,6 +535,13 @@ class PlanUpdate:
             source_roots=root_of,
             paired=paired,
         )
+
+    def _items(self, scope: UpdateScope | None) -> Iterable[ScannedFile]:
+        if scope is None:
+            return self.corpus.scan()
+        if isinstance(self.corpus, PathScanner):
+            return self.corpus.scan_paths(scope.paths)
+        return [item for item in self.corpus.scan() if item.path in scope.paths]
 
     def _index_model(self) -> str | None:
         if self.embedding_model is not None:

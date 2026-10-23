@@ -23,6 +23,15 @@ GUARD_SMALL_ROOT = 20
 
 
 @dataclass(frozen=True, slots=True)
+class UpdateScope:
+    """The stored paths an update is limited to (ADR-0029): only these are
+    compared with the corpus and changed; every other recorded source counts
+    as unchanged and no other file is added."""
+
+    paths: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class Move:
     """A removed source and an added file with the same content and size.
 

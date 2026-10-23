@@ -27,7 +27,7 @@ from docgrep.domain.roots import CorpusRoots
 _LOG = logging.getLogger(__name__)
 
 # The kinds of run recorded in the runs table.
-RUN_KINDS = ("build", "update", "ocr", "reencode_sparse")
+RUN_KINDS = ("build", "update", "sync", "ocr", "reencode_sparse")
 
 # Columns added to the runs table after the first schema; added when missing.
 _RUN_COLUMNS = (

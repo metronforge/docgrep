@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
 
 from docgrep.domain.context import OutlineEntry
 from docgrep.domain.evaluation import ChannelLists
@@ -144,6 +144,20 @@ class CorpusReader(Protocol):
     def describe(self, path: str) -> Source:
         """The source record of one corpus file, with its content hash, exactly
         as ``CorpusEnumerator.enumerate`` would give it."""
+        ...
+
+
+@runtime_checkable
+class PathScanner(Protocol):
+    """A corpus reader that can also stat chosen files without walking the
+    roots, so that a scoped update neither reads nor depends on the rest."""
+
+    def scan_paths(self, paths: Collection[str]) -> tuple[ScannedFile, ...]:
+        """The files among the stored ``paths`` that exist, from directory
+        entries alone, as ``CorpusReader.scan`` reports them (excluded files
+        carry their pattern). A path that is gone is left out. Raises
+        ``ValidationError`` when the root of a path cannot be read, so that a
+        missing root is never taken for deleted files."""
         ...
 
 
