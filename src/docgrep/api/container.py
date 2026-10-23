@@ -39,6 +39,7 @@ from docgrep.adapters.parsers.pdf import PdfParser
 from docgrep.adapters.parsers.text import TextParser
 from docgrep.adapters.qdrant import QdrantPassageStore
 from docgrep.adapters.scans import FileScanProbe
+from docgrep.adapters.syncstate import FileSyncState
 from docgrep.api.log_config import configure_logging
 from docgrep.api.roots import corpus_roots
 from docgrep.domain.context import ContextResult, OutlineEntry
@@ -83,6 +84,7 @@ from docgrep.usecases.inspect_status import InspectStatus
 from docgrep.usecases.plan_update import PlanUpdate
 from docgrep.usecases.process_scans import ProcessScans
 from docgrep.usecases.reencode_sparse import ReencodeSparse
+from docgrep.usecases.sync_index import SyncIndex, UpdateApplier
 from docgrep.usecases.update_index import UpdateIndex, UpdatePlan, UpdateSummary
 
 _LOG = logging.getLogger(__name__)
@@ -156,6 +158,8 @@ class Services:
     update: UpdateOperation | None = None
     browse: BrowseOperation | None = None
     context: ContextOperation | None = None
+    # Automatic sync (ADR-0029), only with DOCGREP_SYNC=true.
+    sync: SyncIndex | None = None
 
 
 class _CorpusEnumerator:
@@ -186,6 +190,30 @@ class _CorpusEnumerator:
         return scan_paths(
             self._roots,
             paths,
+            self._settings.include_globs,
+            self._settings.exclude_globs,
+            self._settings.data_dir,
+        )
+
+    def describe(self, path: str) -> Source:
+        return describe_source(self._roots, path)
+
+
+class _SyncCorpus:
+    """The roots of this process one at a time, for automatic sync: a root
+    that is gone must pause itself without stopping the others."""
+
+    def __init__(self, settings: Settings, roots: CorpusRoots) -> None:
+        self._settings = settings
+        self._roots = roots
+
+    def root_readable(self, name: str) -> bool:
+        root = self._roots.get(name)
+        return root is not None and root_readable(root.path)
+
+    def scan_root(self, name: str) -> tuple[ScannedFile, ...]:
+        return scan_corpus(
+            self._roots.only({name}),
             self._settings.include_globs,
             self._settings.exclude_globs,
             self._settings.data_dir,
@@ -829,6 +857,48 @@ def create_container(
         "corpus_root": _log_root_name(settings, roots),
         "backend": settings.backend,
     }
+    update = UpdateIndex(
+        lock=lock,
+        corpus=corpus,
+        parsers=parsers,
+        chunker=chunker,
+        embedder=embedder,
+        sparse_encoder=sparse,
+        index=store,
+        manifest=manifest,
+        config=config,
+        upsert_batch_size=settings.upsert_batch_size,
+        log_context=log_context,
+        delegations=delegations,
+        roots=catalog,
+        availability=corpus,
+        sparse_encoders=encoders,
+        guard=settings.removal_guard,
+        ocr_outputs=delegations,
+        reuse_by_hash=settings.reuse_by_hash,
+    )
+    sync = None
+    if settings.sync:
+        sync = SyncIndex(
+            corpus=_SyncCorpus(settings, roots),
+            roots=catalog,
+            manifest=manifest,
+            updates=UpdateApplier(update),
+            planner=lambda view: PlanUpdate(
+                corpus=view,
+                manifest=manifest,
+                parsers=parsers,
+                delegations=delegations,
+                guard=settings.removal_guard,
+                ocr_outputs=delegations,
+                reuse_by_hash=settings.reuse_by_hash,
+                embedding_model=embedder.model_name,
+            ),
+            interval_seconds=settings.sync_interval_seconds,
+            settle_seconds=settings.sync_settle_seconds,
+            reconcile_hours=settings.sync_reconcile_hours,
+            on_change=FileSyncState(settings.data_dir).write,
+        )
     return Services(
         search=FindPassages(
             embedder=embedder,
@@ -869,26 +939,7 @@ def create_container(
             ocr_outputs=delegations,
             reuse_by_hash=settings.reuse_by_hash,
         ),
-        update=UpdateIndex(
-            lock=lock,
-            corpus=corpus,
-            parsers=parsers,
-            chunker=chunker,
-            embedder=embedder,
-            sparse_encoder=sparse,
-            index=store,
-            manifest=manifest,
-            config=config,
-            upsert_batch_size=settings.upsert_batch_size,
-            log_context=log_context,
-            delegations=delegations,
-            roots=catalog,
-            availability=corpus,
-            sparse_encoders=encoders,
-            guard=settings.removal_guard,
-            ocr_outputs=delegations,
-            reuse_by_hash=settings.reuse_by_hash,
-        ),
+        update=update,
         # The search store is shared, so a local store is never opened twice.
         browse=BrowseSources(
             manifest=manifest, store=store, ocr=delegations, roots=catalog
@@ -896,4 +947,5 @@ def create_container(
         context=_expand_context(
             settings, store=store, manifest=manifest, ocr=delegations
         ),
+        sync=sync,
     )

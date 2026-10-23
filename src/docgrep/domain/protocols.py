@@ -25,6 +25,7 @@ from docgrep.domain.models import (
 from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.scans import PageSample
 from docgrep.domain.sparse import SparseWeighting
+from docgrep.domain.sync import SyncStatus
 
 
 class DocumentParser(Protocol):
@@ -178,6 +179,12 @@ class SyncCorpus(Protocol):
     def describe(self, path: str) -> Source:
         """The source record of one file, as ``CorpusReader.describe``."""
         ...
+
+
+class SyncStateReader(Protocol):
+    """The status of automatic sync as the server running it last wrote it."""
+
+    def read(self) -> SyncStatus | None: ...
 
 
 class FolderReader(Protocol):

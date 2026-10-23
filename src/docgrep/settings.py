@@ -14,6 +14,11 @@ from docgrep.domain.search_effort import (
     default_rerank_pool,
 )
 from docgrep.domain.sources import MAX_PAGE_SIZE
+from docgrep.domain.sync import (
+    DEFAULT_SYNC_INTERVAL_SECONDS,
+    DEFAULT_SYNC_RECONCILE_HOURS,
+    DEFAULT_SYNC_SETTLE_SECONDS,
+)
 from docgrep.domain.update_plan import (
     DEFAULT_GUARD_COUNT,
     DEFAULT_GUARD_RATIO,
@@ -115,6 +120,15 @@ class Settings(BaseSettings):
     # A file whose content is already indexed under another path is indexed
     # by copying the stored passages and vectors (ADR-0028).
     reuse_by_hash: bool = True
+
+    # Automatic sync inside `docgrep serve` (ADR-0029): scan the roots every
+    # interval, apply a change once its size and time were the same in two
+    # scans and it is older than the settle time, and compare whole roots
+    # with the index at start-up and every reconcile_hours.
+    sync: bool = False
+    sync_interval_seconds: float = Field(default=DEFAULT_SYNC_INTERVAL_SECONDS, gt=0)
+    sync_settle_seconds: float = Field(default=DEFAULT_SYNC_SETTLE_SECONDS, ge=0)
+    sync_reconcile_hours: float = Field(default=DEFAULT_SYNC_RECONCILE_HOURS, gt=0)
 
     # The roots this process uses, once chosen (the roots file, the
     # deprecated corpus_root or --root parameters); never read from the
