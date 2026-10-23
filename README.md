@@ -57,6 +57,8 @@ uv run docgrep update --plan   # what would change; writes nothing
 uv run docgrep update          # after adding, changing, moving or removing files
 ```
 
+To have `docgrep serve` do this for you while it runs, set `DOCGREP_SYNC=true` (see [Automatic sync](#automatic-sync)).
+
 ### 5. Use it from other tools
 
 ```sh
@@ -258,6 +260,8 @@ Failed sources:
 ```
 
 A file that was moved, renamed or copied, or a backup folder added as a root, is indexed by copying the passages already stored for its content, without parsing or embedding (see [Moved, renamed and copied files](#moved-renamed-and-copied-files)).
+
+While `docgrep serve` runs, [Automatic sync](#automatic-sync) can apply these changes by itself.
 
 See [Dry run](#dry-run), [Updating the index](#updating-the-index), [Seeing the plan first](#seeing-the-plan-first), [Comparing a folder with the index](#comparing-a-folder-with-the-index), [Status](#status) and [Cancelling a build](#cancelling-a-build) for the details.
 
@@ -467,7 +471,7 @@ Removal guard: root books would lose 2 of 32 sources (at most 1 allowed); `docgr
 
 The groups are those of `update`: `added`, `modified` (with its reasons), `removed`, `retried`, `refreshed` (same content, new size or time: only the recorded values are updated, nothing is parsed or embedded; such a source also counts as `unchanged`), `unchanged` and the roots outside the run, and `moved` and `copied` (see [Moved, renamed and copied files](#moved-renamed-and-copied-files)). A move is listed under the root of its removed source, a copy under the root of the copy, each as `old -> new`; `copied` is printed only when there is one. Without `--paths` only the counts are printed; `unchanged` sources are never listed.
 
-`--json` prints one object with the keys `note`; `roots`, a list with one object per root of the run with `root`, `recorded` (the sources the index records for it), `guard_threshold`, `guarded`, the counts `added`, `modified`, `removed`, `retried`, `refreshed`, `unchanged`, `moved` and `copied`, `modified_by_reason` (`content_changed`, `parser_changed`, `newly_supported`, `delegated_to_ocr`, `delegation_ended`) and `paths` (`null` without `--paths`; otherwise `added`, `modified` as `path` and `reason`, `removed`, `retried`, `refreshed`, `moved` as `removed` and `added`, and `copied` as `original` and `copy`); `total`, the counts of the whole run; `outside_run`, a list of `root` and `sources`; and `guarded_roots`, a list of `root`, `removals`, `recorded`, `threshold` and `reason` (`empties_root` when every recorded source of the root would be removed, otherwise `threshold`).
+`--json` prints one object with the keys `note`; `roots`, a list with one object per root of the run with `root`, `recorded` (the sources the index records for it), `guard_threshold`, `guarded`, `unpaired_removals` and `paired_removals` (see [The removal guard](#the-removal-guard)), the counts `added`, `modified`, `removed`, `retried`, `refreshed`, `unchanged`, `moved` and `copied`, `modified_by_reason` (`content_changed`, `parser_changed`, `newly_supported`, `delegated_to_ocr`, `delegation_ended`) and `paths` (`null` without `--paths`; otherwise `added`, `modified` as `path` and `reason`, `removed`, `retried`, `refreshed`, `moved` as `removed` and `added`, and `copied` as `original` and `copy`); `total`, the counts of the whole run; `outside_run`, a list of `root` and `sources`; and `guarded_roots`, a list of `root`, `removals` (the unpaired ones), `recorded`, `threshold` and `reason` (`empties_root` when every recorded source of the root would be removed, otherwise `threshold`), and `paired` when some removals of the root are paired with an added file.
 
 ### Moved, renamed and copied files
 
@@ -478,7 +482,7 @@ A source is identified by its stored path, so a file that is moved, renamed or c
 - **Not reused**: the stored source must be indexed, with the same content hash, size and file type, the parser version the file would be parsed with now and the embedding model of the index. An original delegated to its OCR output, or an OCR output, is never reused (see [OCR](#ocr)). A failed source that is retried goes through the normal pipeline. Any of these is processed as an addition or a modification.
 - **A full build** reuses only within its own run: of two files with the same content, the first is indexed and the next ones are copies of it (the build summary says `N indexed (M copied from a file with the same content)`). It never reuses the index it replaces.
 
-A move counts against the [removal guard](#the-removal-guard) like any removal of its root.
+A move loses no content, so it does not count against the [removal guard](#the-removal-guard) of its old root.
 
 If a copy fails in the store, what was written of the new source is deleted, it is recorded as `failed:store_error` and the old source of a move stays; the next update retries it. A move whose copy is stored but whose old source could not be removed (or whose process stopped in between) leaves both indexed, and the next update removes the old one, whose file is gone.
 
@@ -490,13 +494,13 @@ Passage ids follow the path (ADR-0023), so the passages of a moved or renamed fi
 
 ### The removal guard
 
-Before applying anything, `docgrep update` checks the planned removals of each root of the run, sources that moved or that the include and exclude patterns no longer match included. When they exceed `min(DOCGREP_UPDATE_GUARD_RATIO × the sources the index records for the root, DOCGREP_UPDATE_GUARD_COUNT)` (defaults `0.05` and `50`; a root with fewer than 20 recorded sources is checked against the count alone), or when they would remove every source the index records for a root, whatever its size and the thresholds (an existing but empty folder, such as a mount point without its disk, can still be read), the update writes nothing at all, not even refreshed times, prints the plan, names the roots and exits with 1:
+Before applying anything, `docgrep update` checks the planned removals of each root of the run, the sources that the include and exclude patterns no longer match included. **Only removals that lose content count.** A removed source that pairs with an added file of the same content hash and size (the one-to-one pairing of [Moved, renamed and copied files](#moved-renamed-and-copied-files)) is a move: it is not counted against its old root, whether or not its passages are reused (`DOCGREP_REUSE_BY_HASH=false` changes nothing here). The unpaired removals are compared with `min(DOCGREP_UPDATE_GUARD_RATIO × the sources the index records for the root, DOCGREP_UPDATE_GUARD_COUNT)` (defaults `0.05` and `50`; a root with fewer than 20 recorded sources is checked against the count alone), or, when they would remove every source the index records for a root, whatever its size and the thresholds (an existing but empty folder, such as a mount point without its disk, can still be read), the update writes nothing at all, not even refreshed times, prints the plan, names the roots and exits with 1. A root whose sources all moved to another folder or root is therefore not emptied, while the same number of deletions without new copies is.
 
 ```text
 removal_guard: Update stopped before any change: root 'books' would lose 2 of 32 sources (at most 1 allowed). Check that the root folder is mounted, complete and the right one; run `docgrep update --yes` to apply the removals anyway
 ```
 
-A root that would be emptied is reported as `root 'notes' would lose all its 2 sources`, in the error and in `docgrep update --plan`.
+A root that would be emptied is reported as `root 'notes' would lose all its 2 sources`, in the error and in `docgrep update --plan`. When some removals of a guarded root are paired, the message adds `(not counted: N paired with an added file)` and `docgrep update --plan` shows the two counts apart (`Removals: 2 unpaired (counted by the removal guard), 1 paired with an added file (not counted).`); the JSON of the plan has `unpaired_removals` and `paired_removals` for each root.
 
 An unmounted disk, a sync client that briefly emptied a folder or a root saved with the wrong path would otherwise remove a large part of the index, and rebuilding it takes hours. Check the folder, or `docgrep update --plan --paths`, then run:
 
@@ -504,7 +508,7 @@ An unmounted disk, a sync client that briefly emptied a folder or a root saved w
 uv run docgrep update --yes   # apply the plan even when the guard would stop it
 ```
 
-`DOCGREP_UPDATE_GUARD_RATIO` takes a number from 0 to 1 and `DOCGREP_UPDATE_GUARD_COUNT` a non-negative integer; `0` for the count makes every removal need `--yes`. `docgrep forget-root` is not guarded: it has its own `--yes`.
+`DOCGREP_UPDATE_GUARD_RATIO` takes a number from 0 to 1 and `DOCGREP_UPDATE_GUARD_COUNT` a non-negative integer; `0` for the count makes every removal need `--yes`. `docgrep forget-root` is not guarded: it has its own `--yes`. [Automatic sync](#automatic-sync) applies the same rule to every cycle and holds the removals of a guarded root instead of stopping.
 
 ### Comparing a folder with the index
 
@@ -531,7 +535,44 @@ Folder /backup/library against root books, compared by size and modification tim
 
 `--paths` lists the paths of every group but `same`. `--json` prints one object with `folder`, `root`, `compared_by` (`stat` or `hash`), `hashed`, the counts `same`, `different`, `only_in_index` and `only_in_folder`, and `paths` (`null` without `--paths`; otherwise `different`, `only_in_index` and `only_in_folder`). A file whose content changed while its size and time stayed the same is found only with `--hash`.
 
-The design of the plan, the guard and `diff` is recorded in [ADR-0027](docs/adr/0027-update-plan-removal-guard-and-diff.md).
+The design of the plan, the guard and `diff` is recorded in [ADR-0027](docs/adr/0027-update-plan-removal-guard-and-diff.md); that moves do not count against the guard is recorded in [ADR-0029](docs/adr/0029-automatic-sync-inside-serve.md).
+
+### Automatic sync
+
+`docgrep serve` can keep the index following the configured roots, without a manual `docgrep update`: added, changed, removed, moved and renamed files are applied within minutes, safely enough to run unattended. It is off by default.
+
+```sh
+# in ~/docgrep.env (the file you source before running docgrep)
+export DOCGREP_SYNC=true
+```
+
+Restart `docgrep serve` and watch `docgrep status` (the `Sync:` lines, or the `sync` section of `docgrep status --json`). Sync lives only in the server: there is no `docgrep sync` command, and neither HTTP nor MCP can enable, trigger or configure it. It uses the same models as search, loaded once, and the server answers while they load. It reads the corpus roots when the server starts, so restart it after `docgrep roots add`. In local mode it takes turns with searches on the single store; a Qdrant server (`DOCGREP_QDRANT_URL`) avoids that wait. A manual `docgrep update` still works when the store allows a second process (a Qdrant server); local mode needs the server stopped, as before.
+
+Settings:
+
+- `DOCGREP_SYNC`: run sync in `docgrep serve` (default `false`).
+- `DOCGREP_SYNC_INTERVAL_SECONDS`: the time between scans (default `120`).
+- `DOCGREP_SYNC_SETTLE_SECONDS`: a file must be at least this old (default `60`).
+- `DOCGREP_SYNC_RECONCILE_HOURS`: how often whole roots are compared with the index again (default `24`).
+
+**What it does.** Every interval it scans the roots from directory entries alone, with the same patterns as an update (stat first; a file is hashed only when its size or time changed). A change is applied when it has settled: an added or modified file when its size and modification time were identical in two consecutive scans and its modification time is older than the settle time (so a file that is still being copied or written waits), a removal when the file was absent in two consecutive scans of a readable root. Settled changes are applied by an update limited to those paths, recorded as a run of kind `sync` (`latest_run` in `docgrep status`), one source at a time with a short pause after each, so a search is not starved of the models. Moves and renames reuse the stored passages and embed nothing. When another operation holds the index lock the cycle ends and its changes wait for the next one. A file that never settles is logged after 30 minutes (`sync_unsettled`, counts only) and keeps being watched. Names that sync never adds, changes or removes, on top of the include and exclude patterns: `*.part`, `*.crdownload`, `*.tmp`, `~$*`, `.~lock.*#`, `.#*`, `*.swp`, and the folders `.obsidian/`, `.git/` and `.trash/`.
+
+**Start-up and the daily check.** When it starts, and every `DOCGREP_SYNC_RECONCILE_HOURS`, sync compares each readable root with the index as `docgrep update --plan` does, which also finds sources to retry, parsers that changed and OCR delegations. What it finds is applied at once, except removals, which still need the second scan. A change made while the server was stopped is therefore caught within one interval of the start.
+
+**What it never does, and when it holds back.**
+
+- A root that is missing, unmounted or unreadable is **paused**: nothing in it is scanned, added or removed. When it is readable again it is compared with the index in full on the next cycle.
+- Removals that trip the [removal guard](#the-removal-guard) of their root in a cycle are **held**: additions and changes still apply, the removals stay in the index and in `docgrep status` (`held_removals`, with a few stored paths in `docgrep status` only). Once a root has held removals, its new removals join them. Only a manual `docgrep update --yes` applies them; they are dropped if the files reappear. Moves pass the guard, as in an update.
+- A file that failed is retried only when its size or modification time changes, at the daily comparison and at start-up.
+- A **newly configured root** is not synced until its first manual `docgrep update` has completed; it is listed under `awaiting_first_update`.
+- When the configuration differs from the index in a setting that decides vectors or chunking, a build or a re-encode is unfinished, or no index exists, sync stays idle and says why (`idle_reason`).
+- **OCR** is never started by sync. The `*.ocr.pdf` files that `docgrep ocr` writes are picked up as added files.
+
+**Reading its status.** `docgrep status` shows, when sync is enabled, a `Sync:` line with the interval, the settle time and the last scan, then the last applied run, the pending changes (seen but not applied), how many are still settling, the held removals per root, the paused roots, the roots awaiting a first update, what it is applying right now and why it is idle. The JSON keys are listed under [Status](#status). `docgrep status` is another process, so it reads the file that the server rewrites after every cycle (`sync-status.json` in the data directory) and says `enabled, but no server is running it` when that server is gone. `GET /info` and the MCP `get_index_status` give the same section from the live state of the server, with counts and root names only and never a path.
+
+Each cycle logs one `sync_cycle` record with counts only (roots scanned, pending, held removals, what was applied and how long it took), never a path; an applied run logs like an update (`index_update_started`, `index_update_finished`). Held removals log `sync_removals_held`.
+
+The design is recorded in [ADR-0029](docs/adr/0029-automatic-sync-inside-serve.md).
 
 ### Cancelling a build
 
@@ -948,7 +989,7 @@ curl -X POST http://127.0.0.1:8000/search \
 
 The body of `POST /search` takes `query`, an optional `top_n`, an optional `collapse_duplicates` (see [Duplicate passages](#duplicate-passages)) and the optional filter fields (see [Filtered search](#filtered-search)); unknown fields are rejected.
 
-`POST /sources/browse` lists the indexed sources (see [Browse sources](#browse-sources)). `POST /passages/context` returns passages with the text around them (see [Passage context](#passage-context)). `POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information: `GET /info` returns `version`, `backend` and `roots`, the configured [corpus roots](#corpus-roots) in order, each with `name`, `path` (absolute), `legacy` and `readable` (the folder exists and can be listed; nothing is walked). It does not read the index, so it gives no source counts (see `docgrep status`), and lists no root found only in the index. No endpoint adds or changes roots, and `POST /index/build` and `POST /scans/process` take no folder: they use the saved roots, and OCR `paths` must lie inside one of them.
+`POST /sources/browse` lists the indexed sources (see [Browse sources](#browse-sources)). `POST /passages/context` returns passages with the text around them (see [Passage context](#passage-context)). `POST /index/build` triggers the same full rebuild as `docgrep index`. `POST /scans/discover` runs the read-only scan discovery with an optional JSON body `{"path_glob": ..., "file_types": [...]}` and returns the same report as `docgrep discover-scans --json` (see [Scan discovery](#scan-discovery)). `POST /scans/process` runs an OCR batch synchronously, like `POST /index/build`, with a JSON body of `paths` (a list), `path_glob` or `all_discovered: true`, plus optional `languages` and `force`, and returns the same report as `docgrep ocr --json` (see [OCR](#ocr)); `docgrep cancel` stops it, missing OCR tools give 503 with category `ocr_tools_missing` and a held lock gives 409. `POST /scans/discover` also accepts `include_already_processed`. `GET /health` and `GET /info` provide basic service information: `GET /info` returns `version`, `backend`, `rerank_pool`, `dense_hnsw_ef`, `sync` (the live section of [Automatic sync](#automatic-sync), without paths) and `roots`, the configured [corpus roots](#corpus-roots) in order, each with `name`, `path` (absolute), `legacy` and `readable` (the folder exists and can be listed; nothing is walked). It does not read the index, so it gives no source counts (see `docgrep status`), and lists no root found only in the index. No endpoint adds or changes roots, and `POST /index/build` and `POST /scans/process` take no folder: they use the saved roots, and OCR `paths` must lie inside one of them.
 
 When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank and `score` is derived from the dense similarity. It is not comparable with reranked scores and need not be monotonic with the returned order.
 
@@ -957,7 +998,7 @@ When `rerank_skipped` is true, results are ordered by their stage-1 hybrid rank 
 docgrep offers its search to MCP clients, such as Claude Code, as read-only tools over the same use cases as the command line and the HTTP API. Results are verbatim passages from your own documents, never summaries; clients are told to cite the path, the heading path and, when the passage has one, the page. Passage text is data from your documents, not instructions for the client. The design is recorded in [ADR-0019](docs/adr/0019-mcp-server-as-api-front-end.md).
 
 - `find_passages`: ranked verbatim passages for `query`, with an optional `top_n` (default 10, at most `DOCGREP_MCP_MAX_TOP_N`), `collapse_duplicates` and the filters of [Filtered search](#filtered-search), `roots` included; the structured result is the body of `POST /search`, and DOCX and EPUB passages have a null page number. Filters that match nothing give an empty result, not an error.
-- `get_index_status`: the report of `docgrep status --json`, including the failed sources and their errors and the `roots` (names, flags and counts; never a path).
+- `get_index_status`: the report of `docgrep status --json`, including the failed sources and their errors, the `roots` (names, flags and counts; never a path) and the `sync` section (counts and root names; never a path).
 - `browse_sources`: one page of indexed sources with their metadata and passage counts, filtered and sorted as described in [Browse sources](#browse-sources) (`page_size` default 50, at most `DOCGREP_MCP_MAX_PAGE_SIZE`); the structured result is the body of `POST /sources/browse`. A page too large for one tool result keeps its first sources and says so in `hint`.
 - `expand_passage_context`: the passages with the given `passage_ids` (at most `DOCGREP_MCP_MAX_CONTEXT_PASSAGES`) and the text around them, as described in [Passage context](#passage-context); the structured result is the body of `POST /passages/context`. A result too large for one tool result keeps its first entries and says so in `hint`.
 
