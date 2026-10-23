@@ -52,6 +52,7 @@ from docgrep.domain.status import (
     StatusWarning,
     StoreView,
 )
+from docgrep.domain.sync import SyncStatus
 from docgrep.usecases.reencode_sparse import reencode_progress
 
 _LOG = logging.getLogger(__name__)
@@ -104,11 +105,14 @@ class InspectStatus:
         parser_versions: Mapping[FileType, str | None] | None = None,
         roots: RootCatalog | None = None,
         root_readable: Callable[[CorpusRoot], bool] | None = None,
+        sync: Callable[[], SyncStatus | None] | None = None,
     ) -> None:
         """``parser_versions`` maps each file type with a registered parser to
         the version it declares; without it the parser-version count is None.
         ``roots`` gives the configured roots, reported with their sources;
-        ``root_readable`` checks a root folder without walking it."""
+        ``root_readable`` checks a root folder without walking it. ``sync``
+        gives the state of automatic sync for the report (ADR-0029)."""
+        self.sync = sync
         self.roots = roots
         self.root_readable = root_readable
         self.lock = lock
@@ -284,6 +288,7 @@ class InspectStatus:
             sources,
             roots,
             sparse,
+            None if self.sync is None else self.sync(),
         )
 
     @staticmethod

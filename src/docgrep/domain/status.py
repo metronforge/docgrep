@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+from docgrep.domain.sync import SyncStatus
+
 IndexState = str  # one of INDEX_STATES
 
 
@@ -168,9 +170,15 @@ class StatusReport:
     roots: tuple[RootStatusView, ...] | None = None
     # None without a completed index (ADR-0025).
     sparse: SparseView | None = None
+    # Automatic sync (ADR-0029); None when the report was made without it.
+    sync: SyncStatus | None = None
 
-    def as_dict(self) -> dict[str, Any]:
-        """The JSON form; its key names are stable and documented in the README."""
+    def as_dict(self, *, sync_paths: bool = False) -> dict[str, Any]:
+        """The JSON form; its key names are stable and documented in the README.
+
+        ``sync_paths`` adds a few stored paths to each root with held
+        removals (``docgrep status`` only; never to a tool's client).
+        """
         run = self.latest_run
         active = self.active_operation
         collection = self.collection
@@ -228,6 +236,11 @@ class StatusReport:
             "sources": None if self.sources is None else _sources(self.sources),
             "sparse": None if self.sparse is None else _sparse(self.sparse),
             **({} if self.roots is None else {"roots": _roots(self.roots)}),
+            **(
+                {}
+                if self.sync is None
+                else {"sync": self.sync.to_dict(paths=sync_paths)}
+            ),
         }
 
 

@@ -54,6 +54,8 @@ def test_info_keeps_its_keys_and_lists_the_configured_roots(tmp_path: Path) -> N
     with _client(data) as client:
         body = client.get("/info").json()
 
+    # The sync section is checked in test_sync_status.py.
+    assert body.pop("sync")["enabled"] is False
     assert body == {
         "version": __version__,
         "backend": "fake",
@@ -108,6 +110,7 @@ def test_the_openapi_schema_describes_info_and_the_filter(tmp_path: Path) -> Non
         "roots",
         "rerank_pool",
         "dense_hnsw_ef",
+        "sync",
     }
     assert set(components["InfoRootResponse"]["properties"]) == {
         "name",
