@@ -859,6 +859,11 @@ def _scrub_report(report: dict[str, Any], paths: tuple[Path, ...]) -> dict[str, 
     store = report["vector_store"]
     if store["reason"] is not None:
         store["reason"] = scrub_tool_output(store["reason"], paths)
+    sync = report.get("sync")
+    if sync is not None:
+        for key in ("idle_reason", "last_error"):
+            if sync[key] is not None:
+                sync[key] = scrub_tool_output(sync[key], paths)
     return report
 
 

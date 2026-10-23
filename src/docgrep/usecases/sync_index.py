@@ -270,7 +270,17 @@ class SyncIndex:
         started = self.clock()
         with self._guard:
             self._state.last_scan_at = self.now().isoformat()
-        result = self._cycle()
+        try:
+            result = self._cycle()
+        except Exception as error:
+            category = (
+                error.category if isinstance(error, DocgrepError) else "unexpected"
+            )
+            _LOG.exception("sync_cycle_failed", extra={"category": category})
+            with self._guard:
+                self._state.applying = None
+                self._state.last_error = category
+            result = CycleResult(skipped="cycle_failed")
         _LOG.info(
             "sync_cycle",
             extra={
@@ -516,7 +526,8 @@ class SyncIndex:
             _LOG.warning("sync_apply_failed", extra={"category": category})
             with self._guard:
                 state.applying = None
-                state.last_error = f"{category}: {error}"
+                # The category only: a message may carry a path.
+                state.last_error = category
             return CycleResult(
                 scanned_roots=len(scanned),
                 skipped="apply_failed",
@@ -538,6 +549,12 @@ class SyncIndex:
     ) -> None:
         state = self._state
         held = set(summary.held_removals)
+        if summary.cancelled:
+            # Which paths were reached is not known here; the processed ones
+            # stop differing from the index at the next scan and the rest stay
+            # pending, so nothing is lost and nothing is taken for tried.
+            self._finish_applied(summary, roots, held)
+            return
         for path in scope.paths:
             entry = state.pending.pop(path, None)
             if entry is not None:
@@ -547,6 +564,12 @@ class SyncIndex:
         touched = {roots.root_of(path) for path in scope.paths}
         for root in touched:
             state.held.pop(root, None)
+        self._finish_applied(summary, roots, held)
+
+    def _finish_applied(
+        self, summary: UpdateSummary, roots: CorpusRoots, held: set[str]
+    ) -> None:
+        state = self._state
         for path in held:
             state.held.setdefault(roots.root_of(path), set()).add(path)
         state.applying = None
