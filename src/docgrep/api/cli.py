@@ -51,6 +51,7 @@ from docgrep.api.http import (
     format_filters,
     root_status_lines,
     run_search,
+    sync_status_lines,
     validation_problems,
 )
 from docgrep.api.log_config import configure_logging
@@ -1151,6 +1152,7 @@ def _format_status(report: dict[str, Any]) -> str:
             )
     lines.extend(_sparse_status_lines(report.get("sparse")))
     lines.extend(root_status_lines(report.get("roots")))
+    lines.extend(sync_status_lines(report.get("sync")))
     for entry in report["drift"]:
         lines.append(
             f"Drift: {entry['field']} is {entry['indexed']} in the index and "
@@ -2288,7 +2290,7 @@ def main(
             return _ocr(args, ocr_factory(settings), register_signal, selection)
 
         if args.command == "status":
-            status_report = status_factory(settings).run().as_dict()
+            status_report = status_factory(settings).run().as_dict(sync_paths=True)
             if args.json:
                 _emit(json.dumps(status_report, indent=2) + "\n")
             else:

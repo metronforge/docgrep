@@ -51,6 +51,7 @@ from docgrep.api.http import (
     format_filters,
     root_status_lines,
     run_search,
+    sync_status_lines,
     validation_problems,
 )
 from docgrep.api.roots import corpus_roots
@@ -202,6 +203,8 @@ class IndexStatusBody(BaseModel):
     # The corpus roots by name with their flags and source counts; never a
     # path.
     roots: list[dict[str, Any]] | None = None
+    # Automatic sync (ADR-0029): counts and names only, never a path.
+    sync: dict[str, Any] | None = None
 
 
 # The declared output schemas accept a success body or an error body: the SDK
@@ -321,6 +324,7 @@ def render_status(report: Mapping[str, Any]) -> str:
                 f"  failed: {failed['path']}: {failed['category']}: {failed['reason']}"
             )
     lines.extend(root_status_lines(report.get("roots")))
+    lines.extend(sync_status_lines(report.get("sync")))
     for warning in report["warnings"]:
         lines.append(f"Warning ({warning['code']}): {warning['message']}")
     return "\n".join(lines) + "\n"

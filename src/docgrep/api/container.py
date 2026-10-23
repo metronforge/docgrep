@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -70,6 +70,7 @@ from docgrep.domain.roots import CorpusRoots
 from docgrep.domain.run_state import latest_root_prefixes
 from docgrep.domain.search_effort import DenseSearchEffort, default_rerank_pool
 from docgrep.domain.sources import BrowseRequest, BrowseResult, SourceFilter
+from docgrep.domain.sync import SyncStatus
 from docgrep.settings import Settings
 from docgrep.usecases.browse_sources import BrowseSources
 from docgrep.usecases.build_index import BuildIndex, BuildSummary
@@ -404,8 +405,28 @@ def _vector_config(settings: Settings) -> dict[str, str | int | float]:
     }
 
 
-def create_status(settings: Settings) -> InspectStatus:
+def stored_sync_status(settings: Settings) -> SyncStatus:
+    """The state of automatic sync as the server of this data directory last
+    wrote it, for a process that is not that server; with no such server
+    running, what the settings say and the last state it left."""
+    stored = FileSyncState(settings.data_dir).read()
+    if stored is not None and stored.running:
+        return stored
+    base = stored or SyncStatus(
+        enabled=settings.sync,
+        interval_seconds=settings.sync_interval_seconds,
+        settle_seconds=settings.sync_settle_seconds,
+    )
+    return replace(base, enabled=settings.sync, running=False, applying=None)
+
+
+def create_status(
+    settings: Settings, *, sync: Callable[[], SyncStatus] | None = None
+) -> InspectStatus:
     """Wire the read-only status report.
+
+    ``sync`` gives the state of automatic sync; by default what the server
+    of the data directory wrote last (``stored_sync_status``).
 
     It loads no model, takes no lock and creates nothing: the manifest is
     opened without migrating it, a local store that does not exist is not
@@ -450,6 +471,7 @@ def create_status(settings: Settings) -> InspectStatus:
         },
         roots=_RootCatalog(settings),
         root_readable=lambda root: root_readable(root.path),
+        sync=sync or (lambda: stored_sync_status(settings)),
     )
 
 

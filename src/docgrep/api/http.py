@@ -4,6 +4,7 @@ import importlib.util
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from threading import Lock
 from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
@@ -33,6 +34,7 @@ from docgrep.api.container import (
     create_container,
     create_discover_scans,
     create_process_scans,
+    create_status,
     index_missing,
     open_ocr_registry_view,
     unindexed_context,
@@ -74,6 +76,7 @@ from docgrep.domain.sources import (
     distinct_texts,
     parse_file_types,
 )
+from docgrep.domain.sync import SyncStatus
 from docgrep.settings import Settings
 from docgrep.usecases.build_index import BuildSummary
 from docgrep.usecases.process_scans import OcrRequest
@@ -455,6 +458,59 @@ def root_status_lines(roots: Sequence[Mapping[str, Any]] | None) -> list[str]:
     return [format_root_status(root) for root in roots]
 
 
+def sync_status_lines(sync: Mapping[str, Any] | None) -> list[str]:
+    """The ``sync`` section of a status report as text; nothing when sync is
+    off. Stored paths are listed only when the section carries them."""
+    if not sync or not sync["enabled"]:
+        return []
+    state = "running" if sync["running"] else "enabled, but no server is running it"
+    lines = [
+        f"Sync: {state}, scanning every {sync['interval_seconds']:g} s, "
+        f"settling {sync['settle_seconds']:g} s"
+        + (f"; last scan {sync['last_scan_at']}" if sync["last_scan_at"] else "")
+    ]
+    applied = sync["last_applied"]
+    if applied is not None:
+        lines.append(
+            f"  Last applied: run {applied['run_id']} at {applied['finished_at']}: "
+            f"{applied['added']} added, {applied['modified']} modified, "
+            f"{applied['removed']} removed, {applied['moved']} moved, "
+            f"{applied['copied']} copied, {applied['failed']} failed"
+            + (" (cancelled)" if applied["cancelled"] else "")
+        )
+    pending = sync["pending"]
+    lines.append(
+        f"  Pending: {pending['added']} added, {pending['modified']} modified, "
+        f"{pending['removed']} removed; {sync['unsettled']} not yet settled"
+        + (
+            f", {sync['unsettled_over_limit']} for over 30 minutes"
+            if sync["unsettled_over_limit"]
+            else ""
+        )
+    )
+    if sync["applying"] is not None:
+        lines.append(
+            f"  Applying: {sync['applying']['done']} of {sync['applying']['total']}"
+        )
+    for held in sync["held_removals"]:
+        lines.append(
+            f"  Held removals in root {held['root']}: {held['count']} (the removal "
+            "guard; `docgrep update --yes` applies them)"
+        )
+        lines.extend(f"    {path}" for path in held.get("paths", ()))
+    if sync["paused_roots"]:
+        lines.append("  Paused roots: " + ", ".join(sync["paused_roots"]))
+    if sync["awaiting_first_update"]:
+        lines.append(
+            "  Awaiting a first update: " + ", ".join(sync["awaiting_first_update"])
+        )
+    if sync["idle_reason"]:
+        lines.append(f"  Idle: {sync['idle_reason']}")
+    if sync["last_error"]:
+        lines.append(f"  Last error: {sync['last_error']}")
+    return lines
+
+
 def format_root_status(root: Mapping[str, Any]) -> str:
     """One root of the status report on one line: name, flags and counts."""
     flags = ["legacy"] if root["legacy"] else []
@@ -742,11 +798,24 @@ class InfoResponse(BaseModel):
     # the search effort of the dense channel, hnsw_ef or "exact" (ADR-0026).
     rerank_pool: int
     dense_hnsw_ef: int | Literal["exact"]
+    # Automatic sync (ADR-0029): the same section as ``get_index_status``.
+    sync: dict[str, Any] = Field(default_factory=dict)
 
 
-def service_info(settings: Settings) -> InfoResponse:
+def _sync_off(settings: Settings) -> SyncStatus:
+    return SyncStatus(
+        enabled=settings.sync,
+        interval_seconds=settings.sync_interval_seconds,
+        settle_seconds=settings.sync_settle_seconds,
+    )
+
+
+def service_info(
+    settings: Settings, sync: Callable[[], SyncStatus] | None = None
+) -> InfoResponse:
     """What ``GET /info`` returns; the index is not read."""
     return InfoResponse(
+        sync=(sync or (lambda: _sync_off(settings)))().to_dict(),
         version=__version__,
         backend=settings.backend,
         rerank_pool=settings.effective_rerank_pool,
@@ -919,6 +988,16 @@ def create_app(
     initialization_lock = Lock()
     sync_task = SyncTask(lambda: operations(), effective.sync_interval_seconds)
 
+    def sync_status() -> SyncStatus:
+        """The live state of sync; the server answers while the container,
+        and with it sync, is still being created."""
+        if sync_task.sync is not None:
+            return sync_task.sync.status()
+        status = _sync_off(effective)
+        if effective.sync:
+            return replace(status, running=True, idle_reason="starting")
+        return status
+
     def operations() -> Services:
         nonlocal initialized
         if initialized is None:
@@ -934,7 +1013,11 @@ def create_app(
         # Imported here, at startup: the module imports this one.
         from docgrep.api.mcp import create_mcp_server
 
-        server = create_mcp_server(effective, services=operations)
+        server = create_mcp_server(
+            effective,
+            services=operations,
+            status=lambda: create_status(effective, sync=sync_status),
+        )
         mcp_app = server.streamable_http_app()
         async with server.session_manager.run():
             endpoint.app = mcp_app
@@ -996,7 +1079,7 @@ def create_app(
     def info() -> InfoResponse:
         """The version, the backend and the configured corpus roots with their
         absolute paths; the index is not read."""
-        return service_info(effective)
+        return service_info(effective, sync_status)
 
     @app.post("/search", response_model=SearchResponse)
     def search(request: SearchRequest) -> SearchResponse:
