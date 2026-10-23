@@ -2,6 +2,52 @@
 
 <!-- version list -->
 
+## v1.26.0 (2026-10-23)
+
+### Bug Fixes
+
+- **adapters**: Serialize the calls of a local-mode Qdrant store
+  ([`8203131`](https://github.com/metronforge/docgrep/commit/8203131e7714307b71c0947ff25532b11b096884))
+
+- **usecases**: Keep what a cancelled sync run did not reach
+  ([`0716c81`](https://github.com/metronforge/docgrep/commit/0716c81933350d1083e3178b9020ec9cfc8eb1bf))
+
+### Build System
+
+- **deps-dev**: Bump pytest from 8.4.2 to 9.0.3
+  ([`1fa45fb`](https://github.com/metronforge/docgrep/commit/1fa45fb2bf6727c7a02c6a3ca12310f0f7eaa339))
+
+### Documentation
+
+- Add a quick start to the README
+  ([`b042342`](https://github.com/metronforge/docgrep/commit/b04234262918142ff5fb726db4b11d6761c41e36))
+
+- Describe automatic sync
+  ([`363c80c`](https://github.com/metronforge/docgrep/commit/363c80ce857274ecb4e53d9b799da06c50ff4aa6))
+
+### Features
+
+- **api**: Report sync state in status, info and MCP
+  ([`464f81a`](https://github.com/metronforge/docgrep/commit/464f81a7434015382267cf18413dfc0b2f1f9255))
+
+- **api**: Sync the index inside docgrep serve
+  ([`f971509`](https://github.com/metronforge/docgrep/commit/f971509f3e5b3872d87a3a252a0fedbca1078ebf))
+
+- **domain**: Count only unpaired removals against the removal guard
+  ([`49e9861`](https://github.com/metronforge/docgrep/commit/49e9861955449821714b1f336192862be1369c59))
+
+- **usecases**: Detect settled corpus changes by periodic scan
+  ([`838bc8e`](https://github.com/metronforge/docgrep/commit/838bc8e677aa1cf6f0618a34f2c5c0d2afe47dee))
+
+- **usecases**: Scope an update to a set of paths
+  ([`160dfe4`](https://github.com/metronforge/docgrep/commit/160dfe46c9c005f07f6b6dc27d4a578333e4bb89))
+
+### Performance Improvements
+
+- **usecases**: Pause once per source in an applied sync run
+  ([`5780d76`](https://github.com/metronforge/docgrep/commit/5780d768a79561009bb61ab24434b42cf66aa9de))
+
+
 ## v1.25.0 (2026-10-18)
 
 ### Documentation
