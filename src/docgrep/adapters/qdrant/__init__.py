@@ -3,6 +3,7 @@
 import logging
 import math
 import re
+import threading
 import warnings
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -239,6 +240,38 @@ def _cosine(
     return dot / (stored_norm * query_norm)
 
 
+class _SerializedClient:
+    """A local-mode client whose calls run one at a time.
+
+    Local mode keeps its collections in arrays that nothing synchronizes: a
+    search that reads while an upsert grows them can fail with an index
+    error. A server process has several threads (searches, an update by
+    automatic sync), so every call of the client takes one lock. A server
+    client needs none.
+    """
+
+    def __init__(self, client: QdrantClient) -> None:
+        self._client = client
+        self._lock = threading.RLock()
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._client, name)
+        if not callable(attribute):
+            return attribute
+
+        @wraps(attribute)
+        def serialized(*args: Any, **kwargs: Any) -> Any:
+            with self._lock:
+                return attribute(*args, **kwargs)
+
+        return serialized
+
+
+def _local_client(path: Path) -> QdrantClient:
+    client: QdrantClient = _SerializedClient(QdrantClient(path=str(path)))  # type: ignore[assignment]  # same calls, one at a time
+    return client
+
+
 def _domain_errors[**P, T](operation: Callable[P, T]) -> Callable[P, T]:
     @wraps(operation)
     def guarded(*args: P.args, **kwargs: P.kwargs) -> T:
@@ -293,7 +326,7 @@ class QdrantPassageStore:
         elif path is not None:
             try:
                 path.mkdir(parents=True, exist_ok=True)
-                self._client = QdrantClient(path=str(path))
+                self._client = _local_client(path)
             except Exception as error:
                 raise StoreUnavailable(
                     "Cannot open Qdrant storage",
@@ -793,7 +826,7 @@ class QdrantPassageStore:
         """
         if self._local and self._path is not None:
             self._client.close()
-            self._client = QdrantClient(path=str(self._path))
+            self._client = _local_client(self._path)
 
     @_domain_errors
     def passage_text_page(
