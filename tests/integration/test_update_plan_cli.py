@@ -338,6 +338,54 @@ def test_the_guard_stops_removals_above_the_threshold(
     ]
 
 
+def test_moving_every_source_of_a_root_to_another_passes_the_guard(
+    indexed: tuple[Path, Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    books, notes, data = indexed
+    for path in sorted(notes.iterdir()):
+        target = books / "from-notes" / path.name
+        target.parent.mkdir(exist_ok=True)
+        path.rename(target)
+
+    code, out, _ = _cli(capsys, "update", "--plan", "--json")
+    body = json.loads(out)
+    root = next(r for r in body["roots"] if r["root"] == "notes")
+
+    assert code == 0 and body["guarded_roots"] == []
+    assert (root["unpaired_removals"], root["paired_removals"]) == (0, 2)
+
+    code, _, err = _cli(capsys, "update")
+
+    assert code == 0, err
+    manifest = SQLiteManifest(data, read_only=True)
+    assert manifest.get_source("notes/x.txt") is None
+    assert manifest.get_source("from-notes/x.txt") is not None
+
+
+def test_the_guard_message_separates_paired_and_unpaired_removals(
+    indexed: tuple[Path, Path, Path],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    books, _, _ = indexed
+    monkeypatch.setenv("DOCGREP_UPDATE_GUARD_COUNT", "1")
+    (books / "shelf" / "b.md").rename(books / "shelf" / "b2.md")
+    (books / "c.txt").unlink()
+    (books / "d.txt").unlink()
+
+    code, _, err = _cli(capsys, "update")
+
+    assert code == 1
+    assert (
+        "root 'books' would lose 2 of 8 sources (at most 1 allowed) "
+        "(not counted: 1 paired with an added file)" in err
+    )
+    code, out, _ = _cli(capsys, "update", "--plan", "--json")
+    assert json.loads(out)["guarded_roots"][0]["paired"] == 1
+    code, out, _ = _cli(capsys, "update", "--plan")
+    assert "Removals: 2 unpaired (counted by the removal guard), 1 paired" in out
+
+
 def test_removing_one_of_two_sources_is_applied(
     indexed: tuple[Path, Path, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:

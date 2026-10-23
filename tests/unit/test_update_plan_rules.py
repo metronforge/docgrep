@@ -153,3 +153,22 @@ def test_the_guard_settings_have_defaults_and_are_validated(
             patch.setenv(name, value)
             with pytest.raises(SettingsValidationError):
                 Settings()
+
+
+def test_paired_removals_are_reported_and_never_counted() -> None:
+    guard = RemovalGuard(ratio=0.05, count=3)
+
+    # Only the unpaired part is compared with the threshold.
+    assert guarded_roots({"r": 3}, {"r": 100}, guard, {"r": 40}) == ()
+    assert guarded_roots({"r": 4}, {"r": 100}, guard, {"r": 40}) == (
+        GuardedRoot("r", 4, 100, 3, "threshold", 40),
+    )
+
+
+def test_a_root_whose_sources_all_moved_is_not_emptied() -> None:
+    guard = RemovalGuard(ratio=1, count=10_000)
+
+    assert guarded_roots({"r": 0}, {"r": 5}, guard, {"r": 5}) == ()
+    assert guarded_roots({"r": 5}, {"r": 5}, guard, {"r": 0}) == (
+        GuardedRoot("r", 5, 5, 10_000, "empties_root"),
+    )

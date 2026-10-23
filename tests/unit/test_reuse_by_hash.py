@@ -582,14 +582,15 @@ def test_a_move_whose_old_source_stays_is_finished_by_the_next_update() -> None:
     assert harness.manifest.get_source("a.txt") is None
 
 
-def test_moves_count_against_the_removal_guard() -> None:
+def test_moves_do_not_count_against_the_removal_guard() -> None:
     harness = _library()
     _move_a(harness)
 
     detected = harness.planner().detect(retry_failed=True)
 
     assert detected.moves == (Move("a.txt", "shelf/a.txt"),)
-    assert detected.removals() == {"_legacy": 1}
+    assert detected.removals() == {"_legacy": 0}
+    assert detected.paired_removals() == {"_legacy": 1}
 
 
 def test_the_plan_takes_the_model_of_the_latest_build_by_default() -> None:
