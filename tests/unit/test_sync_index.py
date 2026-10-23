@@ -600,3 +600,58 @@ def test_paused_roots_keep_their_sources_and_are_reconciled_when_back() -> None:
     assert rig.sync.status().paused_roots == ()
     assert result.applied is not None and result.applied.modified == 1
     assert "notes/n0.txt" in rig.recorded()
+
+
+def test_a_cancelled_run_keeps_what_it_did_not_reach() -> None:
+    rig = Rig()
+    rig.start()
+    for index in range(3):
+        rig.files[f"new{index}.txt"] = rig.aged(f"new document number {index}")
+    rig.cycle()
+    parse = rig.harness.parser.parse
+
+    def parse_and_cancel(source: Source) -> Any:
+        rig.update.request_cancel()
+        return parse(source)
+
+    rig.harness.parser.parse = parse_and_cancel  # type: ignore[method-assign]  # test double
+
+    cancelled = rig.cycle()
+
+    assert cancelled.applied is not None and cancelled.applied.cancelled
+    done = {p for p in rig.recorded() if p.startswith("new")}
+    assert len(done) == 1
+    assert rig.sync.status().last_applied is not None
+    assert rig.sync.status().last_applied.cancelled  # type: ignore[union-attr]  # checked just above
+
+    rig.harness.parser.parse = parse  # type: ignore[method-assign]  # test double
+    again = rig.cycle()
+
+    # The two files it did not reach are applied; the first is not repeated.
+    assert again.applied is not None and again.applied.added == 2
+    assert {p for p in rig.recorded() if p.startswith("new")} == {
+        "new0.txt",
+        "new1.txt",
+        "new2.txt",
+    }
+
+
+def test_an_unexpected_failure_is_reported_by_category_and_the_next_cycle_runs() -> (
+    None
+):
+    rig = Rig()
+    rig.start()
+    real = rig.harness.manifest.committed_sources
+
+    def broken() -> Any:
+        raise RuntimeError("cannot read /srv/secret/path")
+
+    rig.harness.manifest.committed_sources = broken  # type: ignore[method-assign]  # test double
+
+    result = rig.cycle()
+
+    assert result.skipped == "cycle_failed"
+    assert rig.sync.status().last_error == "unexpected"
+
+    rig.harness.manifest.committed_sources = real  # type: ignore[method-assign]  # test double
+    assert rig.cycle().skipped is None

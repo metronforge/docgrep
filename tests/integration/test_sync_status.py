@@ -207,3 +207,19 @@ def test_idle_and_error_reasons_reach_the_status(held: Rig) -> None:
     body = held.sync.status().to_dict()
     assert body["idle_reason"].startswith("config_drift: ")
     assert held.sync.status().idle_reason == body["idle_reason"]
+
+
+def test_the_mcp_status_scrubs_paths_from_the_idle_reason(held: Rig) -> None:
+    assert held.services is not None
+    sync = held.sync
+    # Internal state, to place a path where a reason could carry one.
+    sync._state.idle_reason = f"validation_error: cannot use {held.books}/x"
+
+    body = _mcp_body(
+        held,
+        held.services,
+        status=lambda: create_status(held.settings(sync=True), sync=sync.status),
+    )
+
+    assert str(held.books) not in json.dumps(body["sync"])
+    assert body["sync"]["idle_reason"].startswith("validation_error: ")
