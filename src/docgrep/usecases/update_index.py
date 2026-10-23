@@ -300,6 +300,13 @@ class UpdateIndex(SourceIndexing):
         )
         return replace(detected, changes=kept), guarded, held
 
+    def check_ready(self) -> None:
+        """Raise what ``run`` would refuse before changing anything for a
+        reason other than the corpus: an unfinished build or re-encode, an
+        index that is not complete, or settings that drifted from it. Reads
+        only and takes no lock."""
+        self._check_preconditions()
+
     def forget_plan(self, name: str) -> tuple[ManifestSourceRecord, ...]:
         """The committed sources of a root, which ``forget_root`` removes.
 

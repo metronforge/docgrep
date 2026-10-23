@@ -288,8 +288,9 @@ class ManifestRunRecord:
 
     ``swapped`` means the new index is published but the committed sources have
     not been replaced from the run's journal yet. ``kind`` is ``build`` for a
-    full build or its resume, ``update`` for an incremental update, ``ocr``
-    for OCR processing and ``reencode_sparse`` for a re-encode of the sparse
+    full build or its resume, ``update`` for an incremental update, ``sync``
+    for an update that follows the corpus by itself (ADR-0029), ``ocr`` for
+    OCR processing and ``reencode_sparse`` for a re-encode of the sparse
     vectors.
     """
 
