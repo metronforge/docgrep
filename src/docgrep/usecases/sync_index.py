@@ -189,6 +189,9 @@ class SyncIndex:
         self._state = _State()
         self._guard = threading.Lock()
         self._stopping = threading.Event()
+        # How many sources of the run in progress were already followed by
+        # a pause.
+        self._yielded = 0
 
     # -- control ---------------------------------------------------------
 
@@ -576,12 +579,13 @@ class SyncIndex:
 
     def _on_progress(self, event: ProgressEvent) -> None:
         """Note how far an applied run has got, and give a waiting search the
-        models between two sources."""
+        models after each source."""
         with self._guard:
-            self._state.applying = (
-                None if event.finished else (event.done, event.total or 0)
-            )
-        if event.phase == "writing" and self.yield_seconds > 0:
+            state = self._state
+            state.applying = None if event.finished else (event.done, event.total or 0)
+            finished_source = event.done > self._yielded
+            self._yielded = 0 if event.finished else event.done
+        if finished_source and not event.finished and self.yield_seconds > 0:
             self.sleep(self.yield_seconds)
         if event.done == 0 and not event.finished and event.label is None:
             self.publish()

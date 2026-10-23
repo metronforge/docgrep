@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from docgrep.api.container import Services, create_container
 from docgrep.api.http import create_app
 from docgrep.api.sync_task import SyncTask
+from docgrep.domain.sync import SyncStatus
 from docgrep.usecases.sync_index import SyncIndex
 from resume_support import close
 from roots_support import settings
@@ -38,6 +39,9 @@ class StubSync:
 
     def publish(self, *, running: bool = True) -> None:
         self.published.append(running)
+
+    def status(self) -> SyncStatus:
+        return SyncStatus(enabled=True, running=True)
 
 
 def _services(sync: Any) -> Services:
@@ -132,17 +136,19 @@ def test_shutdown_during_an_applied_run_finishes_the_current_source(
     rig.clock.advance(120)
 
     in_run, release = threading.Event(), threading.Event()
-    calls: list[float] = []
+    update: Any = services.update
+    embed = update.embedder.embed
+    calls: list[int] = []
 
-    def at_first_source(seconds: float) -> None:
-        # The first pause is before any source; the second is at the start
-        # of the first one, which is then in progress when the stop comes.
-        calls.append(seconds)
-        if len(calls) == 2:
+    def embed_first_source_slowly(texts: Any) -> Any:
+        # The first source is being embedded when the server is asked to stop.
+        calls.append(len(texts))
+        if len(calls) == 1:
             in_run.set()
             assert release.wait(timeout=10)
+        return embed(texts)
 
-    sync.sleep = at_first_source
+    update.embedder.embed = embed_first_source_slowly
 
     async def run() -> Any:
         task = SyncTask(lambda: replace(services, sync=sync), interval=3600)
