@@ -161,6 +161,25 @@ class PathScanner(Protocol):
         ...
 
 
+class SyncCorpus(Protocol):
+    """The corpus as automatic sync reads it: one root at a time, so that a
+    root that is gone pauses itself alone (ADR-0029)."""
+
+    def root_readable(self, name: str) -> bool:
+        """Whether the root's folder exists and can be listed."""
+        ...
+
+    def scan_root(self, name: str) -> tuple[ScannedFile, ...]:
+        """Every file of one root from directory entries alone, as
+        ``CorpusReader.scan`` reports them. Raises ``ValidationError`` when the
+        root cannot be read."""
+        ...
+
+    def describe(self, path: str) -> Source:
+        """The source record of one file, as ``CorpusReader.describe``."""
+        ...
+
+
 class FolderReader(Protocol):
     """The files of a folder compared with a root, such as a backup copy.
 
