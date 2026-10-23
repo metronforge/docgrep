@@ -216,7 +216,7 @@ class InspectStatus:
                 latest.carried_sources,
                 latest.kind,
             )
-            if latest.kind == "update" and run_view.state in (
+            if latest.kind in ("update", "sync") and run_view.state in (
                 "aborted",
                 "cancelled",
                 "interrupted",
@@ -548,7 +548,7 @@ class InspectStatus:
         )
         return ActiveOperation(
             kind=run.kind
-            if run.kind in ("update", "ocr", REENCODE_SPARSE)
+            if run.kind in ("update", "sync", "ocr", REENCODE_SPARSE)
             else ("resume" if run.resumed_from else "build"),
             run_id=run.run_id,
             started_at=run.started_at,

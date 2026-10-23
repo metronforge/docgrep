@@ -870,7 +870,7 @@ def _format_cancel(result: CancelResult) -> tuple[str, int]:
             "reencode-sparse --yes` again to continue from its checkpoint.\n",
             0,
         )
-    if result.outcome == "interrupted" and result.kind == "update":
+    if result.outcome == "interrupted" and result.kind in ("update", "sync"):
         return (
             f"Update run {result.run_id} was interrupted: its process is gone and "
             "nothing holds the index lock. What it applied stays live; run "
@@ -1070,10 +1070,10 @@ def _format_status(report: dict[str, Any]) -> str:
             f"started {run['started_at']}, finished {run['finished_at'] or '-'}"
             + (f", resumed from {run['resumed_from']}" if run["resumed_from"] else "")
         )
-    elif run["kind"] == "update":
+    elif run["kind"] in ("update", "sync"):
         totals = run["totals"]
         lines.append(
-            f"Latest run: {run['run_id']} (update) {run['state']}, started "
+            f"Latest run: {run['run_id']} ({run['kind']}) {run['state']}, started "
             f"{run['started_at']}, finished {run['finished_at'] or '-'}, "
             + ", ".join(
                 f"{totals.get(key, 0)} {key}"

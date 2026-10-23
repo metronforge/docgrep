@@ -132,6 +132,7 @@ def latest_root_prefixes(manifest: ManifestReader) -> frozenset[str]:
         for run in (
             manifest.latest_run_of_kind("build"),
             manifest.latest_run_of_kind("update"),
+            manifest.latest_run_of_kind("sync"),
         )
         if run is not None
     ]

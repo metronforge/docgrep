@@ -1,7 +1,7 @@
 """Local corpus enumeration and content hashing."""
 
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from pathlib import Path
 
 from blake3 import blake3
@@ -268,6 +268,67 @@ def scan_corpus(
             )
         )
     return tuple(sorted(scanned, key=lambda item: item.path))
+
+
+def scan_paths(
+    corpus_root: CorpusRoots | Path,
+    paths: Collection[str],
+    include_globs: Sequence[str] = ("**/*",),
+    exclude_globs: Sequence[str] = (),
+    data_dir: Path | None = None,
+) -> tuple[ScannedFile, ...]:
+    """The entries ``scan_corpus`` would give for these stored paths, without
+    walking any root: one stat per path.
+
+    A path whose file is gone, is not a regular file, is a symlink, lies in a
+    ``.git`` or data directory, or whose root is not configured is left out.
+    A configured root that cannot be read raises, as a walk would, so that
+    its files are never taken for deleted ones.
+    """
+    roots = as_roots(corpus_root)
+    readable: set[str] = set()
+    scanned = []
+    for stored in sorted(set(paths)):
+        root = roots.owner(stored)
+        if root is None:
+            continue
+        if root.name not in readable:
+            try:
+                _require_readable_root(root.path)
+            except OSError as error:
+                raise _inaccessible(root.path, error, root) from error
+            readable.add(root.name)
+        relative = root.relative_path(stored)
+        path = root.path / relative
+        skipped = _skipped_data_dir(root.path, data_dir)
+        if ".git" in relative.split("/") or (
+            skipped is not None and skipped in path.resolve().parents
+        ):
+            continue
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise _inaccessible(root.path, error, root) from error
+        if not _matches(relative, include_globs):
+            excluded_by: str | None = NOT_MATCHED_BY_INCLUDES
+        else:
+            excluded_by = _matching_pattern(relative, exclude_globs)
+        extension = path.suffix.lower()
+        scanned.append(
+            ScannedFile(
+                path=stored,
+                size=stat.st_size,
+                extension=extension,
+                file_type=_FILE_TYPES.get(extension),
+                excluded_by=excluded_by,
+                mtime=stat.st_mtime,
+            )
+        )
+    return tuple(scanned)
 
 
 def source_file(roots: CorpusRoots, path: str) -> tuple[Path, Path]:

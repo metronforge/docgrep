@@ -16,6 +16,7 @@ from docgrep.adapters.corpus import (
     require_available,
     root_readable,
     scan_corpus,
+    scan_paths,
 )
 from docgrep.adapters.filelock import FileIndexLock
 from docgrep.adapters.manifest import SQLiteManifest, SQLiteOcrRegistry
@@ -176,6 +177,15 @@ class _CorpusEnumerator:
     def scan(self) -> tuple[ScannedFile, ...]:
         return scan_corpus(
             self._roots,
+            self._settings.include_globs,
+            self._settings.exclude_globs,
+            self._settings.data_dir,
+        )
+
+    def scan_paths(self, paths: Collection[str]) -> tuple[ScannedFile, ...]:
+        return scan_paths(
+            self._roots,
+            paths,
             self._settings.include_globs,
             self._settings.exclude_globs,
             self._settings.data_dir,
