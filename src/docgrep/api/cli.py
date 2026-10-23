@@ -1437,6 +1437,8 @@ def _preview_json(preview: UpdatePreview, *, paths: bool) -> dict[str, Any]:
                 "recorded": root.recorded,
                 "guard_threshold": root.threshold,
                 "guarded": root.name in guarded,
+                "unpaired_removals": root.unpaired_removals,
+                "paired_removals": root.paired_removals,
                 **_plan_counts(root.plan),
                 "paths": _preview_paths(root) if paths else None,
             }
@@ -1453,6 +1455,7 @@ def _preview_json(preview: UpdatePreview, *, paths: bool) -> dict[str, Any]:
                 "recorded": g.recorded,
                 "threshold": g.threshold,
                 "reason": g.reason,
+                **({"paired": g.paired} if g.paired else {}),
             }
             for g in preview.guarded
         ],
@@ -1482,6 +1485,12 @@ def _format_preview(preview: UpdatePreview, *, paths: bool) -> str:
     lines = [f"Update plan. {PLAN_NOTE}\n"]
     for root in preview.roots:
         lines.append(_plan_line(f"Root {root.name}", root.plan))
+        if root.paired_removals and root.name in {g.root for g in preview.guarded}:
+            lines.append(
+                f"  Removals: {root.unpaired_removals} unpaired (counted by the "
+                f"removal guard), {root.paired_removals} paired with an added "
+                "file (not counted).\n"
+            )
         if not paths:
             continue
         groups: tuple[tuple[str, Sequence[str]], ...] = (
@@ -1513,6 +1522,7 @@ def _format_preview(preview: UpdatePreview, *, paths: bool) -> str:
             if g.reason == "empties_root"
             else f"{g.removals} of {g.recorded} sources (at most {g.threshold} allowed)"
         )
+        + (f" (not counted: {g.paired} paired with an added file)" if g.paired else "")
         + "; `docgrep update` would stop without changing anything unless run "
         "with --yes.\n"
         for g in preview.guarded

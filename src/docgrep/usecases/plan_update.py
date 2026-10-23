@@ -165,6 +165,10 @@ class DetectedChanges:
     outside_run: tuple[tuple[str, int], ...] = ()
     # The root of each recorded source of the run, by stored path.
     source_roots: Mapping[str, str] = field(default_factory=dict)
+    # The stored paths of the removed sources that pair with an added file of
+    # the same content and size (``pair_moves``), whether or not their
+    # passages are reused: they lose no content.
+    paired: frozenset[str] = frozenset()
 
     @property
     def moves(self) -> tuple[Move, ...]:
@@ -176,15 +180,31 @@ class DetectedChanges:
         )
 
     def removals(self) -> dict[str, int]:
-        """The planned removals of each root of the run, moves included."""
+        """The planned removals of each root of the run that lose content:
+        the unpaired ones. A removed source that pairs with an added file of
+        the same content and size (a move) loses nothing and is counted by
+        ``paired_removals`` instead (ADR-0029)."""
         counts = dict.fromkeys(self.roots, 0)
         for change in self.changes:
-            if change.kind in ("removed", "moved"):
+            if change.kind == "removed" and change.source.path not in self.paired:
+                counts[change.root] = counts.get(change.root, 0) + 1
+        return counts
+
+    def paired_removals(self) -> dict[str, int]:
+        """The planned removals of each root of the run that pair with an
+        added file, moves included."""
+        counts = dict.fromkeys(self.roots, 0)
+        for change in self.changes:
+            if change.kind == "moved" or (
+                change.kind == "removed" and change.source.path in self.paired
+            ):
                 counts[change.root] = counts.get(change.root, 0) + 1
         return counts
 
     def guarded(self, guard: RemovalGuard) -> tuple[GuardedRoot, ...]:
-        return guarded_roots(self.removals(), self.recorded, guard)
+        return guarded_roots(
+            self.removals(), self.recorded, guard, self.paired_removals()
+        )
 
     def plan(self, root: str | None = None) -> UpdatePlan:
         """The counts of one root, or of the whole run."""
@@ -229,6 +249,10 @@ class RootPreview:
     refreshed: tuple[str, ...]
     moved: tuple[Move, ...]
     copied: tuple[Copy, ...] = ()
+    # The removals the guard counts, and those it does not because they pair
+    # with an added file of the same content (moves included).
+    unpaired_removals: int = 0
+    paired_removals: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +283,7 @@ class UpdatePreview:
                 if c.kind == kind and c.root == root and c.reuse is not None
             )
 
+        unpaired, paired = detected.removals(), detected.paired_removals()
         roots = tuple(
             RootPreview(
                 name=name,
@@ -278,6 +303,8 @@ class UpdatePreview:
                 ),
                 moved=tuple(Move(*pair) for pair in reused("moved", name)),
                 copied=tuple(Copy(*pair) for pair in reused("copied", name)),
+                unpaired_removals=unpaired.get(name, 0),
+                paired_removals=paired.get(name, 0),
             )
             for name in detected.roots
         )
@@ -470,6 +497,13 @@ class PlanUpdate:
                 unchanged[name] += 1
         for path in sorted(set(recorded) - seen):
             change("removed", recorded[path].source, recorded[path], root_of[path])
+        paired = frozenset(
+            move.removed
+            for move in pair_moves(
+                (c.source for c in found["removed"]),
+                (c.source for c in found["added"]),
+            )
+        )
         if self.reuse_by_hash:
             self._plan_reuse(found, committed)
         changes = tuple(
@@ -485,6 +519,7 @@ class PlanUpdate:
             unchanged=unchanged,
             outside_run=tuple(sorted(outside.items())),
             source_roots=root_of,
+            paired=paired,
         )
 
     def _index_model(self) -> str | None:

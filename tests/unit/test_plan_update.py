@@ -438,3 +438,65 @@ def test_removing_one_of_two_sources_is_allowed() -> None:
 
     assert harness.planner().run().guarded == ()
     assert harness.update().run().removed == 1
+
+
+def _move_all(harness: Harness, count: int) -> None:
+    for index in range(count):
+        harness.corpus.files[f"moved/doc{index:02d}.txt"] = harness.corpus.files.pop(
+            f"doc{index:02d}.txt"
+        )
+
+
+@pytest.mark.parametrize("reuse", [True, False])
+def test_moving_every_source_of_a_root_passes_the_guard(reuse: bool) -> None:
+    harness = Harness(_files(40))
+    harness.build()
+    _move_all(harness, 40)
+
+    preview = harness.planner(reuse_by_hash=reuse).run()
+
+    # Whether or not the passages are reused, nothing is lost.
+    assert preview.guarded == ()
+    assert preview.roots[0].paired_removals == 40
+    assert preview.roots[0].unpaired_removals == 0
+    summary = harness.update(reuse_by_hash=reuse).run()
+    assert summary.failed == 0
+    assert {r.source.path for r in harness.manifest.committed_sources()} == {
+        f"moved/doc{i:02d}.txt" for i in range(40)
+    }
+
+
+def test_deleting_as_many_sources_without_copies_still_trips_the_guard() -> None:
+    harness = _guarded_harness(40, 40)
+
+    with pytest.raises(RemovalGuardTripped) as refused:
+        harness.update().run()
+
+    assert "paired" not in refused.value.details["roots"][0]
+
+
+def test_the_guard_counts_only_the_unpaired_part_of_a_mix() -> None:
+    harness = Harness(_files(60))
+    harness.build()
+    # Threshold of 60 sources: 3. Two moved, four deleted.
+    _move_all(harness, 2)
+    for index in range(2, 6):
+        del harness.corpus.files[f"doc{index:02d}.txt"]
+
+    with pytest.raises(RemovalGuardTripped) as refused:
+        harness.update().run()
+
+    [root] = refused.value.details["roots"]
+    assert (root["removals"], root["paired"], root["reason"]) == (4, 2, "threshold")
+    assert "4 of 60" in str(refused.value) and "2 paired" in str(refused.value)
+
+
+def test_a_mix_within_the_threshold_proceeds() -> None:
+    harness = Harness(_files(60))
+    harness.build()
+    _move_all(harness, 10)
+    del harness.corpus.files["doc20.txt"]
+
+    assert harness.planner(reuse_by_hash=True).run().guarded == ()
+    summary = harness.update(reuse_by_hash=True).run()
+    assert (summary.moved, summary.removed) == (10, 1)

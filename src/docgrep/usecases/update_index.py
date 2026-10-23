@@ -748,10 +748,13 @@ class UpdateIndex(SourceIndexing):
 
 def _guard_message(guarded: Sequence[GuardedRoot]) -> str:
     roots = "; ".join(
-        f"root {g.root!r} would lose all its {g.recorded} sources"
-        if g.reason == "empties_root"
-        else f"root {g.root!r} would lose {g.removals} of {g.recorded} sources "
-        f"(at most {g.threshold} allowed)"
+        (
+            f"root {g.root!r} would lose all its {g.recorded} sources"
+            if g.reason == "empties_root"
+            else f"root {g.root!r} would lose {g.removals} of {g.recorded} sources "
+            f"(at most {g.threshold} allowed)"
+        )
+        + _paired_note(g)
         for g in guarded
     )
     return (
@@ -759,6 +762,12 @@ def _guard_message(guarded: Sequence[GuardedRoot]) -> str:
         "is mounted, complete and the right one; run `docgrep update --yes` to "
         "apply the removals anyway"
     )
+
+
+def _paired_note(guarded: GuardedRoot) -> str:
+    if not guarded.paired:
+        return ""
+    return f" (not counted: {guarded.paired} paired with an added file)"
 
 
 def _guard_details(guarded: Sequence[GuardedRoot]) -> dict[str, object]:
@@ -770,6 +779,7 @@ def _guard_details(guarded: Sequence[GuardedRoot]) -> dict[str, object]:
                 "recorded": g.recorded,
                 "threshold": g.threshold,
                 "reason": g.reason,
+                **({"paired": g.paired} if g.paired else {}),
             }
             for g in guarded
         ]

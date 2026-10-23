@@ -156,12 +156,16 @@ class GuardedRoot:
     recorded: int
     threshold: int
     reason: GuardReason = "threshold"
+    # Further removals of the root that the guard does not count because each
+    # pairs with an added file of the same content (``pair_moves``).
+    paired: int = 0
 
 
 def guarded_roots(
     removals: Mapping[str, int],
     recorded: Mapping[str, int],
     guard: RemovalGuard,
+    paired: Mapping[str, int] | None = None,
 ) -> tuple[GuardedRoot, ...]:
     """The roots, by name, whose planned removals the guard refuses.
 
@@ -170,10 +174,13 @@ def guarded_roots(
     point without its disk, passes the check that a root can be read), or
     else when they exceed the threshold (``threshold``).
 
-    ``removals`` counts the planned removals of each root of the run (moved
-    sources and sources no longer matched by the patterns included) and
-    ``recorded`` the sources the index records for it. Empty: the update may
-    proceed.
+    ``removals`` counts the planned removals of each root of the run that
+    lose content: sources no longer matched by the patterns included, moved
+    sources not, because a removed source that pairs with an added file of
+    the same content and size loses nothing (``pair_moves``); a root whose
+    sources all moved elsewhere is not emptied. ``recorded`` is the sources
+    the index records for the root and ``paired`` the paired removals, which
+    are only reported. Empty: the update may proceed.
     """
     found = []
     for root in sorted(removals):
@@ -181,7 +188,12 @@ def guarded_roots(
         total = recorded.get(root, 0)
         limit = guard.threshold(total)
         if count > 0 and count == total:
-            found.append(GuardedRoot(root, count, total, limit, "empties_root"))
+            reason: GuardReason = "empties_root"
         elif count > limit:
-            found.append(GuardedRoot(root, count, total, limit))
+            reason = "threshold"
+        else:
+            continue
+        found.append(
+            GuardedRoot(root, count, total, limit, reason, (paired or {}).get(root, 0))
+        )
     return tuple(found)
